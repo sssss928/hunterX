@@ -1,4 +1,4 @@
-# Contributing To Hunter
+# Contributing To HunterX
 
 Thanks for helping maintain Hunter. This repository is a fork of `bouob/tickets_hunter`, but contributions here should target the Hunter codebase, CI, packaging, documentation, tests, and safety posture.
 
@@ -22,9 +22,9 @@ Not accepted:
 ## Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/hunter.git
-cd hunter
-git remote add upstream https://github.com/sssss928/hunter.git
+git clone https://github.com/YOUR_USERNAME/hunterX.git
+cd hunterX
+git remote add upstream https://github.com/sssss928/hunterX.git
 python -m pip install --upgrade pip
 pip install -r requirement.txt -r requirements-dev.txt
 ```
@@ -74,7 +74,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Version 0.1.
 
 ## Pull Requests
 
-Open pull requests against `main` in [`sssss928/hunter`](https://github.com/sssss928/hunter). Include:
+Open pull requests against `main` in [`sssss928/hunterX`](https://github.com/sssss928/hunterX). Include:
 
 - what changed
 - why it changed
