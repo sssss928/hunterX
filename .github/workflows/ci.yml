@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature
+      - feature/**
+      - fix
+      - fix/**
+      - chore
+      - chore/**
+      - refactor
+      - refactor/**
+      - docs
+      - docs/**
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test, lint, audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+          cache: pip
+          cache-dependency-path: |
+            requirement.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirement.txt -r requirements-dev.txt
+
+      - name: Compile source
+        run: python -m compileall src
+
+      - name: Ruff
+        run: ruff check src tests scripts
+
+      - name: Mypy
+        run: mypy
+
+      - name: Pytest with coverage
+        run: pytest
+
+      - name: Dependency audit
+        run: pip-audit -r requirement.txt
+
+      - name: Bandit high severity scan
+        run: bandit -r src scripts -lll -c pyproject.toml
+
+      - name: Benchmarks
+        run: |
+          pytest tests/benchmarks --benchmark-enable --benchmark-only --benchmark-json=benchmark.json
+          python scripts/render_benchmark_chart.py --input benchmark.json --output benchmark-summary.md
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: error
+
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: |
+            benchmark.json
+            benchmark-summary.md
+          if-no-files-found: error
+
+  windows-build-smoke:
+    name: Windows PyInstaller smoke
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+          cache: pip
+          cache-dependency-path: |
+            requirement.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirement.txt -r requirements-dev.txt
+
+      - name: Build Windows package
+        shell: pwsh
+        run: ./scripts/build_windows.ps1 -Version 0.1.0
+
+      - name: Upload build smoke artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-smoke
+          path: dist/release/hunter_windows_0.1.0.zip
+          if-no-files-found: error
