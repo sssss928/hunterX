@@ -33,11 +33,11 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
 
 $ArtifactName = (& python scripts/release_utils.py artifact-name --version $Version).Trim()
-$PackageDir = Join-Path $ProjectRoot "dist\hunter"
+$PackageDir = Join-Path $ProjectRoot "dist\hunterX"
 $ReleaseDir = Join-Path $ProjectRoot "dist\release"
 $ArtifactPath = Join-Path $ReleaseDir $ArtifactName
 
-Write-Host "Building Hunter $Version"
+Write-Host "Building HunterX $Version"
 Write-Host "Artifact: $ArtifactPath"
 
 python -m PyInstaller build_scripts/nodriver_tixcraft.spec --clean --noconfirm
