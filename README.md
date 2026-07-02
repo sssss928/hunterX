@@ -1,15 +1,15 @@
-# Hunter
+# HunterX
 
-[![CI](https://github.com/sssss928/hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/sssss928/hunter/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/v/release/sssss928/hunter?style=flat-square)](https://github.com/sssss928/hunter/releases)
+[![CI](https://github.com/sssss928/hunterXX/actions/workflows/ci.yml/badge.svg)](https://github.com/sssss928/hunterXX/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/sssss928/hunterX?style=flat-square)](https://github.com/sssss928/hunterXX/releases)
 
 Hunter is a maintained fork of [`bouob/tickets_hunter`](https://github.com/bouob/tickets_hunter). This repository keeps the inherited Python ticket automation codebase buildable, testable, and releasable under the Hunter project identity.
 
 ## Fork Notice
 
-This repository is not the upstream Tickets Hunter project. It is a Hunter fork maintained at [`sssss928/hunter`](https://github.com/sssss928/hunter). Upstream credit remains with the original Tickets Hunter maintainers and contributors. Hunter uses its own versioning, release assets, issue tracker, CI, and documentation.
+This repository is not the upstream Tickets Hunter project. It is a Hunter fork maintained at [`sssss928/hunterX`](https://github.com/sssss928/hunterXX). Upstream credit remains with the original Tickets Hunter maintainers and contributors. Hunter uses its own versioning, release assets, issue tracker, CI, and documentation.
 
-Current fork version: `Hunter (0.1.0)`
+Current fork version: `HunterX (0.1.0)`
 
 ## Legal And Ethical Use
 
@@ -72,19 +72,19 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Version 0.1.
 Expected output:
 
 ```text
-dist/release/hunter_windows_0.1.0.zip
+dist/release/hunterX_windows_0.1.0.zip
 ```
 
 ## GitHub Releases
 
 Users can download packaged Windows builds from:
 
-[`https://github.com/sssss928/hunter/releases`](https://github.com/sssss928/hunter/releases)
+[`https://github.com/sssss928/hunterXX/releases`](https://github.com/sssss928/hunterXX/releases)
 
 For `v0.1.0`, the expected asset is:
 
 ```text
-hunter_windows_0.1.0.zip
+hunterX_windows_0.1.0.zip
 ```
 
 Extract the ZIP on a Windows computer and run `settings.exe` to configure the application.
@@ -113,7 +113,7 @@ guide/               Inherited user guides
 
 Use the Hunter issue tracker:
 
-[`https://github.com/sssss928/hunter/issues`](https://github.com/sssss928/hunter/issues)
+[`https://github.com/sssss928/hunterXX/issues`](https://github.com/sssss928/hunterXX/issues)
 
 Do not include secrets, cookies, tokens, personal data, payment details, screenshots containing private account data, or platform session identifiers in public issues.
 
