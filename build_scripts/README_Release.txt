@@ -19,7 +19,7 @@
 ================================================================================
 
 1. 解壓縮 ZIP 檔案
-   將 hunter_windows_0.1.0.zip 解壓縮到任意目錄。
+   將 hunterX_windows_0.1.0.zip 解壓縮到任意目錄。
 
 2. 執行 settings.exe
    雙擊 settings.exe，會自動開啟瀏覽器顯示設定介面。
@@ -110,9 +110,9 @@ Step 4: 監控執行
 【需要更詳細的教學？】
   本文件為快速參考手冊，更詳細的圖文教學請參閱：
   👉 安裝與首次執行指南
-     https://github.com/sssss928/hunter/blob/main/guide/installation.md
+     https://github.com/sssss928/hunterX/blob/main/guide/installation.md
   👉 基本設定教學
-     https://github.com/sssss928/hunter/blob/main/guide/basic-settings.md
+     https://github.com/sssss928/hunterX/blob/main/guide/basic-settings.md
 
 ================================================================================
                           常見問題 FAQ
@@ -176,26 +176,26 @@ A9: settings.exe 需要開啟網頁伺服器，搶票引擎需要網路連線。
 ================================================================================
 
 GitHub Repository:
-  https://github.com/sssss928/hunter
+  https://github.com/sssss928/hunterX
 
 Issue Tracker:
-  https://github.com/sssss928/hunter/issues
+  https://github.com/sssss928/hunterXX/issues
 
 📚 線上完整文件與教學:
   - 安裝與首次執行指南（詳細圖文教學）
-    https://github.com/sssss928/hunter/blob/main/guide/installation.md
+    https://github.com/sssss928/hunterX/blob/main/guide/installation.md
 
   - 基本設定教學（網址、票數、關鍵字設定）
-    https://github.com/sssss928/hunter/blob/main/guide/basic-settings.md
+    https://github.com/sssss928/hunterX/blob/main/guide/basic-settings.md
 
   - 關鍵字與回退機制（理解搶票邏輯）
-    https://github.com/sssss928/hunter/blob/main/guide/keyword-mechanism.md
+    https://github.com/sssss928/hunterX/blob/main/guide/keyword-mechanism.md
 
   - 詳細設定說明（settings.json 完整欄位參考）
-    https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md
+    https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md
 
   - 使用者手冊總覽
-    https://github.com/sssss928/hunter/blob/main/guide/README.md
+    https://github.com/sssss928/hunterX/blob/main/guide/README.md
 
 ================================================================================
                           支援專案開發
