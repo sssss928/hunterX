@@ -1,4 +1,4 @@
-# 🚀 Hunter 打包快速開始
+# 🚀 HunterX 打包快速開始
 
 ---
 
@@ -33,7 +33,7 @@ build_scripts\build_and_test.bat
 - 測試結果保存至 `.temp/test_output.txt`
 
 ✅ **發布 ZIP 生成**
-- 自動打包成 `dist/release/hunter_windows_{VERSION}.zip`
+- 自動打包成 `dist/release/hunterX_windows_{VERSION}.zip`
 - 版本號自動從 Git tag 讀取
 
 ### 輸出檔案
