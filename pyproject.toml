@@ -1,0 +1,72 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+  "build",
+  "dist",
+  ".venv",
+  "venv",
+]
+
+[tool.ruff.lint]
+# The inherited source tree has substantial style debt. Keep the first gate
+# focused on syntax-level failures, undefined names, and bare except handlers.
+select = ["E9", "F63", "F7", "F82", "E722"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+  "-ra",
+  "--strict-config",
+  "--strict-markers",
+  "--cov=src",
+  "--cov-report=term-missing",
+  "--cov-report=xml:coverage.xml",
+  "--benchmark-disable",
+]
+markers = [
+  "benchmark: local benchmark coverage for pure functions",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+branch = true
+source = ["src", "scripts"]
+omit = [
+  "tests/*",
+  "src/assets/*",
+  "src/www/*",
+]
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = true
+
+[tool.mypy]
+python_version = "3.11"
+files = [
+  "src/platforms/common_async.py",
+  "src/platforms/facebook.py",
+  "scripts",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
+warn_unused_configs = true
+strict = true
+exclude = [
+  "build/",
+  "dist/",
+]
+
+[tool.bandit]
+exclude_dirs = [
+  "build",
+  "dist",
+  ".venv",
+  "venv",
+  "tests",
+]
+skips = [
+  "B101",
+]
