@@ -14,12 +14,12 @@ def read_text(path: str) -> str:
 
 
 def test_release_url_points_to_hunter() -> None:
-    assert RELEASE_URL == "https://github.com/sssss928/hunter/releases"
+    assert RELEASE_URL == "https://github.com/sssss928/hunterX/releases"
     assert "github.com/bouob/tickets_hunter/releases" not in read_text("src/settings.py")
 
 
 def test_app_version_uses_hunter_semver_display() -> None:
-    assert re.fullmatch(r"Hunter \(\d+\.\d+\.\d+\)", APP_DISPLAY_VERSION)
+    assert re.fullmatch(r"HunterX \(\d+\.\d+\.\d+\)", APP_DISPLAY_VERSION)
 
 
 def test_codeowners_no_longer_points_to_upstream_maintainer() -> None:
@@ -31,7 +31,7 @@ def test_codeowners_no_longer_points_to_upstream_maintainer() -> None:
 def test_readme_has_fork_notice() -> None:
     readme = read_text("README.md")
     assert "Fork Notice" in readme
-    assert "sssss928/hunter" in readme
+    assert "sssss928/hunterX" in readme
     assert "bouob/tickets_hunter" in readme
 
 
