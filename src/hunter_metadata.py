@@ -1,4 +1,4 @@
-"""Project metadata for the Hunter fork."""
+"""Project metadata for the HunterX fork."""
 
 APP_NAME = "HunterX"
 APP_VERSION = "0.1.0"
