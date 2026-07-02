@@ -115,5 +115,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-build-smoke
-          path: dist/release/hunter_windows_0.1.0.zip
+          path: dist/release/hunterX_windows_0.1.0.zip
           if-no-files-found: error
