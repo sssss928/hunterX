@@ -1,0 +1,114 @@
+# =========================
+# IDE files
+# =========================
+/.vscode/
+/.idea/
+
+# =========================
+# Python virtual environment
+# =========================
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# Python cache
+# =========================
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# =========================
+# PyInstaller build output
+# =========================
+/build/
+/dist/
+*.spec.bak
+
+# =========================
+# Local config / sensitive files
+# =========================
+settings.json
+config.json
+/src/settings.json
+/src/MAXBOT_LAST_URL.txt
+/src/MAXBOT_INT28_IDLE.txt
+/src/MAXBOT_QUESTION.txt
+src/webdriver/*/data/settings.json
+src/webdriver/*/data/status.json
+
+# =========================
+# Browser profile / user data
+# =========================
+chrome_profile/
+user_data/
+
+# =========================
+# WebDriver executables
+# =========================
+/src/webdriver/*.exe
+/src/webdriver/chromedriver*
+/src/webdriver/geckodriver*
+/src/webdriver/msedgedriver*
+
+# =========================
+# Chrome for Testing auto-downloaded files
+# =========================
+/src/webdriver/chrome-win64/
+/src/webdriver/chrome-linux64/
+/src/webdriver/chrome-mac-*/
+
+# =========================
+# Logs and temp files
+# =========================
+*.log
+*.tmp
+.temp/
+.history/
+logs.txt
+tmp/
+
+# =========================
+# Environment files
+# =========================
+.env
+.env.*
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Private documentation / local AI tool files
+# =========================
+.claude/
+CLAUDE.md
+.specify/
+specs/
+.mcp.json
+.spectra/
+openspec/.vector-search.db*
+tmpclaude-*-cwd
+
+# =========================
+# Captcha trainer private data
+# =========================
+tools/captcha_trainer/OCRimages/
+tools/captcha_trainer/projects/
+tools/captcha_trainer/temp/
+tools/captcha_trainer/.venv/
+tools/captcha_trainer/build/
+tools/captcha_trainer/dist/
