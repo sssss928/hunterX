@@ -37,7 +37,7 @@ def test_readme_has_fork_notice() -> None:
 
 def test_contributing_targets_hunter_not_upstream_clone() -> None:
     contributing = read_text("CONTRIBUTING.md")
-    assert "git clone https://github.com/YOUR_USERNAME/hunter.git" in contributing
+    assert "git clone https://github.com/YOUR_USERNAME/hunterX.git" in contributing
     assert "YOUR_USERNAME/tickets_hunter" not in contributing
     assert "git remote add upstream https://github.com/bouob/tickets_hunter.git" not in contributing
 
