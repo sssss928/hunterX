@@ -14,7 +14,7 @@ def test_release_workflow_has_required_triggers_permissions_and_artifact() -> No
     assert "workflow_dispatch:" in workflow
     assert "contents: read" in workflow
     assert "contents: write" in workflow
-    assert "Hunter v${{ needs.validate.outputs.version }}" in workflow
+    assert "HunterX v${{ needs.validate.outputs.version }}" in workflow
     assert "artifact-name" in workflow
 
 
