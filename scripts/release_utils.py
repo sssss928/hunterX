@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 
-PROJECT_NAME = "Hunter"
+PROJECT_NAME = "HunterX"
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 
@@ -46,7 +46,7 @@ def artifact_name(version: str, platform: str = "windows") -> str:
     platform_slug = platform.strip().lower()
     if not re.fullmatch(r"[a-z0-9_]+", platform_slug):
         raise ValueError(f"Invalid platform slug: {platform!r}")
-    return f"hunter_{platform_slug}_{normalized}.zip"
+    return f"hunterX_{platform_slug}_{normalized}.zip"
 
 
 def extract_changelog(version: str, changelog_path: Path) -> str:
