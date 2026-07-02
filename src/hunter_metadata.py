@@ -1,0 +1,11 @@
+"""Project metadata for the Hunter fork."""
+
+APP_NAME = "Hunter"
+APP_VERSION = "0.1.0"
+APP_DISPLAY_VERSION = f"{APP_NAME} ({APP_VERSION})"
+REPOSITORY = "sssss928/hunter"
+REPOSITORY_URL = f"https://github.com/{REPOSITORY}"
+RELEASE_URL = f"{REPOSITORY_URL}/releases"
+ISSUES_URL = f"{REPOSITORY_URL}/issues"
+UPSTREAM_REPOSITORY = "bouob/tickets_hunter"
+UPSTREAM_REPOSITORY_URL = f"https://github.com/{UPSTREAM_REPOSITORY}"
