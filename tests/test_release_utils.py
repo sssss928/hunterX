@@ -27,7 +27,7 @@ def test_manual_dispatch_rejects_leading_v() -> None:
 
 
 def test_artifact_name_is_safe() -> None:
-    assert release_utils.artifact_name("0.1.0") == "hunter_windows_0.1.0.zip"
+    assert release_utils.artifact_name("0.1.0") == "hunterX_windows_0.1.0.zip"
     assert " " not in release_utils.artifact_name("0.1.0")
     assert "-" not in release_utils.artifact_name("0.1.0")
 
@@ -44,4 +44,4 @@ def test_changelog_notes_extract_matching_section(tmp_path: Path) -> None:
 
 def test_changelog_notes_fallback_does_not_fail(tmp_path: Path) -> None:
     notes = release_utils.extract_changelog("0.1.0", tmp_path / "missing.md")
-    assert "Hunter v0.1.0" in notes
+    assert "HunterX v0.1.0" in notes
