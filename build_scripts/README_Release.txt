@@ -179,7 +179,7 @@ GitHub Repository:
   https://github.com/sssss928/hunterX
 
 Issue Tracker:
-  https://github.com/sssss928/hunterXX/issues
+  https://github.com/sssss928/hunterX/issues
 
 📚 線上完整文件與教學:
   - 安裝與首次執行指南（詳細圖文教學）

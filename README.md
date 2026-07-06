@@ -1,13 +1,13 @@
 # HunterX
 
-[![CI](https://github.com/sssss928/hunterXX/actions/workflows/ci.yml/badge.svg)](https://github.com/sssss928/hunterXX/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/v/release/sssss928/hunterX?style=flat-square)](https://github.com/sssss928/hunterXX/releases)
+[![CI](https://github.com/sssss928/hunterX/actions/workflows/ci.yml/badge.svg)](https://github.com/sssss928/hunterX/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/sssss928/hunterX?style=flat-square)](https://github.com/sssss928/hunterX/releases)
 
 Hunter is a maintained fork of [`bouob/tickets_hunter`](https://github.com/bouob/tickets_hunter). This repository keeps the inherited Python ticket automation codebase buildable, testable, and releasable under the Hunter project identity.
 
 ## Fork Notice
 
-This repository is not the upstream Tickets Hunter project. It is a Hunter fork maintained at [`sssss928/hunterX`](https://github.com/sssss928/hunterXX). Upstream credit remains with the original Tickets Hunter maintainers and contributors. Hunter uses its own versioning, release assets, issue tracker, CI, and documentation.
+This repository is not the upstream Tickets Hunter project. It is a HunterX fork maintained at [`sssss928/hunterX`](https://github.com/sssss928/hunterX). Upstream credit remains with the original Tickets Hunter maintainers and contributors. HunterX uses its own versioning, release assets, issue tracker, CI, and documentation.
 
 Current fork version: `HunterX (0.1.0)`
 
@@ -79,7 +79,7 @@ dist/release/hunterX_windows_0.1.0.zip
 
 Users can download packaged Windows builds from:
 
-[`https://github.com/sssss928/hunterXX/releases`](https://github.com/sssss928/hunterXX/releases)
+[`https://github.com/sssss928/hunterX/releases`](https://github.com/sssss928/hunterX/releases)
 
 For `v0.1.0`, the expected asset is:
 
@@ -113,7 +113,7 @@ guide/               Inherited user guides
 
 Use the Hunter issue tracker:
 
-[`https://github.com/sssss928/hunterXX/issues`](https://github.com/sssss928/hunterXX/issues)
+[`https://github.com/sssss928/hunterX/issues`](https://github.com/sssss928/hunterX/issues)
 
 Do not include secrets, cookies, tokens, personal data, payment details, screenshots containing private account data, or platform session identifiers in public issues.
 
