@@ -5,6 +5,8 @@ import base64
 import json
 import os
 import platform
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -51,10 +53,51 @@ CONST_APP_VERSION = APP_DISPLAY_VERSION
 CONST_MAXBOT_ANSWER_ONLINE_FILE = "MAXBOT_ONLINE_ANSWER.txt"
 CONST_MAXBOT_CONFIG_FILE = "settings.json"
 CONST_MAXBOT_INT28_FILE = "MAXBOT_INT28_IDLE.txt"
+CONST_MAXBOT_INT28_QUIT_FILE = "MAXBOT_INT28_QUIT.txt"
 CONST_MAXBOT_LAST_URL_FILE = "MAXBOT_LAST_URL.txt"
 CONST_MAXBOT_QUESTION_FILE = "MAXBOT_QUESTION.txt"
 
 CONST_SERVER_PORT = 16888
+
+# Multi-instance dashboard: bot processes touch this file every few seconds;
+# an instance counts as alive when its mtime is within the threshold.
+CONST_HEARTBEAT_FILE = "heartbeat.txt"
+CONST_HEARTBEAT_ALIVE_SEC = 30
+
+# Multi-instance profiles: each profile is a full settings.json copy stored
+# under profiles/<name>.json; "default" maps to settings.json.
+CONST_PROFILES_DIR = "profiles"
+CONST_DEFAULT_PROFILE = "default"
+CONST_PROFILE_NAME_RE = r'^[A-Za-z0-9_-]{1,32}$'
+
+
+def is_valid_profile_name(profile_name):
+    return bool(re.match(CONST_PROFILE_NAME_RE, profile_name))
+
+
+def get_profile_filepath(profile_name):
+    app_root = util.get_app_root()
+    if not profile_name or profile_name == CONST_DEFAULT_PROFILE:
+        return os.path.join(app_root, CONST_MAXBOT_CONFIG_FILE)
+    return os.path.join(app_root, CONST_PROFILES_DIR, profile_name + ".json")
+
+
+def get_instance_state_filepath(profile_name, filename):
+    app_root = util.get_app_root()
+    if not profile_name or profile_name == CONST_DEFAULT_PROFILE:
+        return os.path.join(app_root, filename)
+    return os.path.join(app_root, "instances", profile_name, filename)
+
+
+def list_profile_names():
+    profiles_dir = os.path.join(util.get_app_root(), CONST_PROFILES_DIR)
+    names = []
+    if os.path.isdir(profiles_dir):
+        for filename in sorted(os.listdir(profiles_dir)):
+            stem, ext = os.path.splitext(filename)
+            if ext == ".json" and is_valid_profile_name(stem):
+                names.append(stem)
+    return [CONST_DEFAULT_PROFILE] + names
 
 CONST_FROM_TOP_TO_BOTTOM = "from top to bottom"
 CONST_FROM_BOTTOM_TO_TOP = "from bottom to top"
@@ -226,9 +269,8 @@ def get_default_config():
 
     return config_dict
 
-def read_last_url_from_file():
-    app_root = util.get_app_root()
-    last_url_filepath = os.path.join(app_root, CONST_MAXBOT_LAST_URL_FILE)
+def read_last_url_from_file(profile_name=""):
+    last_url_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_LAST_URL_FILE)
     text = ""
     if os.path.exists(last_url_filepath):
         try:
@@ -237,6 +279,34 @@ def read_last_url_from_file():
         except Exception as e:
             print(f"[ERROR] Failed to read last_url from {last_url_filepath}: {e}")
     return text
+
+
+def list_instance_ids():
+    ids = list(list_profile_names())
+    instances_dir = os.path.join(util.get_app_root(), "instances")
+    if os.path.isdir(instances_dir):
+        for item in sorted(os.listdir(instances_dir)):
+            if os.path.isdir(os.path.join(instances_dir, item)) and item not in ids:
+                ids.append(item)
+    return ids
+
+
+def get_instance_status(profile_name):
+    heartbeat_filepath = get_instance_state_filepath(profile_name, CONST_HEARTBEAT_FILE)
+    alive = False
+    if os.path.exists(heartbeat_filepath):
+        try:
+            alive = (time.time() - os.path.getmtime(heartbeat_filepath)) < CONST_HEARTBEAT_ALIVE_SEC
+        except Exception:
+            alive = False
+    paused = os.path.exists(get_instance_state_filepath(profile_name, CONST_MAXBOT_INT28_FILE))
+    return {
+        "id": profile_name,
+        "alive": alive,
+        "paused": paused,
+        "last_url": read_last_url_from_file(profile_name),
+    }
+
 
 def migrate_config(config_dict):
     """Migrate old config structure to new structure."""
@@ -292,12 +362,8 @@ def migrate_config(config_dict):
 
     return config_dict
 
-def load_json():
-    app_root = util.get_app_root()
-
-    # overwrite config path.
-    config_filepath = os.path.join(app_root, CONST_MAXBOT_CONFIG_FILE)
-
+def load_json(profile_name=""):
+    config_filepath = get_profile_filepath(profile_name)
     config_dict = None
     if os.path.isfile(config_filepath):
         try:
@@ -328,36 +394,56 @@ def reset_json():
     config_dict = get_default_config()
     return config_filepath, config_dict
 
-def maxbot_idle():
-    app_root = util.get_app_root()
-    idle_filepath = os.path.join(app_root, CONST_MAXBOT_INT28_FILE)
+def maxbot_idle(profile_name=""):
+    idle_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_INT28_FILE)
     try:
+        os.makedirs(os.path.dirname(idle_filepath), exist_ok=True)
         with open(idle_filepath, "w") as text_file:
             text_file.write("")
     except Exception as e:
         print(f"[ERROR] Failed to create idle file: {e}")
 
-def maxbot_resume():
-    app_root = util.get_app_root()
-    idle_filepath = os.path.join(app_root, CONST_MAXBOT_INT28_FILE)
+def maxbot_resume(profile_name=""):
+    idle_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_INT28_FILE)
     for i in range(3):
          util.force_remove_file(idle_filepath)
 
-def launch_maxbot():
+def maxbot_stop(profile_name=""):
+    stop_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_INT28_QUIT_FILE)
+    try:
+        os.makedirs(os.path.dirname(stop_filepath), exist_ok=True)
+        with open(stop_filepath, "w") as text_file:
+            text_file.write("")
+    except Exception as e:
+        print(f"[ERROR] Failed to create stop file: {e}")
+
+
+def launch_maxbot(profile_name="", instance_override=""):
     global launch_counter
     if "launch_counter" in globals():
         launch_counter += 1
     else:
         launch_counter = 0
 
-    config_filepath, config_dict = load_json()
+    effective_instance = instance_override if instance_override else profile_name
+    util.force_remove_file(get_instance_state_filepath(effective_instance, CONST_MAXBOT_INT28_QUIT_FILE))
+    util.force_remove_file(get_instance_state_filepath(effective_instance, CONST_MAXBOT_INT28_FILE))
+
+    config_filepath, config_dict = load_json(profile_name)
 
     script_name = "nodriver_tixcraft"
+
+    input_filepath = ""
+    if profile_name and profile_name != CONST_DEFAULT_PROFILE:
+        input_filepath = config_filepath
 
     window_size = config_dict["advanced"]["window_size"]
     if len(window_size) > 0:
         if "," in window_size:
             size_array = window_size.split(",")
+            if len(size_array) > 2:
+                size_array = size_array[:2]
+                window_size = ",".join(size_array)
             target_width = int(size_array[0])
             target_left = target_width * launch_counter
             #print("target_left:", target_left)
@@ -366,45 +452,42 @@ def launch_maxbot():
             window_size = window_size + "," + str(launch_counter)
             #print("window_size:", window_size)
 
-    threading.Thread(target=util.launch_maxbot, args=(script_name,"","","","",window_size,)).start()
+    threading.Thread(
+        target=util.launch_maxbot,
+        args=(script_name, input_filepath, "", "", "", window_size),
+        kwargs={"instance": instance_override}
+    ).start()
 
 def change_maxbot_status_by_keyword():
-    config_filepath, config_dict = load_json()
-
     system_clock_data = datetime.now()
-    current_time = system_clock_data.strftime('%H:%M:%S')
-    #print('Current Time is:', current_time)
-    #print("idle_keyword", config_dict["advanced"]["idle_keyword"])
-    if len(config_dict["advanced"]["idle_keyword"]) > 0:
-        is_matched =  util.is_text_match_keyword(config_dict["advanced"]["idle_keyword"], current_time)
-        if is_matched:
-            #print("match to idle:", current_time)
-            maxbot_idle()
-    #print("resume_keyword", config_dict["advanced"]["resume_keyword"])
-    if len(config_dict["advanced"]["resume_keyword"]) > 0:
-        is_matched =  util.is_text_match_keyword(config_dict["advanced"]["resume_keyword"], current_time)
-        if is_matched:
-            #print("match to resume:", current_time)
-            maxbot_resume()
-    
-    current_time = system_clock_data.strftime('%S')
-    if len(config_dict["advanced"]["idle_keyword_second"]) > 0:
-        is_matched =  util.is_text_match_keyword(config_dict["advanced"]["idle_keyword_second"], current_time)
-        if is_matched:
-            #print("match to idle:", current_time)
-            maxbot_idle()
-    if len(config_dict["advanced"]["resume_keyword_second"]) > 0:
-        is_matched =  util.is_text_match_keyword(config_dict["advanced"]["resume_keyword_second"], current_time)
-        if is_matched:
-            #print("match to resume:", current_time)
-            maxbot_resume()
+    current_hms = system_clock_data.strftime('%H:%M:%S')
+    current_sec = system_clock_data.strftime('%S')
+
+    for profile_name in list_profile_names():
+        _, config_dict = load_json(profile_name)
+        advanced = config_dict.get("advanced", {})
+
+        if len(advanced.get("idle_keyword", "")) > 0:
+            if util.is_text_match_keyword(advanced["idle_keyword"], current_hms):
+                maxbot_idle(profile_name)
+        if len(advanced.get("resume_keyword", "")) > 0:
+            if util.is_text_match_keyword(advanced["resume_keyword"], current_hms):
+                maxbot_resume(profile_name)
+        if len(advanced.get("idle_keyword_second", "")) > 0:
+            if util.is_text_match_keyword(advanced["idle_keyword_second"], current_sec):
+                maxbot_idle(profile_name)
+        if len(advanced.get("resume_keyword_second", "")) > 0:
+            if util.is_text_match_keyword(advanced["resume_keyword_second"], current_sec):
+                maxbot_resume(profile_name)
 
 def clean_tmp_file():
     app_root = util.get_app_root()
     remove_file_list = [CONST_MAXBOT_LAST_URL_FILE
         ,CONST_MAXBOT_INT28_FILE
+        ,CONST_MAXBOT_INT28_QUIT_FILE
         ,CONST_MAXBOT_ANSWER_ONLINE_FILE
         ,CONST_MAXBOT_QUESTION_FILE
+        ,CONST_HEARTBEAT_FILE
     ]
     for filename in remove_file_list:
          filepath = os.path.join(app_root, filename)
@@ -419,6 +502,18 @@ def clean_tmp_file():
             except Exception as e:
                 print(f"[WARNING] Failed to remove {item}: {e}")
 
+    instances_dir = os.path.join(app_root, "instances")
+    if os.path.isdir(instances_dir):
+        valid_names = set(list_profile_names())
+        for item in os.listdir(instances_dir):
+            item_path = os.path.join(instances_dir, item)
+            if os.path.isdir(item_path) and item not in valid_names:
+                try:
+                    shutil.rmtree(item_path)
+                    print(f"[CLEANUP] Removed orphan instance dir: {item}")
+                except Exception as e:
+                    print(f"[WARNING] Failed to remove orphan instance dir {item}: {e}")
+
 class NoCacheStaticFileHandler(StaticFileHandler):
     """Custom StaticFileHandler that prevents stale settings UI assets."""
     def set_extra_headers(self, path):
@@ -430,9 +525,14 @@ class NoCacheStaticFileHandler(StaticFileHandler):
 
 class QuestionHandler(tornado.web.RequestHandler):
     def get(self):
-        """Read MAXBOT_QUESTION.txt and return its content"""
+        """Read the instance's MAXBOT_QUESTION.txt and return its content"""
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and not is_valid_profile_name(profile_name):
+            self.set_status(400)
+            self.write({"exists": False, "question": "", "error": "invalid profile name"})
+            return
         question_text = ""
-        question_file = os.path.join(SCRIPT_DIR, CONST_MAXBOT_QUESTION_FILE)
+        question_file = get_instance_state_filepath(profile_name, CONST_MAXBOT_QUESTION_FILE)
 
         # Check if file exists
         if os.path.exists(question_file):
@@ -460,33 +560,76 @@ class ShutdownHandler(tornado.web.RequestHandler):
 
 class StatusHandler(tornado.web.RequestHandler):
     def get(self):
-        is_paused = False
-        app_root = util.get_app_root()
-        idle_filepath = os.path.join(app_root, CONST_MAXBOT_INT28_FILE)
-        if os.path.exists(idle_filepath):
-            is_paused = True
-        url = read_last_url_from_file()
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and not is_valid_profile_name(profile_name):
+            self.set_status(400)
+            self.write({"error": "invalid profile name"})
+            return
+        idle_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_INT28_FILE)
+        is_paused = os.path.exists(idle_filepath)
+        url = read_last_url_from_file(profile_name)
         self.write({"status": not is_paused, "last_url": url})
+
+class InstancesHandler(tornado.web.RequestHandler):
+    def get(self):
+        instances = [get_instance_status(name) for name in list_instance_ids()]
+        self.write({"instances": instances})
 
 class PauseHandler(tornado.web.RequestHandler):
     def get(self):
-        maxbot_idle()
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and not is_valid_profile_name(profile_name):
+            self.set_status(400)
+            self.write({"pause": False, "error": "invalid profile name"})
+            return
+        maxbot_idle(profile_name)
         self.write({"pause": True})
 
 class ResumeHandler(tornado.web.RequestHandler):
     def get(self):
-        maxbot_resume()
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and not is_valid_profile_name(profile_name):
+            self.set_status(400)
+            self.write({"resume": False, "error": "invalid profile name"})
+            return
+        maxbot_resume(profile_name)
         self.write({"resume": True})
+
+class StopHandler(tornado.web.RequestHandler):
+    def get(self):
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and not is_valid_profile_name(profile_name):
+            self.set_status(400)
+            self.write({"stop": False, "error": "invalid profile name"})
+            return
+        maxbot_stop(profile_name)
+        self.write({"stop": True})
 
 class RunHandler(tornado.web.RequestHandler):
     def get(self):
-        print('run button pressed.')
-        launch_maxbot()
-        self.write({"run": True})
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and not is_valid_profile_name(profile_name):
+            self.set_status(400)
+            self.write({"run": False, "error": "invalid profile name"})
+            return
+        instance_override = self.get_query_argument("instance", "")
+        if instance_override and not is_valid_profile_name(instance_override):
+            self.set_status(400)
+            self.write({"run": False, "error": "invalid instance name"})
+            return
+        display_name = instance_override or profile_name or CONST_DEFAULT_PROFILE
+        print('run button pressed. profile:', display_name)
+        launch_maxbot(profile_name, instance_override)
+        self.write({"run": True, "profile": display_name})
 
 class LoadJsonHandler(tornado.web.RequestHandler):
     def get(self):
-        config_filepath, config_dict = load_json()
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and not is_valid_profile_name(profile_name):
+            self.set_status(400)
+            self.write({"error": "invalid profile name"})
+            return
+        config_filepath, config_dict = load_json(profile_name)
 
         # Dynamically generate remote_url based on server_port (Issue #156)
         server_port = config_dict.get("advanced", {}).get("server_port", CONST_SERVER_PORT)
@@ -498,6 +641,11 @@ class LoadJsonHandler(tornado.web.RequestHandler):
 
 class ResetJsonHandler(tornado.web.RequestHandler):
     def get(self):
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and profile_name != CONST_DEFAULT_PROFILE:
+            self.set_status(400)
+            self.write({"error": "reset only supports the default profile"})
+            return
         config_filepath, config_dict = reset_json()
         util.save_json(config_dict, config_filepath)
         self.write(config_dict)
@@ -519,9 +667,15 @@ class SaveJsonHandler(tornado.web.RequestHandler):
                 error_code = 1002
                 pass
 
+        profile_name = self.get_query_argument("profile", "")
+        if is_pass_check and profile_name and not is_valid_profile_name(profile_name):
+            is_pass_check = False
+            error_message = "invalid profile name"
+            error_code = 1003
+
         if is_pass_check:
-            app_root = util.get_app_root()
-            config_filepath = os.path.join(app_root, CONST_MAXBOT_CONFIG_FILE)
+            config_filepath = get_profile_filepath(profile_name)
+            os.makedirs(os.path.dirname(config_filepath), exist_ok=True)
             config_dict = _body
 
             if config_dict["kktix"]["max_dwell_time"] > 0:
@@ -545,6 +699,71 @@ class SaveJsonHandler(tornado.web.RequestHandler):
             self.write(dict(error=dict(message=error_message,code=error_code)))
 
         self.finish()
+
+
+class ProfilesHandler(tornado.web.RequestHandler):
+    """Manage instance profiles (full settings.json copies under profiles/)."""
+
+    def get(self):
+        details = []
+        for name in list_profile_names():
+            homepage = ""
+            try:
+                with open(get_profile_filepath(name), encoding='utf-8') as json_data:
+                    homepage = json.load(json_data).get("homepage", "")
+            except Exception:
+                pass
+            details.append({"name": name, "homepage": homepage})
+        self.write({"profiles": [d["name"] for d in details], "details": details})
+
+    def post(self):
+        try:
+            _body = json.loads(self.request.body)
+        except Exception:
+            self.set_status(400)
+            self.write({"success": False, "error": "wrong json format"})
+            return
+
+        profile_name = _body.get("name", "")
+        if not is_valid_profile_name(profile_name) or profile_name == CONST_DEFAULT_PROFILE:
+            self.set_status(400)
+            self.write({"success": False, "error": "invalid profile name (allowed: A-Z a-z 0-9 _ -, max 32 chars)"})
+            return
+
+        config_filepath = get_profile_filepath(profile_name)
+        if os.path.exists(config_filepath):
+            self.set_status(409)
+            self.write({"success": False, "error": "profile already exists"})
+            return
+
+        config_dict = _body.get("config")
+        if not isinstance(config_dict, dict):
+            _, config_dict = load_json()
+        config_dict = migrate_config(config_dict)
+
+        os.makedirs(os.path.dirname(config_filepath), exist_ok=True)
+        util.save_json(config_dict, config_filepath)
+        self.write({"success": True, "profile": profile_name})
+
+    def delete(self):
+        profile_name = self.get_query_argument("profile", "")
+        if not is_valid_profile_name(profile_name) or profile_name == CONST_DEFAULT_PROFILE:
+            self.set_status(400)
+            self.write({"success": False, "error": "invalid profile name"})
+            return
+        config_filepath = get_profile_filepath(profile_name)
+        if not os.path.exists(config_filepath):
+            self.set_status(404)
+            self.write({"success": False, "error": "profile not found"})
+            return
+        try:
+            os.remove(config_filepath)
+        except Exception as exc:
+            self.set_status(500)
+            self.write({"success": False, "error": str(exc)})
+            return
+        self.write({"success": True})
+
 
 class SendkeyHandler(tornado.web.RequestHandler):
     def post(self):
@@ -791,14 +1010,17 @@ async def main_server():
 
         # status api
         ("/status", StatusHandler),
+        ("/instances", InstancesHandler),
         ("/pause", PauseHandler),
         ("/resume", ResumeHandler),
+        ("/stop", StopHandler),
         ("/run", RunHandler),
         
         # json api
         ("/load", LoadJsonHandler),
         ("/save", SaveJsonHandler),
         ("/reset", ResetJsonHandler),
+        ("/profiles", ProfilesHandler),
 
         ("/test_discord_webhook", TestDiscordWebhookHandler),
         ("/test_telegram", TestTelegramHandler),

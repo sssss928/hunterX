@@ -20,7 +20,7 @@ const HELP_CONTENT = {
         </tbody>
       </table>
       <p class="mb-0 text-muted small">提示：直接從瀏覽器網址列複製活動頁面 URL 貼入即可。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#售票網站homepage'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#售票網站homepage'
   },
 
   date_keyword: {
@@ -49,7 +49,7 @@ const HELP_CONTENT = {
         a: '留空時，系統會根據「日期排序方式」（從上到下/從下到上/中間/隨機）自動選擇可用的第一個日期，等同於開啟「日期自動遞補」。'
       }
     ],
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#日期關鍵字'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#日期關鍵字'
   },
 
   area_keyword: {
@@ -73,7 +73,7 @@ const HELP_CONTENT = {
         a: '不會。系統使用<strong>分號（;）</strong>作為多組關鍵字的分隔符，逗號（,）只是一般文字。輸入 <code>2,680;1,980</code> 完全正確，系統會嘗試匹配「2,680」或「1,980」。'
       }
     ],
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#區域關鍵字'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#區域關鍵字'
   },
 
   date_auto_fallback: {
@@ -105,7 +105,7 @@ const HELP_CONTENT = {
         a: '開啟後，系統依照「日期排序方式」設定（從上到下、從下到上、中間、隨機）選擇可用的第一個日期選項。'
       }
     ],
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#日期自動遞補--新功能'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#日期自動遞補--新功能'
   },
 
   // --- Group A: Guide-documented fields without help-icon ---
@@ -468,7 +468,7 @@ const HELP_CONTENT = {
       <p><strong>格式範例：</strong><br>
       <code>https://discord.com/api/webhooks/123456789/abcdef...</code></p>
       <p class="text-muted small mb-0">留空則不傳送 Discord 通知。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#discord-webhook-通知'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#discord-webhook-通知'
   },
 
   telegram_bot_token: {
@@ -484,7 +484,7 @@ const HELP_CONTENT = {
       </ol>
       <p><strong>格式：</strong><code>123456789:ABCdefGHI-jklMNO...</code></p>
       <p class="text-muted small mb-0">留空則不啟用 Telegram 通知。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#telegram-bot-通知'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#telegram-bot-通知'
   },
 
   telegram_chat_id: {
@@ -499,7 +499,7 @@ const HELP_CONTENT = {
         <li>從 JSON 回應中找 <code>chat.id</code> 的數值</li>
       </ol>
       <p><strong>多人通知：</strong>用逗號分隔多個 ID，例如：<code>123456789, 987654321</code></p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#telegram-bot-通知'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#telegram-bot-通知'
   },
 
   server_port: {
@@ -516,7 +516,7 @@ const HELP_CONTENT = {
         a: '重新啟動後，在瀏覽器輸入 <code>http://localhost:{新埠號}</code> 即可連線。'
       }
     ],
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#設定介面-portserver_port'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#設定介面-portserver_port'
   },
 
   ocr_captcha_enable: {
@@ -623,7 +623,7 @@ const HELP_CONTENT = {
         a: '若啟動時已超過指定時間，程式會直接開始搶票，不會等待到下一個週期。'
       }
     ],
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#刷新在指定時間refresh_datetime'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#刷新在指定時間refresh_datetime'
   },
 
   date_select_mode: {
@@ -687,7 +687,7 @@ const HELP_CONTENT = {
         a: '排除關鍵字優先。若某選項同時符合「區域關鍵字」（應選）和「排除關鍵字」（應跳過），系統會跳過該選項。'
       }
     ],
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#排除關鍵字'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#排除關鍵字'
   },
 
   area_auto_fallback: {
@@ -719,7 +719,7 @@ const HELP_CONTENT = {
         a: '預設關閉是為了安全。自動遞補可能選到輪椅席、視線不佳席別或票價較高的區域，造成非預期的購票結果。'
       }
     ],
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#區域自動遞補--新功能'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#區域自動遞補--新功能'
   },
 
   show_timestamp: {
@@ -741,7 +741,7 @@ const HELP_CONTENT = {
         </tbody>
       </table>
       <p class="mb-0 text-muted small">適合搶票後檢視日誌、分析各步驟耗時時使用。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#顯示時間戳記show_timestamp'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#顯示時間戳記show_timestamp'
   },
 
   reset_browser_interval: {
@@ -754,7 +754,7 @@ const HELP_CONTENT = {
         <li>設為 <code>0</code> — 不自動重啟</li>
       </ul>
       <p class="text-warning-emphasis small mb-0"><strong>注意：</strong>此設定目前主程式尚未完整實作自動重啟邏輯，建議保持預設值 <code>0</code>。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#重新啟動瀏覽器間隔秒reset_browser_interval'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#重新啟動瀏覽器間隔秒reset_browser_interval'
   },
 
   proxy_server_port: {
@@ -772,7 +772,7 @@ const HELP_CONTENT = {
         </tbody>
       </table>
       <p class="mb-0 text-muted small">填入後，瀏覽器啟動時會自動套用 <code>--proxy-server=</code> 參數。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#代理伺服器proxy_server_port'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#代理伺服器proxy_server_port'
   },
 
   disable_adjacent_seat: {
@@ -795,7 +795,7 @@ const HELP_CONTENT = {
       </table>
       <p><strong>支援平台：</strong>iBon、年代（Ticket）、KHAM、Ticketmaster</p>
       <p class="mb-0 text-muted small">適合多人同行但不在意座位是否相鄰的情況。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#停用相鄰座位disable_adjacent_seat'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#停用相鄰座位disable_adjacent_seat'
   },
 
   hide_some_image: {
@@ -810,7 +810,7 @@ const HELP_CONTENT = {
         <li>部分活動圖片</li>
       </ul>
       <p class="text-warning-emphasis small mb-0"><strong>注意：</strong>啟用後頁面外觀可能不完整，但不影響搶票功能。網路速度正常時無需啟用。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#隱藏部分圖片hide_some_image'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#隱藏部分圖片hide_some_image'
   },
 
   block_facebook_network: {
@@ -825,7 +825,7 @@ const HELP_CONTENT = {
       </ul>
       <p>部分票務平台頁面內嵌了 Facebook 追蹤腳本，若這些腳本拖慢頁面速度，可啟用此選項加速載入。</p>
       <p class="mb-0 text-muted small">與「隱藏部分圖片」可同時啟用，效果互補。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#封鎖-facebook-網路block_facebook_network'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#封鎖-facebook-網路block_facebook_network'
   },
 
   auto_guess_options: {
@@ -854,7 +854,7 @@ const HELP_CONTENT = {
       </table>
       <p><strong>支援平台：</strong>KKTIX、TixCraft、iBon</p>
       <p class="text-warning-emphasis small mb-0"><strong>注意：</strong>猜測準確率依題目類型而異，若猜錯可能導致購票失敗，建議先測試後再決定是否啟用。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#自動猜測驗證選項auto_guess_options'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#自動猜測驗證選項auto_guess_options'
   },
 
   ocr_captcha_image_source: {
@@ -876,7 +876,7 @@ const HELP_CONTENT = {
         </tbody>
       </table>
       <p class="mb-0 text-muted small">一般情況保持 <code>canvas</code> 即可，若主瀏覽器無法正確擷取驗證碼才考慮切換為 <code>NonBrowser</code>。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#ocr圖片取得方式image_source'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#ocr圖片取得方式image_source'
   },
 
   ocr_captcha_use_universal: {
@@ -901,7 +901,7 @@ const HELP_CONTENT = {
       </table>
       <p><strong>支援平台：</strong>TixCraft、iBon、KHAM</p>
       <p class="mb-0 text-muted small">建議保持啟用。若遇到辨識結果異常（如亂碼），可嘗試停用後測試。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#使用通用-ocr-模型use_universal'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#使用通用-ocr-模型use_universal'
   },
 
   remote_url: {
@@ -913,7 +913,7 @@ const HELP_CONTENT = {
       <p>例如，Port 為 <code>16888</code> 時，網址為 <code>http://127.0.0.1:16888/</code>。</p>
       <p><strong>此欄位為唯讀</strong>，修改後會在下次儲存設定時被自動覆蓋。</p>
       <p class="mb-0 text-muted small">若需要從其他腳本或工具存取設定 API，可複製此網址使用。</p>`,
-    link: 'https://github.com/sssss928/hunter/blob/main/guide/settings-guide.md#設定介面網址remote_url'
+    link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#設定介面網址remote_url'
   }
 };
 

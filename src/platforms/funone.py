@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 #encoding=utf-8
 """platforms/funone.py -- FunOne Tickets platform (tickets.funone.io)."""
 
@@ -941,7 +941,7 @@ async def nodriver_funone_assign_ticket_number(tab, config_dict):
                 while (container && depth < 5) {{
                     rowText = container.textContent || '';
                     // Check if this container has ticket info (price pattern)
-                    if (/TWD|NT\$|\d+元/.test(rowText)) {{
+                    if (/TWD|NT\\$|\\d+元/.test(rowText)) {{
                         break;
                     }}
                     container = container.parentElement;
@@ -1047,7 +1047,7 @@ async def nodriver_funone_assign_ticket_number(tab, config_dict):
                 let rowText = '';
                 while (container && depth < 5) {{
                     rowText = container.textContent || '';
-                    if (/TWD|NT\$|\d+\u5143/.test(rowText)) break;
+                    if (/TWD|NT\\$|\\d+\\u5143/.test(rowText)) break;
                     container = container.parentElement;
                     depth++;
                 }}
@@ -1407,7 +1407,7 @@ async def nodriver_funone_detect_step(tab):
             }
 
             // Priority 2: Check URL for step parameter
-            const stepMatch = url.match(/[?&]step=(\d+)/);
+            const stepMatch = url.match(/[?&]step=(\\d+)/);
             if (stepMatch) {
                 return parseInt(stepMatch[1]);
             }

@@ -1,4 +1,4 @@
-﻿#encoding=utf-8
+#encoding=utf-8
 # =============================================================================
 # KHAM Platform Module
 # Extracted from nodriver_tixcraft.py during modularization (Phase 1)
@@ -4066,8 +4066,8 @@ async def nodriver_udn_seat_auto_select(tab, config_dict):
                             const parts = title.split('-');
                             if (parts.length >= 3) {{
                                 const areaName = parts[0];
-                                const rowMatch = parts[1].match(/(\d+)排/);
-                                const seatMatch = parts[2].match(/(\d+)號/);
+                                const rowMatch = parts[1].match(/(\\d+)排/);
+                                const seatMatch = parts[2].match(/(\\d+)號/);
                                 if (rowMatch && seatMatch) {{
                                     availableSeats.push({{
                                         element: seat,

@@ -34,6 +34,7 @@ CONST_APP_VERSION = APP_DISPLAY_VERSION
 CONST_MAXBOT_ANSWER_ONLINE_FILE = "MAXBOT_ONLINE_ANSWER.txt"
 CONST_MAXBOT_CONFIG_FILE = "settings.json"
 CONST_MAXBOT_INT28_FILE = "MAXBOT_INT28_IDLE.txt"
+CONST_MAXBOT_INT28_QUIT_FILE = "MAXBOT_INT28_QUIT.txt"
 CONST_MAXBOT_LAST_URL_FILE = "MAXBOT_LAST_URL.txt"
 CONST_MAXBOT_QUESTION_FILE = "MAXBOT_QUESTION.txt"
 
@@ -196,13 +197,11 @@ def get_config_dict(args):
 # ===== File Utilities =====
 
 def write_question_to_file(question_text):
-    working_dir = os.path.dirname(os.path.realpath(__file__))
-    target_path = os.path.join(working_dir, CONST_MAXBOT_QUESTION_FILE)
+    target_path = util.get_instance_state_path(CONST_MAXBOT_QUESTION_FILE)
     util.write_string_to_file(target_path, question_text)
 
 def write_last_url_to_file(url):
-    working_dir = os.path.dirname(os.path.realpath(__file__))
-    target_path = os.path.join(working_dir, CONST_MAXBOT_LAST_URL_FILE)
+    target_path = util.get_instance_state_path(CONST_MAXBOT_LAST_URL_FILE)
     util.write_string_to_file(target_path, url)
 
 
@@ -455,7 +454,8 @@ def convert_remote_object(obj, depth=0):
     else:
         return obj
 
-async def nodriver_current_url(tab):
+async def nodriver_current_url(tab, config_dict=None):
+    debug = util.create_debug_logger(config_dict)
     is_quit_bot = False
     exit_bot_error_strings = [
         "server rejected WebSocket connection: HTTP 500",
@@ -481,6 +481,7 @@ async def nodriver_current_url(tab):
             # js_dumps blocks when JS execution is suspended (alert dialog, navigation, tab throttling)
             # tab.target.url is a CDP-cached value that never requires JS execution
             url = tab.target.url if hasattr(tab, 'target') and tab.target else ""
+            debug.log(f"[URL DIAG] js_dumps timed out (5s); fallback target.url={url!r}")
             return url, is_quit_bot
         except Exception as exc:
             str_exc = ""
@@ -495,6 +496,9 @@ async def nodriver_current_url(tab):
                 for each_error_string in exit_bot_error_strings:
                     if each_error_string in str_exc:
                         is_quit_bot = True
+            if not is_silent:
+                target_url_now = getattr(getattr(tab, 'target', None), 'url', None)
+                debug.log(f"[URL DIAG] js_dumps error; target.url={target_url_now!r}; exc={str_exc[:120]!r}")
 
         url_array = []
         if url_dict:
@@ -816,8 +820,14 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
 # ===== Pause Mechanism =====
 
 async def check_and_handle_pause(config_dict=None):
-    """check pause file and handle pause state"""
-    if os.path.exists(CONST_MAXBOT_INT28_FILE):
+    """check this instance's pause file and handle pause state"""
+    if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_FILE)):
+        return True
+    return False
+
+async def check_and_handle_quit(config_dict=None):
+    """check this instance's stop file and signal clean termination"""
+    if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_QUIT_FILE)):
         return True
     return False
 

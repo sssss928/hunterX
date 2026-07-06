@@ -1,4 +1,4 @@
-﻿#encoding=utf-8
+#encoding=utf-8
 # =============================================================================
 # HKTicketing Platform Module
 # Extracted from nodriver_tixcraft.py during modularization (Phase 1)

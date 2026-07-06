@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 #encoding=utf-8
 """platforms/ticketplus.py -- TicketPlus platform (ticketplus.com.tw)."""
 
@@ -7,6 +7,7 @@ import json
 import random
 import time
 import traceback
+import urllib.parse
 
 from zendriver import cdp
 
@@ -51,6 +52,13 @@ def _get_status():
         "purchase_completed": _state.get("purchase_completed", False),
         "is_ticket_assigned": _state.get("is_ticket_assigned", False),
     }
+
+
+def _ticketplus_path_segment_count(url):
+    """Count TicketPlus URL segments after normalizing slash/query/fragment."""
+    parsed = urllib.parse.urlsplit(url)
+    segments = [part for part in parsed.path.split('/') if part]
+    return 3 + len(segments)
 
 
 async def nodriver_ticketplus_detect_layout_style(tab, config_dict=None):
@@ -1749,7 +1757,7 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
     # https://ticketplus.com.tw/activity/XXX
     if '/activity/' in url.lower():
         is_event_page = False
-        if len(url.split('/'))==5:
+        if _ticketplus_path_segment_count(url)==5:
             is_event_page = True
 
         if is_event_page:
@@ -1768,7 +1776,7 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
     # https://ticketplus.com.tw/order/XXX/OOO
     if '/order/' in url.lower():
         is_event_page = False
-        if len(url.split('/'))==6:
+        if _ticketplus_path_segment_count(url)==6:
             is_event_page = True
 
         if is_event_page:
@@ -1821,7 +1829,7 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
     # https://ticketplus.com.tw/confirmseat/xx/oo
     if '/confirm/' in url.lower() or '/confirmseat/' in url.lower():
         is_event_page = False
-        if len(url.split('/'))==6:
+        if _ticketplus_path_segment_count(url)==6:
             is_event_page = True
 
         if is_event_page:

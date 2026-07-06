@@ -17,6 +17,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from hunter_metadata import APP_NAME
+
 class _SeleniumByFallback:
     TAG_NAME = "tag name"
 
@@ -189,6 +191,35 @@ def get_app_root():
     return app_root
 
 
+# ===== Multi-instance support =====
+# Default keeps legacy root-level files; named instances write under
+# instances/<id>/ so concurrent runs do not clobber one another's state.
+
+CONST_DEFAULT_INSTANCE_ID = "default"
+_instance_id = CONST_DEFAULT_INSTANCE_ID
+
+
+def set_instance_id(instance_id):
+    global _instance_id
+    if instance_id and re.match(r'^[A-Za-z0-9_-]{1,32}$', instance_id):
+        _instance_id = instance_id
+        return True
+    return False
+
+
+def get_instance_id():
+    return _instance_id
+
+
+def get_instance_state_path(filename):
+    app_root = get_app_root()
+    if _instance_id == CONST_DEFAULT_INSTANCE_ID:
+        return os.path.join(app_root, filename)
+    instance_dir = os.path.join(app_root, "instances", _instance_id)
+    os.makedirs(instance_dir, exist_ok=True)
+    return os.path.join(instance_dir, filename)
+
+
 def format_keyword_for_display(keyword_string):
     """
     Format JSON keyword string for GUI display.
@@ -350,8 +381,7 @@ def save_url_to_file(remote_url, CONST_MAXBOT_ANSWER_ONLINE_FILE, force_write = 
 
     if is_write_to_file:
         html_text = format_config_keyword_for_json(html_text)
-        working_dir = get_app_root()
-        target_path = os.path.join(working_dir, CONST_MAXBOT_ANSWER_ONLINE_FILE)
+        target_path = get_instance_state_path(CONST_MAXBOT_ANSWER_ONLINE_FILE)
         write_string_to_file(target_path, html_text)
     return is_write_to_file
 
@@ -1548,11 +1578,11 @@ def get_answer_list_from_user_guess_string(config_dict, CONST_MAXBOT_ANSWER_ONLI
         except Exception as exc:
             local_array = []
 
-    # load from internet.
     user_guess_string = ""
-    if os.path.exists(CONST_MAXBOT_ANSWER_ONLINE_FILE):
+    answer_file_path = get_instance_state_path(CONST_MAXBOT_ANSWER_ONLINE_FILE)
+    if os.path.exists(answer_file_path):
         try:
-            with open(CONST_MAXBOT_ANSWER_ONLINE_FILE, "r") as text_file:
+            with open(answer_file_path, "r") as text_file:
                 user_guess_string = text_file.readline()
         except Exception as e:
             pass
@@ -2161,10 +2191,12 @@ def kktix_get_event_code(url):
     #print('event_code:',event_code)
     return event_code
 
-def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kktix_account = "", kktix_password="", window_size="", headless=""):
+def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kktix_account = "", kktix_password="", window_size="", headless="", instance=""):
     cmd_argument = []
     if len(filename) > 0:
         cmd_argument.append('--input=' + filename)
+    if len(instance) > 0:
+        cmd_argument.append('--instance=' + instance)
     if len(homepage) > 0:
         cmd_argument.append('--homepage=' + homepage)
     if len(kktix_account) > 0:
@@ -2304,7 +2336,7 @@ def build_discord_message(stage: str, platform_name: str, custom_message: str = 
         dict: Discord Webhook payload with content and username
     """
     if custom_message:
-        return {"content": custom_message, "username": "Hunter"}
+        return {"content": custom_message, "username": APP_NAME}
 
     if not platform_name:
         platform_name = "Unknown"
@@ -2318,7 +2350,7 @@ def build_discord_message(stage: str, platform_name: str, custom_message: str = 
 
     return {
         "content": message,
-        "username": "Hunter"
+        "username": APP_NAME
     }
 
 

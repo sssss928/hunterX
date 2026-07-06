@@ -1,8 +1,9 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 #encoding=utf-8
 """platforms/cityline.py -- Cityline platform (cityline.com / venue.cityline.com / shows.cityline.com)."""
 
 import asyncio
+import json
 import random
 import time
 
@@ -35,9 +36,15 @@ __all__ = [
     "nodriver_cityline_press_buy_button",
     "nodriver_cityline_clean_ads",
     "nodriver_cityline_main",
+    "is_cityline_login_page",
 ]
 
 _state = {}
+
+
+def is_cityline_login_page(url):
+    """True for global and Hong Kong Cityline member login pages."""
+    return 'cityline.com' in url and '/Login.html' in url
 
 
 async def nodriver_cityline_auto_retry_access(tab, url, config_dict):
@@ -418,6 +425,107 @@ async def nodriver_cityline_continue_button_press(tab, config_dict):
 
     return is_button_clicked
 
+
+async def _cityline_area_match_text(row):
+    """Build a clean per-zone match string from zone name + price."""
+    name_text = ""
+    price_text = ""
+    try:
+        degree_el = await row.query_selector('.price-degree')
+        if degree_el:
+            name_text = util.remove_html_tags(await degree_el.get_html())
+        price_el = await row.query_selector('.price-num')
+        if price_el:
+            price_text = util.remove_html_tags(await price_el.get_html())
+    except Exception:
+        pass
+
+    clean_text = " ".join((name_text + " " + price_text).split())
+    if len(clean_text) == 0:
+        try:
+            clean_text = " ".join(util.remove_html_tags(await row.get_html()).split())
+        except Exception:
+            clean_text = ""
+    return clean_text
+
+
+async def _cityline_collect_available_areas(tab, config_dict, debug):
+    available_areas = []
+    try:
+        area_list = await tab.query_selector_all("div.form-check")
+    except Exception as exc:
+        debug.log(f"[ERROR] find area list fail: {exc}")
+        return available_areas
+    if not area_list:
+        return available_areas
+
+    debug.log(f"[CITYLINE AREA] Found {len(area_list)} area options")
+    soldout_count = 0
+    excluded_count = 0
+    for row in area_list:
+        try:
+            soldout_span = await row.query_selector('span.price-limited > span[data-i18n*="soldout"]')
+            if soldout_span:
+                soldout_count += 1
+                continue
+        except Exception:
+            pass
+
+        clean_text = await _cityline_area_match_text(row)
+
+        if len(clean_text) > 0 and util.reset_row_text_if_match_keyword_exclude(config_dict, clean_text):
+            excluded_count += 1
+            continue
+
+        available_areas.append((row, clean_text))
+
+    debug.log(f"[CITYLINE AREA] Filtered {soldout_count} soldout, {excluded_count} excluded, {len(available_areas)} available")
+    return available_areas
+
+
+async def _cityline_click_area_radio(tab, target_row, target_clean, debug):
+    """Select the matched zone's radio, re-locating on live DOM if needed."""
+    try:
+        clicked = await tab.evaluate(f'''
+            (function() {{
+                const target = {json.dumps(target_clean)};
+                const rows = document.querySelectorAll('div.form-check');
+                for (const r of rows) {{
+                    const deg = r.querySelector('.price-degree');
+                    const num = r.querySelector('.price-num');
+                    const clean = ((deg ? deg.innerText : '') + ' ' + (num ? num.innerText : '')).replace(/\\s+/g, ' ').trim();
+                    if (clean === target) {{
+                        const radio = r.querySelector('input[type=radio]');
+                        if (radio) {{
+                            radio.click();
+                            radio.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            return true;
+                        }}
+                    }}
+                }}
+                return false;
+            }})();
+        ''')
+        if clicked:
+            debug.log("[CITYLINE AREA] Radio button checked")
+            return True
+    except Exception as exc:
+        debug.log(f"[CITYLINE AREA] click radio (js) fail: {exc}")
+
+    try:
+        radio_btn = await target_row.query_selector('input[type=radio]')
+        if radio_btn:
+            await radio_btn.scroll_into_view()
+            await radio_btn.click()
+            debug.log("[CITYLINE AREA] Radio button checked (handle)")
+            return True
+    except Exception as exc:
+        debug.log(f"[CITYLINE AREA] click radio (handle) fail: {exc}")
+
+    debug.log(f"[CITYLINE AREA] radio not found for target: {target_clean}")
+    return False
+
+
 async def nodriver_cityline_area_auto_select(tab, config_dict):
     """
     Cityline area selection with conditional fallback mechanism
@@ -434,103 +542,36 @@ async def nodriver_cityline_area_auto_select(tab, config_dict):
 
     is_price_assigned = False
 
-    # Stage 1: Query all area options
-    area_list = None
-    try:
-        my_css_selector = "div.form-check"
-        area_list = await tab.query_selector_all(my_css_selector)
-    except Exception as exc:
-        debug.log(f"[ERROR] find area list fail: {exc}")
+    available_areas = await _cityline_collect_available_areas(tab, config_dict, debug)
 
-    # Stage 2: Filter soldout areas
-    available_areas = []
-    if area_list:
-        area_list_count = len(area_list)
-        debug.log(f"[CITYLINE AREA] Found {area_list_count} area options")
-
-        for row in area_list:
-            is_available = True
-            try:
-                # Check soldout status
-                soldout_span = await row.query_selector('span.price-limited > span[data-i18n*="soldout"]')
-                if soldout_span:
-                    is_available = False
-            except Exception:
-                pass
-
-            if is_available:
-                available_areas.append(row)
-
-        if debug.enabled:
-            soldout_count = area_list_count - len(available_areas)
-            debug.log(f"[CITYLINE AREA] Filtered {soldout_count} soldout areas, {len(available_areas)} available")
-
-    # Stage 3: Keyword matching
     matched_areas = []
     if len(area_keyword) == 0:
-        # Empty keyword matches all available areas
-        matched_areas = available_areas
+        matched_areas = list(available_areas)
     else:
-        # Match keyword
-        for row in available_areas:
-            row_text = ""
-            try:
-                row_html = await row.get_html()
-                row_text = util.remove_html_tags(row_html)
-            except Exception as exc:
-                debug.log(f"[DEBUG] get row html error: {exc}")
-                break
-
-            if len(row_text) > 0:
-                # Check keyword exclude
-                if util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
-                    row_text = ""
-
-            if len(row_text) > 0:
-                row_text = util.format_keyword_string(row_text)
-                debug.log(f"[DEBUG] row_text: {row_text}")
-
-                # AND logic keyword matching
-                is_match_area = True
-                area_keyword_array = area_keyword.split(' ')
-                for keyword in area_keyword_array:
-                    keyword = util.format_keyword_string(keyword)
-                    if keyword not in row_text:
-                        is_match_area = False
-                        break
-
-                if is_match_area:
-                    matched_areas.append(row)
-                    if auto_select_mode == CONST_FROM_TOP_TO_BOTTOM:
-                        break
+        for row, clean_text in available_areas:
+            if len(clean_text) == 0:
+                continue
+            debug.log(f"[DEBUG] row_text: {clean_text}")
+            if util.is_row_match_keyword(area_keyword, clean_text):
+                matched_areas.append((row, clean_text))
+                if auto_select_mode == CONST_FROM_TOP_TO_BOTTOM:
+                    break
 
     debug.log(f"[AREA KEYWORD] Matched {len(matched_areas)} areas")
 
-    # Stage 4: Conditional fallback mechanism
     if len(matched_areas) == 0:
         if area_auto_fallback:
-            # Fallback mode: select from all available areas
-            matched_areas = available_areas
+            matched_areas = list(available_areas)
             debug.log(f"[AREA FALLBACK] area_auto_fallback=true, selecting from all available areas (total: {len(available_areas)})")
         else:
-            # Strict mode: wait for manual intervention
             debug.log("[AREA FALLBACK] area_auto_fallback=false, fallback is disabled")
             debug.log("[AREA FALLBACK] Waiting for manual intervention to avoid selecting unwanted area...")
             return False
 
-    # Stage 5: Select target area
-    target_area = util.get_target_item_from_matched_list(matched_areas, auto_select_mode)
-    if target_area:
-        try:
-            # Find radio button within target area
-            radio_btn = await target_area.query_selector('input[type=radio]')
-            if radio_btn:
-                await radio_btn.scroll_into_view()
-                await radio_btn.click()
-                is_price_assigned = True
-                debug.log("[CITYLINE AREA] Radio button checked")
-        except Exception as exc:
-            debug.log(f"[CITYLINE AREA] click radio button fail: {exc}")
+    target = util.get_target_item_from_matched_list(matched_areas, auto_select_mode)
+    if target:
+        target_row, target_clean = target
+        is_price_assigned = await _cityline_click_area_radio(tab, target_row, target_clean, debug)
 
     return is_price_assigned
 
@@ -954,12 +995,18 @@ async def nodriver_cityline_main(tab, url, config_dict):
                     debug.log(f"[CITYLINE ERROR] Redirect failed: {exc}")
 
     # Login page
-    if 'cityline.com/Login.html' in url:
+    if is_cityline_login_page(url):
         await nodriver_cityline_cookie_accept(tab)
         cityline_account = config_dict["accounts"]["cityline_account"]
         if len(cityline_account) > 4:
             # Auto-fill email and monitor login button (will auto-click when enabled)
             await nodriver_cityline_login(tab, cityline_account, config_dict)
+    else:
+        if _state.get("account_assigned") or _state.get("otp_sent"):
+            _state["account_assigned"] = False
+            _state["otp_sent"] = False
+            _state["turnstile_attempted"] = False
+            _state["otp_wait_last_log"] = 0
 
     # Multi-tab handling (FR-009)
     tab = await nodriver_cityline_close_second_tab(tab, url)
@@ -998,6 +1045,7 @@ async def nodriver_cityline_main(tab, url, config_dict):
     elif 'venue.cityline.com' not in url:
         # Only reset when completely leaving venue.cityline.com domain
         _state["purchase_button_pressed"] = False
+        _state["modal_handled"] = False
 
     # area page:
     # https://venue.cityline.com/utsvInternet/EVENT_NAME/performance?event=EVENT_CODE&perfId=PROFORMANCE_ID
