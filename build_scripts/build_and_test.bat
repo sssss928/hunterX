@@ -47,7 +47,7 @@ set "TEST_PASSED=0"
 set "TEST_FAILED=0"
 
 REM Get version
-set VERSION=0.1.0
+set VERSION=0.2.0
 for /f "tokens=*" %%i in ('git describe --tags --abbrev=0 2^>nul') do set VERSION=%%i
 set VERSION=%VERSION:v=%
 
@@ -207,7 +207,10 @@ REM settings.json excluded - program generates it automatically
 REM ddddocr data files are automatically collected by PyInstaller via collect_data_files()
 echo   Copying documentation...
 copy build_scripts\README_Release.txt dist\hunter\ >nul 2>&1
+if exist "README.md" copy README.md dist\hunter\ >nul 2>&1
 if exist "CHANGELOG.md" copy CHANGELOG.md dist\hunter\ >nul 2>&1
+if exist "LEGAL_NOTICE.md" copy LEGAL_NOTICE.md dist\hunter\ >nul 2>&1
+if exist "guide" xcopy /E /I /Y guide dist\hunter\guide >nul 2>&1
 echo [OK] Resources copied
 echo.
 

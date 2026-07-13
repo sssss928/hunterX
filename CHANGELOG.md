@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.2.0
+
+- Remove the user-facing delay-calibrated refresh workflow from the settings UI.
+- Treat deprecated delay-calibration config as backward-compatible, disabled data that no longer advances the scheduled refresh time.
+- Keep refresh scheduling on the user-entered `YYYY/MM/DD HH:MM:SS[.SSS]` target with monotonic deadline handling.
+- Validate millisecond refresh input with exact three-digit millisecond precision when fractional seconds are present.
+- Keep decimal `auto_reload_page_interval` support, including `0` as disabled and `1.400`/`1.4` as 1.400 seconds.
+- Add/update regression tests for delay removal, old config loading, millisecond target parsing, and decimal reload intervals.
+- Update release artifacts and visible version strings to `0.2.0`.
+
+## v0.1.6
+
+- Add a centralized refresh timing model with clock abstraction, robust estimator, NTP/SNTP packet validation, trigger planning, monotonic remaining calculation, and freeze/trigger state protection.
+- Fix delay-calibrated trigger math so safety margin and scheduler jitter are part of the non-overlapping advance budget instead of making the trigger later.
+- Add offline regression coverage for NTP math, fake NTP server sampling, robust outlier rejection, source selection, remaining clamp, and one-shot trigger behavior.
+- Separate settings UI display cadence from network calibration cadence: countdown display updates once per second, while background calibration is throttled to five minutes.
+- Update release artifacts and visible version strings to `0.1.6`.
+
+## v0.1.5
+
+- Rename B-mode labels to 延遲校準刷新 / Delay calibrated refresh.
+- Change automatic time-source calibration from 30 seconds to 1 second while the settings page is open.
+- Use one lightweight sample for per-second auto calibration and keep multi-sample calibration for manual actions.
+- Clamp trigger countdown at `0.000s` after the trigger time and show that execution continues through the auto reload interval.
+
+## v0.1.4
+
+- Add B-mode automatic calibration from a user-provided public time-source URL.
+- Add `/time_calibration` API that estimates clock offset and uplink delay from HTTP `Date`/common JSON time responses and RTT samples.
+- Add ticket-site latency estimation from the pasted activity/homepage URL and a browser-side frontend/animation delay benchmark.
+- Add one-click B-mode estimation that fills clock offset, frontend delay, and ticket-site uplink delay.
+- Add real-time trigger countdown updates in the settings UI and optional 30-second auto calibration while the settings page is open.
+- Keep automatic calibration paused inside the configured freeze window to avoid last-second trigger jitter.
+- Reject localhost/private/link-local time-source hosts for the calibration API.
+
+## v0.1.3
+
+- Add B-mode calibrated refresh timing for `refresh_datetime` with millisecond parsing and a displayed computed trigger time.
+- Add `refresh_calibration` settings for clock offset, frontend delay, network uplink delay, safety margin, and freeze window.
+- Extract refresh timing calculations into a tested module and cover parsing, formula, clamping, and migration behavior.
+- Update TixCraft timing documentation to describe the official-time input model and the limits of last-second latency spikes.
+
+## v0.1.2
+
+- Fix multi-instance profile deletion so related running instances are stopped before the profile is removed.
+- Preserve live orphan instance state during startup cleanup and add an offline-state cleanup action.
+- Correct offline instance dashboard rows so they no longer appear as running.
+- Add a TixCraft practical guide covering countdown timing, release tickets, detail-page redirects, and multi-open risk.
+- Synchronize displayed version and packaging examples to HunterX 0.1.2.
+
 ## v0.1.0
 
 - Normalize Hunter fork identity.

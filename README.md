@@ -9,7 +9,7 @@ Hunter is a maintained fork of [`bouob/tickets_hunter`](https://github.com/bouob
 
 This repository is not the upstream Tickets Hunter project. It is a HunterX fork maintained at [`sssss928/hunterX`](https://github.com/sssss928/hunterX). Upstream credit remains with the original Tickets Hunter maintainers and contributors. HunterX uses its own versioning, release assets, issue tracker, CI, and documentation.
 
-Current fork version: `HunterX (0.1.0)`
+Current fork version: `HunterX (0.2.0)`
 
 ## Legal And Ethical Use
 
@@ -23,6 +23,9 @@ Hunter does not accept requests to add or improve:
 - features designed to bypass platform access controls or risk systems
 
 Existing inherited automation code is maintained only for stability, safety, testing, packaging, and documentation.
+
+For TixCraft-specific timing, release-ticket, and multi-instance troubleshooting notes, see
+[`guide/tixcraft-practical-guide.md`](guide/tixcraft-practical-guide.md).
 
 ## Install From Source
 
@@ -66,13 +69,13 @@ pip-audit -r requirement.txt
 The release package is built with PyInstaller and contains the Windows executables plus shared assets:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Version 0.1.0
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Version 0.2.0
 ```
 
 Expected output:
 
 ```text
-dist/release/hunterX_windows_0.1.0.zip
+dist/release/hunterX_windows_0.2.0.zip
 ```
 
 ## GitHub Releases
@@ -81,10 +84,10 @@ Users can download packaged Windows builds from:
 
 [`https://github.com/sssss928/hunterX/releases`](https://github.com/sssss928/hunterX/releases)
 
-For `v0.1.0`, the expected asset is:
+For `v0.2.0`, the expected asset is:
 
 ```text
-hunterX_windows_0.1.0.zip
+hunterX_windows_0.2.0.zip
 ```
 
 Extract the ZIP on a Windows computer and run `settings.exe` to configure the application.

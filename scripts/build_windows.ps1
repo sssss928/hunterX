@@ -69,11 +69,17 @@ Copy-Item -LiteralPath "src\www" -Destination (Join-Path $PackageDir "www") -Rec
 if (Test-Path -LiteralPath "build_scripts\README_Release.txt") {
     Copy-Item -LiteralPath "build_scripts\README_Release.txt" -Destination $PackageDir -Force
 }
+if (Test-Path -LiteralPath "README.md") {
+    Copy-Item -LiteralPath "README.md" -Destination (Join-Path $PackageDir "README.md") -Force
+}
 if (Test-Path -LiteralPath "CHANGELOG.md") {
     Copy-Item -LiteralPath "CHANGELOG.md" -Destination (Join-Path $PackageDir "CHANGELOG.md") -Force
 }
 if (Test-Path -LiteralPath "LEGAL_NOTICE.md") {
     Copy-Item -LiteralPath "LEGAL_NOTICE.md" -Destination $PackageDir -Force
+}
+if (Test-Path -LiteralPath "guide") {
+    Copy-Item -LiteralPath "guide" -Destination (Join-Path $PackageDir "guide") -Recurse -Force
 }
 
 if (Test-Path -LiteralPath $ArtifactPath) {

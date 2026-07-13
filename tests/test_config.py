@@ -13,6 +13,9 @@ def test_default_config_contains_required_sections() -> None:
     assert "advanced" in config
     assert "accounts" in config
     assert config["advanced"]["server_port"] == settings.CONST_SERVER_PORT
+    assert "refresh_calibration" not in config
+    assert config["time_calibration"]["mode"] == "auto"
+    assert config["time_calibration"]["background_refresh_seconds"] >= 60
 
 
 def test_load_json_missing_config_returns_default(tmp_path: Path, monkeypatch) -> None:
@@ -45,3 +48,86 @@ def test_migrate_config_fills_missing_sections() -> None:
     assert migrated["advanced"]["discount_code"] == "ABC"
     assert "ocr_captcha" in migrated
     assert "kktix" in migrated
+    assert "refresh_calibration" not in migrated
+    assert migrated["time_calibration"]["mode"] == "auto"
+
+
+def test_migrate_config_normalizes_auto_reload_interval() -> None:
+    config = {"advanced": {"auto_reload_page_interval": "0"}, "accounts": {}}
+    migrated = settings.migrate_config(json.loads(json.dumps(config)))
+    assert migrated["advanced"]["auto_reload_page_interval"] == 0.0
+
+    config["advanced"]["auto_reload_page_interval"] = -5
+    migrated = settings.migrate_config(json.loads(json.dumps(config)))
+    assert migrated["advanced"]["auto_reload_page_interval"] == 0.0
+
+    config["advanced"]["auto_reload_page_interval"] = "bad"
+    migrated = settings.migrate_config(json.loads(json.dumps(config)))
+    assert migrated["advanced"]["auto_reload_page_interval"] == settings.get_default_config()["advanced"]["auto_reload_page_interval"]
+
+    config["advanced"]["auto_reload_page_interval"] = "nan"
+    migrated = settings.migrate_config(json.loads(json.dumps(config)))
+    assert migrated["advanced"]["auto_reload_page_interval"] == settings.get_default_config()["advanced"]["auto_reload_page_interval"]
+
+    config["advanced"]["auto_reload_page_interval"] = "inf"
+    migrated = settings.migrate_config(json.loads(json.dumps(config)))
+    assert migrated["advanced"]["auto_reload_page_interval"] == settings.get_default_config()["advanced"]["auto_reload_page_interval"]
+
+
+def test_normalize_non_negative_float_rejects_invalid_defaults() -> None:
+    assert settings.normalize_non_negative_float(None, float("inf")) == 0.0
+    assert settings.normalize_non_negative_float("", float("nan")) == 0.0
+    assert settings.normalize_non_negative_float("bad", float("inf")) == 0.0
+    assert settings.normalize_non_negative_float("bad", "bad") == 0.0
+
+
+def test_migrate_config_disables_deprecated_delay_calibration() -> None:
+    config = {
+        "refresh_calibration": {
+            "enable": True,
+            "auto_calibrate": True,
+            "advanced_delay_mode": "enabled",
+            "clock_offset_ms": 50,
+            "frontend_delay_ms": 75,
+            "network_uplink_ms": 90,
+            "safety_margin_ms": 25,
+            "freeze_before_seconds": 10,
+        }
+    }
+    migrated = settings.migrate_config(json.loads(json.dumps(config)))
+    assert migrated["refresh_calibration"]["advanced_delay_mode"] == "enabled"
+    assert migrated["refresh_calibration"]["enable"] is False
+    assert migrated["refresh_calibration"]["auto_calibrate"] is False
+    assert migrated["refresh_calibration"]["clock_offset_ms"] == 50
+
+    for value in (None, "", "invalid", 123):
+        config = {"refresh_calibration": {"advanced_delay_mode": value}}
+        migrated = settings.migrate_config(json.loads(json.dumps(config)))
+        assert migrated["refresh_calibration"]["advanced_delay_mode"] == "auto"
+        assert migrated["refresh_calibration"]["enable"] is False
+
+    config = {"refresh_calibration": {"advanced_delay_mode": "DISABLED"}}
+    migrated = settings.migrate_config(json.loads(json.dumps(config)))
+    assert migrated["refresh_calibration"]["advanced_delay_mode"] == "disabled"
+
+
+def test_time_calibration_config_normalization() -> None:
+    default = settings.get_default_config()["time_calibration"]
+    normalized = settings.normalize_time_calibration_config(
+        {
+            "mode": "invalid",
+            "ntp_servers": "time.google.com, pool.ntp.org",
+            "ntp_timeout_ms": "1",
+            "ntp_samples_per_server": "999",
+            "ntp_min_valid_samples": "bad",
+            "background_refresh_seconds": "1",
+        },
+        default,
+    )
+
+    assert normalized["mode"] == "auto"
+    assert normalized["ntp_servers"] == ["time.google.com", "pool.ntp.org"]
+    assert normalized["ntp_timeout_ms"] == 50
+    assert normalized["ntp_samples_per_server"] == 10
+    assert normalized["ntp_min_valid_samples"] == default["ntp_min_valid_samples"]
+    assert normalized["background_refresh_seconds"] == 60
