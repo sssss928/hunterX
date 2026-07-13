@@ -160,7 +160,7 @@
 
 <!-- 版本資訊 -->
 <div class="alert alert-info" role="alert">
-  <p class="mb-0"><strong>版本</strong>：HunterX (0.1.0) | <strong>技術支援</strong>：Claude Code AI 輔助開發</p>
+  <p class="mb-0"><strong>版本</strong>：HunterX (0.2.0) | <strong>技術支援</strong>：Claude Code AI 輔助開發</p>
 </div>
 
 <!-- 開發狀態提示（可展開） -->
@@ -353,7 +353,9 @@
           <label for="refresh_datetime" class="col-sm-2 col-form-label">刷新在指定時間<span class="help-icon" data-help="refresh_datetime" title="刷新在指定時間說明" tabindex="0" role="button" aria-label="刷新在指定時間 說明"></span>
           </label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control" id="refresh_datetime" value="" placeholder="YYYY/MM/DD HH:MM:SS" />
+            <input class="form-control" id="refresh_datetime" value="" placeholder="YYYY/MM/DD HH:MM:SS.SSS" />
+            <div class="form-text">填官方開賣時間；可使用毫秒，例如 2026/07/09 11:59:59.400。</div>
+            <div class="form-text" id="refresh_target_time_preview">排程目標：未設定</div>
           </div>
         </div>
 
@@ -1097,6 +1099,7 @@
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <div class="d-flex align-items-center mb-2">
               <button type="button" class="btn btn-sm btn-outline-warning" id="pause_all_btn" onclick="pause_all_instances()">全部暫停</button>
+              <button type="button" class="btn btn-sm btn-outline-secondary ms-2" id="cleanup_instances_btn" onclick="cleanup_offline_instances()">清理離線暫存</button>
               <span class="text-muted small ms-2">每 2 秒更新；離線 = 逾 30 秒無心跳</span>
             </div>
             <div class="table-responsive">

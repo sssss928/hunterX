@@ -11,6 +11,8 @@ const resume_button = document.querySelector('#resume_btn');
 const homepage = document.querySelector('#homepage');
 const ticket_number = document.querySelector('#ticket_number');
 const refresh_datetime = document.querySelector('#refresh_datetime');
+const refresh_target_time_preview = document.querySelector('#refresh_target_time_preview');
+const refresh_platform_capability = document.querySelector('#refresh_platform_capability');
 const date_select_mode = document.querySelector('#date_select_mode');
 const date_keyword = document.querySelector('#date_keyword');
 const date_auto_fallback = document.querySelector('#date_auto_fallback');
@@ -323,7 +325,7 @@ function applyOrRestore(selector, property, englishValue) {
 function renderReadmePane() {
     const englishHtml = `
 <div class="alert alert-info" role="alert">
-  <p class="mb-0"><strong>Version</strong>: HunterX (0.1.0) | <strong>Technical support</strong>: Claude Code AI-assisted development</p>
+  <p class="mb-0"><strong>Version</strong>: HunterX (0.2.0) | <strong>Technical support</strong>: Claude Code AI-assisted development</p>
 </div>
 
 <div class="accordion mb-3" id="devStatusAccordion">
@@ -448,7 +450,7 @@ function renderBasicTabTranslations() {
   <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="fillHomepage('https://www.ticketmaster.sg')">Ticketmaster Singapore</button>
   <button type="button" class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="fillHomepage('https://www.ticketek.com.au')">Ticketek Australia</button>
 </div>`);
-    applyOrRestore('#refresh_datetime', 'placeholder', 'YYYY/MM/DD HH:MM:SS');
+    applyOrRestore('#refresh_datetime', 'placeholder', 'YYYY/MM/DD HH:MM:SS.SSS');
     applyOrRestore('#ticket_number option[selected="selected"]', 'textContent', 'Tickets');
 
     setRowLabelForField('homepage', fieldLabel('Homepage', 'homepage'));
@@ -733,6 +735,7 @@ function renderRuntimeTabTranslations() {
     // Instances dashboard (Phase 3) static labels.
     applyOrRestore('#instances_panel > label', 'textContent', 'Running instances');
     applyOrRestore('#pause_all_btn', 'textContent', 'Pause all');
+    applyOrRestore('#cleanup_instances_btn', 'textContent', 'Clean offline state');
     applyOrRestore('#instances_panel .text-muted.small', 'textContent', 'Refreshes every 2s; offline = no heartbeat for 30s');
     applyOrRestore('#instances_panel thead th:nth-child(1)', 'textContent', 'Instance');
     applyOrRestore('#instances_panel thead th:nth-child(2)', 'textContent', 'Liveness');
@@ -791,6 +794,7 @@ function uiText(key, extra = '') {
         'saving': { 'zh-TW': '儲存中...', en: 'Saving...' },
         'saved': { 'zh-TW': '已存檔', en: 'Saved' },
         'missing_ticket_number': { 'zh-TW': '提示: 請指定張數', en: 'Please select the number of tickets.' },
+        'invalid_refresh_datetime': { 'zh-TW': '刷新在指定時間格式需為 YYYY/MM/DD HH:MM:SS 或 YYYY/MM/DD HH:MM:SS.SSS。', en: 'Refresh time must use YYYY/MM/DD HH:MM:SS or YYYY/MM/DD HH:MM:SS.SSS.' },
         'invalid_tixcraft_soft_block_delay': { 'zh-TW': '提示: 暫時鎖定等待秒數請填 1 到 600 的整數，或留空使用預設值。', en: 'Enter an integer from 1 to 600 for the TixCraft soft-block delay, or leave it empty to use the default.' },
         'status_paused': { 'zh-TW': '已暫停', en: 'Paused' },
         'status_running': { 'zh-TW': '已啟動', en: 'Running' },
@@ -807,6 +811,9 @@ function uiText(key, extra = '') {
         'btn_pause': { 'zh-TW': '暫停', en: 'Pause' },
         'btn_resume': { 'zh-TW': '繼續', en: 'Resume' },
         'btn_stop': { 'zh-TW': '停止', en: 'Stop' },
+        'btn_cleanup_offline': { 'zh-TW': '清理離線暫存', en: 'Clean offline state' },
+        'cleanup_done': { 'zh-TW': `已清理離線暫存：${extra}`, en: `Cleaned offline state: ${extra}` },
+        'cleanup_none': { 'zh-TW': '沒有可清理的離線暫存。', en: 'No offline state to clean.' },
         'stop_confirm': { 'zh-TW': `停止會關閉實例「${extra}」的瀏覽器並結束行程，無法復原。確定要停止嗎？`, en: `Stopping closes the browser for instance "${extra}" and ends its process. This cannot be undone. Stop it?` },
         'risk_kktix': { 'zh-TW': 'KKTIX 多開風險：可能打亂排隊順序甚至被導入假排隊', en: 'KKTIX multi-open risk: may disrupt your queue order or trap you in a fake queue' },
         'risk_tixcraft': { 'zh-TW': '拓元/遠大多開風險：同帳號同活動會被踢 session', en: 'Tixcraft family multi-open risk: same account on the same event gets session-kicked' },
@@ -865,7 +872,7 @@ function refresh_profile_tabs(callback) {
             if (name === current_profile) btn.addClass('active');
             btn.on('click', function() { switch_profile(name); });
             if (name !== 'default') {
-                const close = $('<span class="ms-2" style="cursor:pointer;" title="刪除此設定檔">&times;</span>');
+                const close = $('<span class="ms-2" style="cursor:pointer;" title="刪除此設定檔並停止相關執行實例">&times;</span>');
                 close.on('click', function(ev) {
                     ev.stopPropagation();
                     delete_profile(name);
@@ -982,8 +989,32 @@ function create_profile(name, homepage) {
     });
 }
 
+function escape_regexp(text) {
+    return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function related_instance_rows(name, rows) {
+    const duplicateRe = new RegExp('^' + escape_regexp(name) + '-\\d+$');
+    return (rows || []).filter(function(it) {
+        return it.id === name || duplicateRe.test(it.id);
+    });
+}
+
 function delete_profile(name) {
-    if (!window.confirm('刪除設定檔「' + name + '」？運行中的實例不會被停止，但設定將無法再熱更新。')) return;
+    $.get('/instances').always(function(data) {
+        const rows = (data && data.instances) ? data.instances : [];
+        const alive = related_instance_rows(name, rows).filter(function(it){ return it.alive; }).map(function(it){ return it.id; });
+        let message = '刪除設定檔「' + name + '」？';
+        if (alive.length > 0) {
+            message += '\n\n會先停止相關執行實例：' + alive.join(', ');
+        }
+        message += '\n\n此動作無法復原。';
+        if (!window.confirm(message)) return;
+        delete_profile_api(name);
+    });
+}
+
+function delete_profile_api(name) {
     $.ajax({
         url: '/profiles?profile=' + encodeURIComponent(name),
         method: 'DELETE'
@@ -994,6 +1025,16 @@ function delete_profile(name) {
             maxbot_load_api();
         }
         refresh_profile_tabs();
+    }).fail(function(xhr) {
+        let msg = '刪除失敗';
+        try {
+            const data = JSON.parse(xhr.responseText);
+            msg = data.error || msg;
+            if (data.running_instances && data.running_instances.length > 0) {
+                msg += '：' + data.running_instances.join(', ');
+            }
+        } catch (e) {}
+        window.alert(msg);
     });
 }
 
@@ -1143,6 +1184,234 @@ function updateTixcraftRefreshWarning() {
     }
 }
 
+const default_refresh_calibration = {
+    enable: false,
+    auto_calibrate: false,
+    advanced_delay_mode: 'disabled',
+    time_source_mode: 'http',
+    time_source_url: 'https://time.is/',
+    ticket_site_url: '',
+    clock_offset_ms: 0,
+    clock_uncertainty_ms: 0,
+    frontend_delay_ms: 0,
+    network_uplink_ms: 0,
+    scheduler_jitter_ms: 0,
+    safety_margin_ms: 0,
+    freeze_before_seconds: 0,
+    auto_calibrate_interval_seconds: 300
+};
+
+const TIMING_CAPABILITY_STANDARD = 'STANDARD_MILLISECOND_TARGET_REFRESH';
+const TIMING_CAPABILITY_QUEUE_AWARE = 'QUEUE_AWARE_STANDARD_REFRESH';
+
+function get_platform_timing_capability_from_url(rawUrl) {
+    const value = String(rawUrl || '').trim();
+    let hostname = '';
+    let lowerValue = value.toLowerCase();
+    if (value) {
+        try {
+            const parsed = new URL(value.includes('://') ? value : `https://${value}`);
+            hostname = parsed.hostname.toLowerCase();
+            lowerValue = parsed.href.toLowerCase();
+        } catch (error) {
+            hostname = '';
+        }
+    }
+
+    let platformId = 'unknown';
+    let capability = TIMING_CAPABILITY_STANDARD;
+    if (hostname === 'tixcraft.com' || hostname.endsWith('.tixcraft.com')) {
+        platformId = 'tixcraft';
+    } else if (hostname === 'kktix.com' || hostname.endsWith('.kktix.com') || hostname === 'kktix.cc' || hostname.endsWith('.kktix.cc')) {
+        platformId = 'kktix';
+        capability = TIMING_CAPABILITY_QUEUE_AWARE;
+    } else if (hostname === 'kham.com.tw' || hostname.endsWith('.kham.com.tw') || hostname === 'ticket.com.tw' || hostname.endsWith('.ticket.com.tw') || hostname === 'tickets.udnfunlife.com') {
+        platformId = 'kham';
+    } else if (hostname.includes('ticketplus.com')) {
+        platformId = 'ticketplus';
+        capability = TIMING_CAPABILITY_QUEUE_AWARE;
+    } else if (hostname === 'tickets.funone.io') {
+        platformId = 'funone';
+    } else if (hostname === 'ibon.com' || hostname.endsWith('.ibon.com') || hostname === 'ibon.com.tw' || hostname.endsWith('.ibon.com.tw')) {
+        platformId = 'ibon';
+        capability = TIMING_CAPABILITY_QUEUE_AWARE;
+    } else if (hostname === 'famiticket.com.tw' || hostname.endsWith('.famiticket.com.tw')) {
+        platformId = 'famiticket';
+        capability = TIMING_CAPABILITY_QUEUE_AWARE;
+    } else if (hostname === 'cityline.com' || hostname.endsWith('.cityline.com') || hostname === 'cityline.com.hk' || hostname.endsWith('.cityline.com.hk')) {
+        platformId = 'cityline';
+        capability = TIMING_CAPABILITY_QUEUE_AWARE;
+    } else if (hostname.includes('hkticketing.com') || hostname.includes('galaxymacau.com') || hostname.includes('ticketek.com')) {
+        platformId = 'hkticketing';
+        capability = TIMING_CAPABILITY_QUEUE_AWARE;
+    } else if (hostname === 'go.fansi.me' || hostname.includes('fansi')) {
+        platformId = 'fansigo';
+    } else if (hostname.includes('indievox.com')) {
+        platformId = 'indievox';
+    } else if (lowerValue.includes('ticketmaster.')) {
+        platformId = 'ticketmaster';
+    }
+    return { platformId, capability };
+}
+
+function get_effective_timing_decision(calibration) {
+    const timingUrl = homepage ? homepage.value : '';
+    const platform = get_platform_timing_capability_from_url(timingUrl);
+    return {
+        platformId: platform.platformId,
+        capability: platform.capability,
+        effectiveCapability: platform.capability,
+        advancedSupported: false,
+        advancedActive: false,
+        warning: ''
+    };
+}
+
+function clamp_int(value, defaultValue, minValue, maxValue) {
+    const parsed = parseInt(value, 10);
+    if (Number.isNaN(parsed)) {
+        return defaultValue;
+    }
+    return Math.max(minValue, Math.min(maxValue, parsed));
+}
+
+function read_int_input(input, defaultValue, minValue, maxValue) {
+    return clamp_int(input ? input.value : defaultValue, defaultValue, minValue, maxValue);
+}
+
+function pad_number(value, size) {
+    return String(value).padStart(size, '0');
+}
+
+function parse_refresh_datetime_for_calibration(rawValue) {
+    const value = (rawValue || '').trim();
+    if (!value) return null;
+
+    const match = value.match(/^(\d{4})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?$/);
+    if (match) {
+        const year = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10);
+        const day = parseInt(match[3], 10);
+        const hour = parseInt(match[4], 10);
+        const minute = parseInt(match[5], 10);
+        const second = parseInt(match[6], 10);
+        const ms = match[7] ? parseInt(match[7], 10) : 0;
+        const parsed = new Date(year, month - 1, day, hour, minute, second, ms);
+        if (
+            parsed.getFullYear() === year
+            && parsed.getMonth() === month - 1
+            && parsed.getDate() === day
+            && parsed.getHours() === hour
+            && parsed.getMinutes() === minute
+            && parsed.getSeconds() === second
+            && parsed.getMilliseconds() === ms
+        ) {
+            return parsed;
+        }
+    }
+
+    return null;
+}
+
+function format_datetime_ms(dateValue) {
+    return `${dateValue.getFullYear()}/${pad_number(dateValue.getMonth() + 1, 2)}/${pad_number(dateValue.getDate(), 2)} `
+        + `${pad_number(dateValue.getHours(), 2)}:${pad_number(dateValue.getMinutes(), 2)}:${pad_number(dateValue.getSeconds(), 2)}.`
+        + `${pad_number(dateValue.getMilliseconds(), 3)}`;
+}
+
+function format_duration_ms(msValue) {
+    if (msValue <= 0) {
+        return '0.000s';
+    }
+    const sign = msValue < 0 ? '-' : '';
+    let ms = Math.abs(Math.round(msValue));
+    const hours = Math.floor(ms / 3600000);
+    ms %= 3600000;
+    const minutes = Math.floor(ms / 60000);
+    ms %= 60000;
+    const seconds = Math.floor(ms / 1000);
+    const millis = ms % 1000;
+    if (hours > 0) {
+        return `${sign}${hours}h ${minutes}m ${seconds}s`;
+    }
+    if (minutes > 0) {
+        return `${sign}${minutes}m ${seconds}s`;
+    }
+    return `${sign}${seconds}.${pad_number(millis, 3)}s`;
+}
+
+function get_refresh_remaining_status(triggerDate) {
+    const remainingMs = triggerDate.getTime() - Date.now();
+    if (remainingMs <= 0) {
+        return {
+            reached: true,
+            text: '0.000s',
+            label: currentLanguage === 'en' ? 'reached' : '已到達',
+            note: currentLanguage === 'en'
+                ? 'then follows auto reload interval'
+                : '後續依自動刷新頁面間隔執行'
+        };
+    }
+    return {
+        reached: false,
+        text: format_duration_ms(remainingMs),
+        label: currentLanguage === 'en' ? 'remaining' : '距離觸發',
+        note: ''
+    };
+}
+
+function get_refresh_calibration_from_form() {
+    return {
+        enable: false,
+        auto_calibrate: false,
+        advanced_delay_mode: 'disabled',
+        time_source_mode: default_refresh_calibration.time_source_mode,
+        time_source_url: default_refresh_calibration.time_source_url,
+        ticket_site_url: '',
+        clock_offset_ms: 0,
+        frontend_delay_ms: 0,
+        network_uplink_ms: 0,
+        scheduler_jitter_ms: 0,
+        safety_margin_ms: 0,
+        freeze_before_seconds: 0,
+        auto_calibrate_interval_seconds: default_refresh_calibration.auto_calibrate_interval_seconds
+    };
+}
+
+function calculate_refresh_trigger_date(targetDate, calibration) {
+    return new Date(targetDate.getTime());
+}
+
+function update_refresh_target_preview() {
+    if (!refresh_target_time_preview) return;
+    const rawValue = refresh_datetime ? refresh_datetime.value.trim() : '';
+    const targetDate = parse_refresh_datetime_for_calibration(refresh_datetime ? refresh_datetime.value : '');
+    if (!targetDate || Number.isNaN(targetDate.getTime())) {
+        const emptyText = currentLanguage === 'en' ? 'Scheduled target: not set' : '排程目標：未設定';
+        const invalidText = currentLanguage === 'en'
+            ? 'Use YYYY/MM/DD HH:MM:SS or YYYY/MM/DD HH:MM:SS.SSS'
+            : '格式需為 YYYY/MM/DD HH:MM:SS 或 YYYY/MM/DD HH:MM:SS.SSS';
+        const message = rawValue ? invalidText : emptyText;
+        if (refresh_target_time_preview) refresh_target_time_preview.textContent = message;
+        return;
+    }
+
+    const calibration = get_refresh_calibration_from_form();
+    const decision = get_effective_timing_decision(calibration);
+    const triggerDate = calculate_refresh_trigger_date(targetDate, calibration);
+    const remainingStatus = get_refresh_remaining_status(triggerDate);
+    const remainingText = remainingStatus.note
+        ? `${remainingStatus.label} ${remainingStatus.text} | ${remainingStatus.note}`
+        : `${remainingStatus.label} ${remainingStatus.text}`;
+    const previewText = `${currentLanguage === 'en' ? 'Scheduled target' : '排程目標'}: ${format_datetime_ms(triggerDate)} | ${remainingText}`;
+    if (refresh_platform_capability) {
+        const queueAware = decision.effectiveCapability === TIMING_CAPABILITY_QUEUE_AWARE;
+        const message = `Platform ${decision.platformId}: standard millisecond target-time refresh.`;
+        refresh_platform_capability.textContent = queueAware ? `${message} Queue/session flow is preserved.` : message;
+    }
+    if (refresh_target_time_preview) refresh_target_time_preview.textContent = previewText;
+}
+
 function load_settins_to_form(settings)
 {
     if (settings)
@@ -1158,6 +1427,7 @@ function load_settins_to_form(settings)
         homepage.value = settings.homepage;
         ticket_number.value = settings.ticket_number;
         refresh_datetime.value = settings.refresh_datetime;
+        update_refresh_target_preview();
         date_select_mode.value = settings.date_auto_select.mode;
         date_keyword.value = format_keyword_for_display(settings.date_auto_select.date_keyword);
         date_auto_fallback.checked = settings.date_auto_fallback || false;
@@ -1445,32 +1715,41 @@ function save_changes_to_dict(silent_flag)
     const ticket_number_value = parseInt(ticket_number.value);
     const tixcraft_soft_block_delay_value = (tixcraft_soft_block_delay?.value || '').trim();
     //console.log(ticket_number_value);
-    if (!ticket_number_value)
-    {
-        message(uiText('missing_ticket_number'));
-        return false;
-    } else {
-        if (tixcraft_soft_block_delay) {
-            tixcraft_soft_block_delay.classList.remove('is-invalid');
-        }
-
-        if (tixcraft_soft_block_delay_value) {
-            const parsed_delay = Number(tixcraft_soft_block_delay_value);
-            const is_integer = Number.isInteger(parsed_delay);
-            if (!is_integer || parsed_delay < 1 || parsed_delay > 600) {
-                tixcraft_soft_block_delay.classList.add('is-invalid');
-                message(uiText('invalid_tixcraft_soft_block_delay'));
+        if (!ticket_number_value)
+        {
+            message(uiText('missing_ticket_number'));
+            return false;
+        } else {
+            const refresh_datetime_value = refresh_datetime.value.trim();
+            if (refresh_datetime_value && !parse_refresh_datetime_for_calibration(refresh_datetime_value)) {
+                refresh_datetime.classList.add('is-invalid');
+                message(uiText('invalid_refresh_datetime'));
                 return false;
             }
-        }
+            refresh_datetime.classList.remove('is-invalid');
 
-        if(settings) {
+            if (tixcraft_soft_block_delay) {
+                tixcraft_soft_block_delay.classList.remove('is-invalid');
+            }
+
+            if (tixcraft_soft_block_delay_value) {
+                const parsed_delay = Number(tixcraft_soft_block_delay_value);
+                const is_integer = Number.isInteger(parsed_delay);
+                if (!is_integer || parsed_delay < 1 || parsed_delay > 600) {
+                    tixcraft_soft_block_delay.classList.add('is-invalid');
+                    message(uiText('invalid_tixcraft_soft_block_delay'));
+                    return false;
+                }
+            }
+
+            if(settings) {
 
             // preference
             settings.language = serializeLanguage(currentLanguage);
             settings.homepage = homepage.value;
             settings.ticket_number = ticket_number_value;
-            settings.refresh_datetime = refresh_datetime.value;
+            settings.refresh_datetime = refresh_datetime_value;
+            delete settings.refresh_calibration;
             settings.date_auto_select.mode = date_select_mode.value;
             settings.date_auto_select.date_keyword = format_config_keyword_for_json(date_keyword.value);
             settings.date_auto_fallback = date_auto_fallback.checked;
@@ -1866,19 +2145,20 @@ function render_instances(rows) {
             ? $('<span class="badge text-bg-success"></span>').text(uiText('instance_alive'))
             : $('<span class="badge text-bg-secondary"></span>').text(uiText('instance_offline'));
         tr.append($('<td></td>').append(live_badge));
-        const state_badge = it.paused
-            ? $('<span class="badge text-bg-danger"></span>').text(uiText('instance_paused'))
-            : $('<span class="badge text-bg-success"></span>').text(uiText('instance_running'));
+        const state_badge = !it.alive
+            ? $('<span class="badge text-bg-secondary"></span>').text(uiText('instance_offline'))
+            : (it.paused
+                ? $('<span class="badge text-bg-danger"></span>').text(uiText('instance_paused'))
+                : $('<span class="badge text-bg-success"></span>').text(uiText('instance_running')));
         tr.append($('<td></td>').append(state_badge));
         const url = it.last_url || '';
         tr.append($('<td class="text-truncate" style="max-width:240px;"></td>').text(url).attr('title', url));
         const action_td = $('<td class="text-end"></td>');
-        const action_btn = it.paused
-            ? $('<button type="button" class="btn btn-sm btn-outline-success"></button>').text(uiText('btn_resume')).on('click', function(){ instance_resume(it.id); })
-            : $('<button type="button" class="btn btn-sm btn-outline-danger"></button>').text(uiText('btn_pause')).on('click', function(){ instance_pause(it.id); });
-        action_td.append(action_btn);
-        // Stop is only meaningful for a live process; offline rows have nothing to stop.
         if (it.alive) {
+            const action_btn = it.paused
+                ? $('<button type="button" class="btn btn-sm btn-outline-success"></button>').text(uiText('btn_resume')).on('click', function(){ instance_resume(it.id); })
+                : $('<button type="button" class="btn btn-sm btn-outline-danger"></button>').text(uiText('btn_pause')).on('click', function(){ instance_pause(it.id); });
+            action_td.append(action_btn);
             const stop_btn = $('<button type="button" class="btn btn-sm btn-outline-secondary ms-1"></button>').text(uiText('btn_stop')).on('click', function(){ instance_stop(it.id); });
             action_td.append(stop_btn);
         }
@@ -1923,6 +2203,16 @@ function pause_all_instances() {
     });
 }
 
+function cleanup_offline_instances() {
+    $.get('/cleanup_instances').done(function(data) {
+        const removed = (data && data.removed) ? data.removed : [];
+        run_message(removed.length > 0 ? uiText('cleanup_done', removed.join(', ')) : uiText('cleanup_none'));
+        instances_dashboard_api();
+    }).fail(function(xhr, status) {
+        run_message(uiText('launch_failed', status));
+    });
+}
+
 var instances_interval = setInterval(instances_dashboard_api, 2000);
 instances_dashboard_api();
 
@@ -1945,6 +2235,19 @@ onchange_tag_list.forEach((tag) => {
 
 homepage.addEventListener('keyup', check_unsaved_fields);
 homepage.addEventListener('input', () => updatePlatformFields(homepage.value));
+
+const refresh_calibration_inputs = [
+    refresh_datetime
+].filter(Boolean);
+refresh_calibration_inputs.forEach((field) => {
+    const refreshCalibrationChanged = () => {
+        update_refresh_target_preview();
+        check_unsaved_fields();
+    };
+    field.addEventListener('input', refreshCalibrationChanged);
+    field.addEventListener('change', refreshCalibrationChanged);
+});
+setInterval(update_refresh_target_preview, 1000);
 
 ocr_captcha_use_universal.addEventListener('change', function() {
     if (this.checked) {

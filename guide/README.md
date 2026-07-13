@@ -35,6 +35,8 @@
 | 文件 | 說明 | 建議閱讀時機 |
 |------|------|--------------|
 | **[關鍵字與回退機制](keyword-mechanism.md)** | 深入理解搶票邏輯 | 設定關鍵字前 |
+| **[拓元售票實務研究與排錯指南](tixcraft-practical-guide.md)** | 倒數開賣、釋票、跳回詳情頁與多開風險 | 使用拓元前 |
+| **[iOS 遠端使用 HunterX](ios-remote-use.md)** | 用 iPhone 查看設定頁或遠端控制 Windows 主機 | 需要手機操作時 |
 | **[ibon 等候室常見問題](ibon-queue-it-faq.md)** | 等候室排隊機制與注意事項 | 搶 ibon 票前 |
 
 ### 進階參考
@@ -77,6 +79,8 @@ guide/
 ├── installation.md        ← 執行檔版本教學
 ├── quick-start.md         ← Python 版本教學
 ├── keyword-mechanism.md   ← 關鍵字機制詳解
+├── tixcraft-practical-guide.md ← 拓元售票實務研究與排錯
+├── ios-remote-use.md      ← iOS 遠端使用方式
 ├── ibon-queue-it-faq.md   ← ibon 等候室常見問題
 └── settings-guide.md      ← 完整設定參考
 ```

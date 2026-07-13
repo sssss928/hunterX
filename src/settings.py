@@ -2,25 +2,40 @@
 #encoding=utf-8
 import asyncio
 import base64
+import concurrent.futures
+import ipaddress
 import json
+import math
 import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import tornado
+from tornado.ioloop import IOLoop
 from tornado.web import Application
 from tornado.web import StaticFileHandler
 
 import requests
 import util
 from hunter_metadata import APP_DISPLAY_VERSION, APP_NAME, RELEASE_URL
+from refresh_timing import (
+    DEFAULT_TIME_CALIBRATION,
+    calibrate_ntp_servers,
+    get_platform_timing_capability,
+    normalize_advanced_delay_mode,
+    robust_estimate,
+    select_time_source,
+)
 
 from typing import (
     Dict,
@@ -63,6 +78,13 @@ CONST_SERVER_PORT = 16888
 # an instance counts as alive when its mtime is within the threshold.
 CONST_HEARTBEAT_FILE = "heartbeat.txt"
 CONST_HEARTBEAT_ALIVE_SEC = 30
+CONST_INSTANCE_STOP_WAIT_SEC = 5.0
+CALIBRATION_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="hunter-calibration",
+)
+# Also used by settings-page outbound checks so slow network requests do not
+# block Tornado's event loop.
 
 # Multi-instance profiles: each profile is a full settings.json copy stored
 # under profiles/<name>.json; "default" maps to settings.json.
@@ -87,6 +109,12 @@ def get_instance_state_filepath(profile_name, filename):
     if not profile_name or profile_name == CONST_DEFAULT_PROFILE:
         return os.path.join(app_root, filename)
     return os.path.join(app_root, "instances", profile_name, filename)
+
+
+def get_instance_state_dir(profile_name):
+    if not profile_name or profile_name == CONST_DEFAULT_PROFILE:
+        return util.get_app_root()
+    return os.path.join(util.get_app_root(), "instances", profile_name)
 
 
 def list_profile_names():
@@ -150,6 +178,7 @@ def get_default_config():
     config_dict["language"] = "English"
     config_dict["ticket_number"] = 2
     config_dict["refresh_datetime"] = ""
+    config_dict["time_calibration"] = dict(DEFAULT_TIME_CALIBRATION)
 
     config_dict["ocr_captcha"] = {}
     config_dict["ocr_captcha"]["enable"] = True
@@ -291,14 +320,56 @@ def list_instance_ids():
     return ids
 
 
-def get_instance_status(profile_name):
+def is_instance_alive(profile_name):
     heartbeat_filepath = get_instance_state_filepath(profile_name, CONST_HEARTBEAT_FILE)
-    alive = False
-    if os.path.exists(heartbeat_filepath):
-        try:
-            alive = (time.time() - os.path.getmtime(heartbeat_filepath)) < CONST_HEARTBEAT_ALIVE_SEC
-        except Exception:
-            alive = False
+    if not os.path.exists(heartbeat_filepath):
+        return False
+    try:
+        return (time.time() - os.path.getmtime(heartbeat_filepath)) < CONST_HEARTBEAT_ALIVE_SEC
+    except Exception:
+        return False
+
+
+def get_related_instance_ids(profile_name):
+    """Return the profile instance plus numbered duplicate launches."""
+    related = [profile_name]
+    duplicate_re = re.compile(r"^" + re.escape(profile_name) + r"-\d+$")
+    for instance_id in list_instance_ids():
+        if instance_id != profile_name and duplicate_re.match(instance_id):
+            related.append(instance_id)
+    return related
+
+
+def wait_for_instances_to_stop(instance_ids, timeout_sec=CONST_INSTANCE_STOP_WAIT_SEC):
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        alive_ids = [instance_id for instance_id in instance_ids if is_instance_alive(instance_id)]
+        if not alive_ids:
+            return []
+        time.sleep(0.2)
+    return [instance_id for instance_id in instance_ids if is_instance_alive(instance_id)]
+
+
+def remove_instance_state_dir(profile_name):
+    if not profile_name or profile_name == CONST_DEFAULT_PROFILE:
+        return False
+    instance_dir = get_instance_state_dir(profile_name)
+    instances_root = os.path.join(util.get_app_root(), "instances")
+    try:
+        instance_dir_real = os.path.realpath(instance_dir)
+        instances_root_real = os.path.realpath(instances_root)
+        if not instance_dir_real.startswith(instances_root_real + os.sep):
+            return False
+        if os.path.isdir(instance_dir):
+            shutil.rmtree(instance_dir)
+            return True
+    except Exception as exc:
+        print(f"[WARNING] Failed to remove instance dir {profile_name}: {exc}")
+    return False
+
+
+def get_instance_status(profile_name):
+    alive = is_instance_alive(profile_name)
     paused = os.path.exists(get_instance_state_filepath(profile_name, CONST_MAXBOT_INT28_FILE))
     return {
         "id": profile_name,
@@ -345,7 +416,7 @@ def migrate_config(config_dict):
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
-    for section in ["advanced", "kktix", "tixcraft", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
+    for section in ["advanced", "kktix", "tixcraft", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline", "time_calibration"]:
         if section in default:
             if section not in config_dict or not isinstance(config_dict[section], dict):
                 config_dict[section] = dict(default[section])
@@ -359,6 +430,31 @@ def migrate_config(config_dict):
     for key, value in default.items():
         if key not in dict_sections and key not in config_dict:
             config_dict[key] = value
+
+    if "refresh_calibration" in config_dict:
+        from refresh_timing import DEFAULT_REFRESH_CALIBRATION
+
+        if not isinstance(config_dict["refresh_calibration"], dict):
+            config_dict["refresh_calibration"] = {}
+        migrated_calibration = dict(DEFAULT_REFRESH_CALIBRATION)
+        migrated_calibration.update(config_dict["refresh_calibration"])
+        migrated_calibration["enable"] = False
+        migrated_calibration["auto_calibrate"] = False
+        migrated_calibration["advanced_delay_mode"] = normalize_advanced_delay_mode(
+            migrated_calibration.get("advanced_delay_mode")
+        )
+        config_dict["refresh_calibration"] = migrated_calibration
+
+    config_dict["time_calibration"] = normalize_time_calibration_config(
+        config_dict.get("time_calibration"),
+        default["time_calibration"],
+    )
+
+    if "advanced" in config_dict:
+        config_dict["advanced"]["auto_reload_page_interval"] = normalize_non_negative_float(
+            config_dict["advanced"].get("auto_reload_page_interval"),
+            default["advanced"]["auto_reload_page_interval"],
+        )
 
     return config_dict
 
@@ -393,6 +489,82 @@ def reset_json():
 
     config_dict = get_default_config()
     return config_filepath, config_dict
+
+
+def normalize_non_negative_float_default(default_value):
+    try:
+        normalized_default = float(default_value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(normalized_default):
+        return 0.0
+    return max(0.0, normalized_default)
+
+
+def normalize_non_negative_float(value, default_value):
+    if value in (None, ""):
+        return normalize_non_negative_float_default(default_value)
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        return normalize_non_negative_float_default(default_value)
+    if not math.isfinite(normalized):
+        return normalize_non_negative_float_default(default_value)
+    return max(0.0, normalized)
+
+
+def normalize_positive_int(value, default_value, minimum=1, maximum=3600):
+    try:
+        normalized = int(float(value))
+    except (TypeError, ValueError):
+        normalized = int(default_value)
+    return max(minimum, min(maximum, normalized))
+
+
+def normalize_time_calibration_config(raw_config, default_config):
+    if not isinstance(raw_config, dict):
+        raw_config = {}
+    config = dict(default_config)
+    config.update(raw_config)
+    mode = str(config.get("mode", "auto")).strip().lower()
+    if mode not in ("auto", "ntp", "http", "system"):
+        mode = "auto"
+    config["mode"] = mode
+
+    raw_servers = config.get("ntp_servers", default_config.get("ntp_servers", []))
+    if isinstance(raw_servers, str):
+        servers = [item.strip() for item in raw_servers.split(",") if item.strip()]
+    elif isinstance(raw_servers, list):
+        servers = [str(item).strip() for item in raw_servers if str(item).strip()]
+    else:
+        servers = list(default_config.get("ntp_servers", []))
+    config["ntp_servers"] = servers[:8]
+    config["ntp_timeout_ms"] = normalize_positive_int(
+        config.get("ntp_timeout_ms"),
+        default_config.get("ntp_timeout_ms", 1000),
+        50,
+        10000,
+    )
+    config["ntp_samples_per_server"] = normalize_positive_int(
+        config.get("ntp_samples_per_server"),
+        default_config.get("ntp_samples_per_server", 3),
+        1,
+        10,
+    )
+    config["ntp_min_valid_samples"] = normalize_positive_int(
+        config.get("ntp_min_valid_samples"),
+        default_config.get("ntp_min_valid_samples", 2),
+        1,
+        10,
+    )
+    config["background_refresh_seconds"] = normalize_positive_int(
+        config.get("background_refresh_seconds"),
+        default_config.get("background_refresh_seconds", 300),
+        60,
+        86400,
+    )
+    return config
+
 
 def maxbot_idle(profile_name=""):
     idle_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_INT28_FILE)
@@ -480,6 +652,29 @@ def change_maxbot_status_by_keyword():
             if util.is_text_match_keyword(advanced["resume_keyword_second"], current_sec):
                 maxbot_resume(profile_name)
 
+
+def cleanup_orphan_instance_dirs():
+    instances_dir = os.path.join(util.get_app_root(), "instances")
+    removed = []
+    preserved = []
+    if not os.path.isdir(instances_dir):
+        return removed, preserved
+
+    valid_names = set(list_profile_names())
+    for item in sorted(os.listdir(instances_dir)):
+        item_path = os.path.join(instances_dir, item)
+        if not os.path.isdir(item_path) or item in valid_names:
+            continue
+        if is_instance_alive(item):
+            preserved.append(item)
+            print(f"[CLEANUP] Preserved live orphan instance dir: {item}")
+            continue
+        if remove_instance_state_dir(item):
+            removed.append(item)
+            print(f"[CLEANUP] Removed orphan instance dir: {item}")
+    return removed, preserved
+
+
 def clean_tmp_file():
     app_root = util.get_app_root()
     remove_file_list = [CONST_MAXBOT_LAST_URL_FILE
@@ -502,17 +697,7 @@ def clean_tmp_file():
             except Exception as e:
                 print(f"[WARNING] Failed to remove {item}: {e}")
 
-    instances_dir = os.path.join(app_root, "instances")
-    if os.path.isdir(instances_dir):
-        valid_names = set(list_profile_names())
-        for item in os.listdir(instances_dir):
-            item_path = os.path.join(instances_dir, item)
-            if os.path.isdir(item_path) and item not in valid_names:
-                try:
-                    shutil.rmtree(item_path)
-                    print(f"[CLEANUP] Removed orphan instance dir: {item}")
-                except Exception as e:
-                    print(f"[WARNING] Failed to remove orphan instance dir {item}: {e}")
+    cleanup_orphan_instance_dirs()
 
 class NoCacheStaticFileHandler(StaticFileHandler):
     """Custom StaticFileHandler that prevents stale settings UI assets."""
@@ -522,6 +707,318 @@ class NoCacheStaticFileHandler(StaticFileHandler):
             self.set_header('Cache-Control', 'no-cache, no-store, must-revalidate')
             self.set_header('Pragma', 'no-cache')
             self.set_header('Expires', '0')
+
+
+def normalize_time_source_url(raw_url):
+    value = (raw_url or "").strip()
+    if not value:
+        value = "https://time.is/"
+    if "://" not in value:
+        value = "https://" + value
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("time source must be an http/https URL")
+    if parsed.username or parsed.password:
+        raise ValueError("time source URL must not include credentials")
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", parsed.params, parsed.query, ""))
+
+
+def is_public_time_source_host(hostname):
+    try:
+        addr_infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    if not addr_infos:
+        return False
+    for info in addr_infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
+def ensure_public_calibration_url(raw_url, label):
+    url = normalize_time_source_url(raw_url)
+    parsed = urlparse(url)
+    if not is_public_time_source_host(parsed.hostname):
+        raise ValueError(f"{label} host must resolve to a public address")
+    return url
+
+
+def request_public_url(method, url, headers, timeout, stream=False, max_redirects=3):
+    current_url = ensure_public_calibration_url(url, "redirect")
+    for _ in range(max_redirects + 1):
+        response = requests.request(
+            method,
+            current_url,
+            headers=headers,
+            timeout=timeout,
+            stream=stream,
+            allow_redirects=False,
+        )
+        if response.is_redirect or response.is_permanent_redirect:
+            location = response.headers.get("Location")
+            response.close()
+            if not location:
+                raise ValueError("redirect response missing Location header")
+            current_url = ensure_public_calibration_url(urljoin(current_url, location), "redirect")
+            continue
+        return response
+    raise ValueError("too many redirects")
+
+
+def parse_server_time_from_json(data):
+    for key in ("utc_datetime", "datetime", "dateTime", "currentDateTime"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized = value.strip().replace("Z", "+00:00")
+            try:
+                parsed = datetime.fromisoformat(normalized)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(timezone.utc)
+            except ValueError:
+                pass
+
+    for key in ("unixtime", "unixTime", "timestamp"):
+        value = data.get(key)
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            continue
+        if timestamp > 100000000000:
+            timestamp = timestamp / 1000
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    return None
+
+
+def parse_response_server_time(response):
+    content_type = response.headers.get("Content-Type", "")
+    if "json" in content_type.lower():
+        try:
+            parsed = parse_server_time_from_json(response.json())
+            if parsed is not None:
+                return parsed, "json"
+        except Exception:
+            pass
+
+    date_header = response.headers.get("Date")
+    if not date_header:
+        return None, ""
+    parsed = parsedate_to_datetime(date_header)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc), "http-date"
+
+
+def calibrate_time_source_url(raw_url, samples=5):
+    url = ensure_public_calibration_url(raw_url, "time source")
+
+    try:
+        sample_count = max(1, min(10, int(samples)))
+    except Exception:
+        sample_count = 5
+
+    headers = {
+        "User-Agent": f"{APP_NAME}/{APP_DISPLAY_VERSION} time-calibration",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    sample_rows = []
+    failures = []
+    for _ in range(sample_count):
+        started_wall = datetime.now(timezone.utc)
+        started_mono = time.perf_counter()
+        try:
+            response = request_public_url("GET", url, headers=headers, timeout=4)
+        except Exception as exc:
+            failures.append(str(exc))
+            continue
+        ended_mono = time.perf_counter()
+        ended_wall = datetime.now(timezone.utc)
+
+        try:
+            server_time, source_type = parse_response_server_time(response)
+        except Exception as exc:
+            failures.append(str(exc))
+            response.close()
+            continue
+
+        rtt_ms = (ended_mono - started_mono) * 1000
+        midpoint = started_wall + ((ended_wall - started_wall) / 2)
+        offset_ms = None
+        if server_time is not None:
+            offset_ms = (server_time - midpoint).total_seconds() * 1000
+
+        sample_rows.append({
+            "rtt_ms": round(rtt_ms, 1),
+            "offset_ms": None if offset_ms is None else round(offset_ms),
+            "source": source_type,
+            "final_url": response.url,
+        })
+        response.close()
+        time.sleep(0.05)
+
+    if not sample_rows:
+        reason = failures[-1] if failures else "no usable response"
+        raise ValueError(f"time calibration failed: {reason}")
+
+    best_sample = min(sample_rows, key=lambda item: item["rtt_ms"])
+    offsets = [row["offset_ms"] for row in sample_rows if row["offset_ms"] is not None]
+    offset_estimate = robust_estimate(offsets)
+    rtt_estimate = robust_estimate([row["rtt_ms"] for row in sample_rows])
+    clock_offset_ms = round(offset_estimate["value_ms"]) if offsets else 0
+    clock_uncertainty_ms = round(offset_estimate["uncertainty_ms"]) if offsets else 0
+    estimated_one_way_delay_ms = max(1, round(best_sample["rtt_ms"] / 2))
+
+    return {
+        "success": True,
+        "url": url,
+        "final_url": best_sample["final_url"],
+        "sample_count": len(sample_rows),
+        "source": "http",
+        "clock_offset_ms": clock_offset_ms,
+        "clock_uncertainty_ms": clock_uncertainty_ms,
+        "estimated_one_way_delay_ms": estimated_one_way_delay_ms,
+        "network_uplink_ms": estimated_one_way_delay_ms,
+        "best_rtt_ms": best_sample["rtt_ms"],
+        "rtt_p50_ms": rtt_estimate["p50_ms"],
+        "rtt_p95_ms": rtt_estimate["p95_ms"],
+        "rtt_p99_ms": rtt_estimate["p99_ms"],
+        "confidence": offset_estimate["confidence"] if offsets else "low",
+        "time_source_type": best_sample["source"],
+        "samples": sample_rows,
+        "warning": "HTTP Date is usually second-precision. estimated_one_way_delay_ms is not exact uplink delay.",
+    }
+
+
+def estimate_ticket_site_latency(raw_url, samples=3):
+    url = ensure_public_calibration_url(raw_url, "ticket site")
+
+    try:
+        sample_count = max(1, min(5, int(samples)))
+    except Exception:
+        sample_count = 3
+
+    headers = {
+        "User-Agent": f"{APP_NAME}/{APP_DISPLAY_VERSION} latency-estimate",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    sample_rows = []
+    failures = []
+    for _ in range(sample_count):
+        started_mono = time.perf_counter()
+        response = None
+        method = "HEAD"
+        try:
+            response = request_public_url("HEAD", url, headers=headers, timeout=4)
+            if response.status_code in (403, 405) or response.status_code >= 500:
+                response.close()
+                method = "GET"
+                response = request_public_url("GET", url, headers=headers, timeout=4, stream=True)
+            ended_mono = time.perf_counter()
+        except Exception as exc:
+            failures.append(str(exc))
+            if response is not None:
+                response.close()
+            continue
+
+        rtt_ms = (ended_mono - started_mono) * 1000
+        sample_rows.append({
+            "method": method,
+            "status_code": response.status_code,
+            "rtt_ms": round(rtt_ms, 1),
+            "final_url": response.url,
+        })
+        response.close()
+        time.sleep(0.08)
+
+    if not sample_rows:
+        reason = failures[-1] if failures else "no usable response"
+        raise ValueError(f"ticket latency estimate failed: {reason}")
+
+    best_sample = min(sample_rows, key=lambda item: item["rtt_ms"])
+    rtt_estimate = robust_estimate([row["rtt_ms"] for row in sample_rows])
+    estimated_one_way_delay_ms = max(1, round(best_sample["rtt_ms"] / 2))
+    jitter_ms = round(rtt_estimate["p95_ms"] - rtt_estimate["p50_ms"], 1)
+
+    return {
+        "success": True,
+        "source": "ticket-site",
+        "url": url,
+        "final_url": best_sample["final_url"],
+        "sample_count": len(sample_rows),
+        "network_uplink_ms": estimated_one_way_delay_ms,
+        "estimated_one_way_delay_ms": estimated_one_way_delay_ms,
+        "best_rtt_ms": best_sample["rtt_ms"],
+        "rtt_p50_ms": rtt_estimate["p50_ms"],
+        "rtt_p95_ms": rtt_estimate["p95_ms"],
+        "rtt_p99_ms": rtt_estimate["p99_ms"],
+        "uncertainty_ms": rtt_estimate["uncertainty_ms"],
+        "confidence": rtt_estimate["confidence"],
+        "jitter_ms": jitter_ms,
+        "samples": sample_rows,
+        "warning": "This estimates browser/network reachability only. It cannot predict queueing, captcha, ticket inventory, or exact one-way delay.",
+    }
+
+
+def calibrate_time_by_mode(body):
+    mode = str(body.get("mode") or "http").strip().lower()
+    if mode not in ("auto", "ntp", "http", "system"):
+        mode = "http"
+
+    if mode == "system":
+        return {
+            "success": True,
+            "source": "system",
+            "clock_offset_ms": 0,
+            "clock_uncertainty_ms": 999999,
+            "network_uplink_ms": 0,
+            "estimated_one_way_delay_ms": 0,
+            "sample_count": 0,
+            "confidence": "low",
+            "warning": "Using local system clock without external calibration.",
+        }
+
+    if mode == "ntp":
+        servers = body.get("ntp_servers") or DEFAULT_TIME_CALIBRATION["ntp_servers"]
+        if isinstance(servers, str):
+            servers = [item.strip() for item in servers.split(",") if item.strip()]
+        return calibrate_ntp_servers(
+            servers,
+            timeout_ms=body.get("ntp_timeout_ms", DEFAULT_TIME_CALIBRATION["ntp_timeout_ms"]),
+            samples_per_server=body.get("samples", body.get("ntp_samples_per_server", DEFAULT_TIME_CALIBRATION["ntp_samples_per_server"])),
+            min_valid_samples=body.get("ntp_min_valid_samples", DEFAULT_TIME_CALIBRATION["ntp_min_valid_samples"]),
+        )
+
+    if mode == "auto":
+        candidates = []
+        try:
+            ntp_result = calibrate_time_by_mode({**body, "mode": "ntp"})
+            ntp_result["age_seconds"] = 0
+            candidates.append(ntp_result)
+        except Exception as exc:
+            candidates.append({"success": False, "source": "ntp", "error": str(exc)})
+        try:
+            http_result = calibrate_time_source_url(body.get("url", ""), body.get("samples", 5))
+            http_result["age_seconds"] = 0
+            candidates.append(http_result)
+        except Exception as exc:
+            candidates.append({"success": False, "source": "http", "error": str(exc)})
+        selected = select_time_source(candidates)
+        selected["candidates"] = candidates
+        return selected
+
+    return calibrate_time_source_url(body.get("url", ""), body.get("samples", 5))
+
 
 class QuestionHandler(tornado.web.RequestHandler):
     def get(self):
@@ -574,6 +1071,13 @@ class InstancesHandler(tornado.web.RequestHandler):
     def get(self):
         instances = [get_instance_status(name) for name in list_instance_ids()]
         self.write({"instances": instances})
+
+
+class CleanupInstancesHandler(tornado.web.RequestHandler):
+    def get(self):
+        removed, preserved = cleanup_orphan_instance_dirs()
+        self.write({"success": True, "removed": removed, "preserved": preserved})
+
 
 class PauseHandler(tornado.web.RequestHandler):
     def get(self):
@@ -756,13 +1260,28 @@ class ProfilesHandler(tornado.web.RequestHandler):
             self.set_status(404)
             self.write({"success": False, "error": "profile not found"})
             return
+        related_instances = get_related_instance_ids(profile_name)
+        alive_instances = [instance_id for instance_id in related_instances if is_instance_alive(instance_id)]
+        if alive_instances:
+            for instance_id in alive_instances:
+                maxbot_stop(instance_id)
+            still_alive = wait_for_instances_to_stop(alive_instances)
+            if still_alive:
+                self.set_status(409)
+                self.write({
+                    "success": False,
+                    "error": "instance still running",
+                    "running_instances": still_alive,
+                })
+                return
         try:
             os.remove(config_filepath)
+            removed_dirs = [instance_id for instance_id in related_instances if remove_instance_state_dir(instance_id)]
         except Exception as exc:
             self.set_status(500)
             self.write({"success": False, "error": str(exc)})
             return
-        self.write({"success": True})
+        self.write({"success": True, "stopped_instances": alive_instances, "removed_instance_dirs": removed_dirs})
 
 
 class SendkeyHandler(tornado.web.RequestHandler):
@@ -795,10 +1314,34 @@ class SendkeyHandler(tornado.web.RequestHandler):
 
         self.write({"return": True})
 
+
+def send_discord_webhook_test(webhook_url, payload):
+    return requests.post(webhook_url, json=payload, timeout=5.0)
+
+
+def send_telegram_test_messages(url, chat_ids, text, bot_token):
+    errors = []
+    ok_count = 0
+    for cid in chat_ids:
+        try:
+            payload = {"chat_id": cid, "text": text}
+            response = requests.post(url, json=payload, timeout=5.0)
+            result = response.json()
+            if response.status_code == 200 and result.get("ok", False):
+                ok_count += 1
+            else:
+                desc = result.get("description", "HTTP %d" % response.status_code)
+                errors.append(f"{cid}: {desc}")
+        except (requests.RequestException, ValueError) as exc:
+            safe_msg = str(exc).replace(bot_token, "***") if bot_token else str(exc)
+            errors.append(f"{cid}: {safe_msg}")
+    return ok_count, errors
+
+
 class TestDiscordWebhookHandler(tornado.web.RequestHandler):
     ALLOWED_HOSTS = ("discord.com", "discordapp.com")
 
-    def post(self):
+    async def post(self):
         try:
             body = json.loads(self.request.body)
         except Exception:
@@ -839,7 +1382,12 @@ class TestDiscordWebhookHandler(tornado.web.RequestHandler):
             "username": APP_NAME
         }
         try:
-            response = requests.post(webhook_url, json=payload, timeout=5.0)
+            response = await IOLoop.current().run_in_executor(
+                CALIBRATION_EXECUTOR,
+                send_discord_webhook_test,
+                webhook_url,
+                payload,
+            )
             if response.status_code in (200, 204):
                 debug.log("[Discord Webhook] Test OK")
                 self.write({"success": True, "message": "ok"})
@@ -851,7 +1399,7 @@ class TestDiscordWebhookHandler(tornado.web.RequestHandler):
             self.write({"success": False, "message": str(exc)})
 
 class TestTelegramHandler(tornado.web.RequestHandler):
-    def post(self):
+    async def post(self):
         try:
             body = json.loads(self.request.body)
         except Exception:
@@ -890,21 +1438,14 @@ class TestTelegramHandler(tornado.web.RequestHandler):
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         custom_message = body.get("custom_message", "").strip()
         text = custom_message if custom_message else f"[Test] {APP_NAME} Telegram test successful!"
-        errors = []
-        ok_count = 0
-        for cid in chat_ids:
-            try:
-                payload = {"chat_id": cid, "text": text}
-                response = requests.post(url, json=payload, timeout=5.0)
-                result = response.json()
-                if response.status_code == 200 and result.get("ok", False):
-                    ok_count += 1
-                else:
-                    desc = result.get("description", "HTTP %d" % response.status_code)
-                    errors.append(f"{cid}: {desc}")
-            except (requests.RequestException, ValueError) as exc:
-                safe_msg = str(exc).replace(bot_token, "***") if bot_token else str(exc)
-                errors.append(f"{cid}: {safe_msg}")
+        ok_count, errors = await IOLoop.current().run_in_executor(
+            CALIBRATION_EXECUTOR,
+            send_telegram_test_messages,
+            url,
+            chat_ids,
+            text,
+            bot_token,
+        )
 
         if ok_count == len(chat_ids):
             debug.log("[Telegram] Test OK (%d chat(s))" % ok_count)
@@ -916,6 +1457,84 @@ class TestTelegramHandler(tornado.web.RequestHandler):
             msg = "; ".join(errors)
             debug.log("[Telegram] Test failed: %s" % msg)
             self.write({"success": False, "message": msg})
+
+
+class TimeCalibrationHandler(tornado.web.RequestHandler):
+    async def post(self):
+        try:
+            self.set_header("Content-Type", "application/json; charset=utf-8")
+        except Exception:
+            pass
+
+        try:
+            body = json.loads(self.request.body or b"{}")
+        except Exception:
+            self.set_status(400)
+            self.write({"success": False, "error": "wrong json format"})
+            return
+
+        try:
+            result = await IOLoop.current().run_in_executor(
+                CALIBRATION_EXECUTOR,
+                calibrate_time_by_mode,
+                body,
+            )
+        except Exception as exc:
+            self.set_status(400)
+            self.write({"success": False, "error": str(exc)})
+            return
+
+        self.write(result)
+
+
+class TicketLatencyHandler(tornado.web.RequestHandler):
+    async def post(self):
+        try:
+            self.set_header("Content-Type", "application/json; charset=utf-8")
+        except Exception:
+            pass
+
+        try:
+            body = json.loads(self.request.body or b"{}")
+        except Exception:
+            self.set_status(400)
+            self.write({"success": False, "error": "wrong json format"})
+            return
+
+        try:
+            result = await IOLoop.current().run_in_executor(
+                CALIBRATION_EXECUTOR,
+                estimate_ticket_site_latency,
+                body.get("url", ""),
+                body.get("samples", 3),
+            )
+        except Exception as exc:
+            self.set_status(400)
+            self.write({"success": False, "error": str(exc)})
+            return
+
+        self.write(result)
+
+
+class PlatformTimingCapabilityHandler(tornado.web.RequestHandler):
+    def post(self):
+        try:
+            body = json.loads(self.request.body or b"{}")
+        except Exception:
+            self.set_status(400)
+            self.write({"success": False, "error": "wrong json format"})
+            return
+
+        config_dict = {"refresh_calibration": body.get("refresh_calibration", {})}
+        if "homepage" in body:
+            config_dict["homepage"] = body.get("homepage", "")
+        decision = get_platform_timing_capability(
+            body.get("platform_id"),
+            body.get("url") or body.get("homepage"),
+            config_dict,
+        )
+        self.write({"success": True, **decision.to_dict()})
+
 
 class OcrHandler(tornado.web.RequestHandler):
     def get(self):
@@ -1011,6 +1630,7 @@ async def main_server():
         # status api
         ("/status", StatusHandler),
         ("/instances", InstancesHandler),
+        ("/cleanup_instances", CleanupInstancesHandler),
         ("/pause", PauseHandler),
         ("/resume", ResumeHandler),
         ("/stop", StopHandler),
@@ -1024,6 +1644,9 @@ async def main_server():
 
         ("/test_discord_webhook", TestDiscordWebhookHandler),
         ("/test_telegram", TestTelegramHandler),
+        ("/time_calibration", TimeCalibrationHandler),
+        ("/ticket_latency", TicketLatencyHandler),
+        ("/platform_timing_capability", PlatformTimingCapabilityHandler),
         ("/ocr", OcrHandler),
         ("/query", QueryHandler),
         ("/question", QuestionHandler),

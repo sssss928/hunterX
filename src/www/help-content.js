@@ -609,10 +609,10 @@ const HELP_CONTENT = {
     short: '讓程式在特定時間點才開始搶票',
     detail: `
       <p>設定程式在指定的日期時間才開始嘗試搶票。用於場次在特定時間才開放售票的情境。</p>
-      <p><strong>格式：</strong><code>YYYY/MM/DD HH:MM:SS</code></p>
-      <p>範例：<code>2025/12/25 10:00:00</code></p>
-      <p>在指定時間到達前，程式會持續等待並每秒確認時間。時間到達後立即開始刷新搶票。</p>
-      <p class="text-muted small mb-0">提示：建議設定比開售時間早 1-2 秒，補償網路與處理延遲。</p>`,
+      <p><strong>格式：</strong><code>YYYY/MM/DD HH:MM:SS</code> 或 <code>YYYY/MM/DD HH:MM:SS.SSS</code></p>
+      <p>範例：<code>2025/12/25 10:00:00.000</code></p>
+      <p>程式會在你輸入的指定時間重整頁面，不會依延遲估算自動提前。如果想提早刷新，請直接輸入較早的毫秒時間，例如 <code>2026/07/13 09:59:59.850</code>。</p>
+      <p class="text-muted small mb-0">提示：倒數顯示可每秒更新；實際觸發使用獨立的 monotonic deadline，不由畫面輪詢精度決定。</p>`,
     faq: [
       {
         q: '留空會怎樣？',

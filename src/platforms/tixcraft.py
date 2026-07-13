@@ -23,6 +23,7 @@ except Exception:
 from zendriver import cdp
 
 import util
+from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     check_and_handle_pause,
     sleep_with_pause_check,
@@ -177,11 +178,7 @@ def _process_queue_it_state(url, state, current_time):
 
 
 def _get_auto_reload_interval(config_dict):
-    try:
-        interval = float(config_dict.get("advanced", {}).get("auto_reload_page_interval", 0) or 0)
-    except (TypeError, ValueError):
-        interval = 0
-    return max(0, interval)
+    return get_auto_reload_interval(config_dict)
 
 
 async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
@@ -198,9 +195,12 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
         _state[url_key] = current_url
         _state[next_key] = 0
 
+    if interval <= 0:
+        return False
+
     next_at = _state.get(next_key, 0)
-    if interval <= 0 or now >= next_at:
-        _state[next_key] = now + interval if interval > 0 else 0
+    if now >= next_at:
+        _state[next_key] = now + interval
         debug.log(f"{log_prefix} Reloading page now")
         try:
             await tab.reload()
@@ -3226,7 +3226,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
         # Issue #188: Set cooldown timestamp instead of async sleep (event handler doesn't block main loop)
         if is_sold_out_alert and dismiss_success:
-            interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
+            interval = get_auto_reload_interval(config_dict)
             if interval > 0:
                 cooldown_until = time.time() + interval
                 _state["sold_out_cooldown_until"] = cooldown_until

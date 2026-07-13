@@ -14,6 +14,7 @@ import time
 from zendriver import cdp
 
 import util
+from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     nodriver_check_modal_dialog_popup,
     play_sound_while_ordering,
@@ -615,15 +616,18 @@ async def nodriver_hkticketing_date_auto_select(tab, config_dict, fail_list):
     if not is_page_ready:
         auto_reload_coming_soon_page = config_dict["tixcraft"].get("auto_reload_coming_soon_page", False)
         if auto_reload_coming_soon_page:
-            debug.log("[HKTICKETING DATE] Page not ready, reloading...")
+            reload_interval = get_auto_reload_interval(config_dict)
 
-            if config_dict["advanced"]["auto_reload_page_interval"] > 0:
-                await asyncio.sleep(config_dict["advanced"]["auto_reload_page_interval"])
+            if reload_interval > 0:
+                debug.log("[HKTICKETING DATE] Page not ready, reloading...")
+                await asyncio.sleep(reload_interval)
 
-            try:
-                await tab.reload()
-            except Exception as exc:
-                pass
+                try:
+                    await tab.reload()
+                except Exception as exc:
+                    pass
+            else:
+                debug.log("[HKTICKETING DATE] Auto reload disabled; waiting")
 
     return is_date_submiting, fail_list
 
@@ -2355,8 +2359,9 @@ async def nodriver_hkticketing_url_redirect(tab, url, config_dict):
             except Exception as exc:
                 pass
 
-            if config_dict["advanced"]["auto_reload_page_interval"] > 0:
-                await asyncio.sleep(config_dict["advanced"]["auto_reload_page_interval"])
+            reload_interval = get_auto_reload_interval(config_dict)
+            if reload_interval > 0:
+                await asyncio.sleep(reload_interval)
 
             if is_redirected:
                 break
@@ -2431,8 +2436,9 @@ async def nodriver_hkticketing_content_refresh(tab, url, config_dict):
             except Exception as exc:
                 pass
 
-            if config_dict["advanced"]["auto_reload_page_interval"] > 0:
-                await asyncio.sleep(config_dict["advanced"]["auto_reload_page_interval"])
+            reload_interval = get_auto_reload_interval(config_dict)
+            if reload_interval > 0:
+                await asyncio.sleep(reload_interval)
 
     return is_redirected
 

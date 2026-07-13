@@ -8,6 +8,7 @@ import random
 import time
 
 import util
+from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     check_and_handle_pause,
     handle_cloudflare_challenge,
@@ -56,7 +57,7 @@ async def nodriver_cityline_auto_retry_access(tab, url, config_dict):
         debug.log(f"[CITYLINE] goEvent() failed: {exc}")
         pass
 
-    auto_reload_page_interval = config_dict["advanced"]["auto_reload_page_interval"]
+    auto_reload_page_interval = get_auto_reload_interval(config_dict)
     if auto_reload_page_interval > 0:
         await asyncio.sleep(auto_reload_page_interval)
 
@@ -215,12 +216,16 @@ async def nodriver_cityline_date_auto_select(tab, config_dict):
             debug.log("[DATE FALLBACK] date_auto_fallback=false, fallback is disabled")
             if auto_reload_coming_soon_page and len(formated_area_list) == 0:
                 # Auto reload if no dates available
-                debug.log("[DATE FALLBACK] Auto-reloading page...")
-                try:
-                    await asyncio.sleep(config_dict["advanced"]["auto_reload_page_interval"])
-                    await tab.reload()
-                except Exception:
-                    pass
+                reload_interval = get_auto_reload_interval(config_dict)
+                if reload_interval > 0:
+                    debug.log("[DATE FALLBACK] Auto-reloading page...")
+                    try:
+                        await asyncio.sleep(reload_interval)
+                        await tab.reload()
+                    except Exception:
+                        pass
+                else:
+                    debug.log("[DATE FALLBACK] Auto reload disabled; waiting for manual intervention...")
             else:
                 debug.log("[DATE FALLBACK] Waiting for manual intervention...")
             return False

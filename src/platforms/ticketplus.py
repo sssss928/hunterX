@@ -12,6 +12,7 @@ import urllib.parse
 from zendriver import cdp
 
 import util
+from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     check_and_handle_pause,
     evaluate_with_pause_check,
@@ -667,18 +668,17 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
 
         if auto_reload_coming_soon_page_enable and is_vue_ready and (not formated_area_list or len(formated_area_list) == 0):
             try:
-                reload_interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
+                reload_interval = get_auto_reload_interval(config_dict)
                 if reload_interval > 0:
                     debug.log(f"[TicketPlus DATE] Waiting {reload_interval}s before auto-reload...")
                     await asyncio.sleep(reload_interval)
+                    clicked = await _ticketplus_click_refresh_button(tab, debug)
+                    if not clicked:
+                        await tab.reload()
+                        debug.log("[TicketPlus DATE] Page reloaded, waiting for content...")
+                        await asyncio.sleep(0.5)
                 else:
-                    await asyncio.sleep(1.0)
-
-                clicked = await _ticketplus_click_refresh_button(tab, debug)
-                if not clicked:
-                    await tab.reload()
-                    debug.log("[TicketPlus DATE] Page reloaded, waiting for content...")
-                    await asyncio.sleep(0.5)
+                    debug.log("[TicketPlus DATE] Auto reload disabled")
             except Exception as exc:
                 debug.log(f"[TicketPlus DATE] Auto reload failed: {exc}")
 
@@ -712,7 +712,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     exclude_keywords = [keyword_exclude.strip()] if keyword_exclude.strip() else []
 
         # Wait for Vue.js elements to render
-        auto_reload_interval = config_dict["advanced"].get("auto_reload_page_interval", 5)
+        auto_reload_interval = get_auto_reload_interval(config_dict, default=5)
         max_vue_wait = max(6.0, min(15.0, auto_reload_interval * 2))
         vue_check_interval = 0.15
         vue_wait_start = time.time()
@@ -1530,11 +1530,10 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
     else:
         debug.log("Ticket selection failed, cannot continue")
 
-        auto_reload_interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
-        if auto_reload_interval >= 0:
-            if auto_reload_interval > 0:
-                debug.log(f"[AUTO RELOAD] Waiting {auto_reload_interval} seconds before reload...")
-                await asyncio.sleep(auto_reload_interval)
+        auto_reload_interval = get_auto_reload_interval(config_dict)
+        if auto_reload_interval > 0:
+            debug.log(f"[AUTO RELOAD] Waiting {auto_reload_interval} seconds before reload...")
+            await asyncio.sleep(auto_reload_interval)
             debug.log("[AUTO RELOAD] Refreshing ticket count...")
             try:
                 clicked = await _ticketplus_click_refresh_button(tab, debug)
@@ -1543,6 +1542,8 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
                     debug.log("[AUTO RELOAD] Full page reload (button not found)")
             except Exception as reload_exc:
                 debug.log(f"[AUTO RELOAD] Reload failed: {reload_exc}")
+        else:
+            debug.log("[AUTO RELOAD] Auto reload disabled")
 
     debug.log("=== TicketPlus Simplified Booking Ended ===")
 

@@ -32,7 +32,20 @@ import urllib.parse
 
 import util
 import settings
+from refresh_timing import (
+    RefreshTriggerController,
+    TriggerPhase,
+    calculate_refresh_trigger_datetime,
+    compute_remaining_ns,
+    describe_refresh_calibration,
+    format_remaining_seconds,
+    get_effective_refresh_calibration,
+    parse_refresh_datetime_value,
+    sleep_until_deadline,
+    wall_datetime_to_monotonic_deadline_ns,
+)
 from NonBrowser import NonBrowser
+from platforms.common_async import is_interval_due
 
 try:
     import ddddocr
@@ -68,6 +81,8 @@ warnings.simplefilter('ignore',InsecureRequestWarning)
 ssl._create_default_https_context = ssl._create_unverified_context
 logging.basicConfig()
 logger = logging.getLogger('logger')
+
+CONFIG_RELOAD_CHECK_INTERVAL_SEC = 0.5
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -497,37 +512,79 @@ async def _inject_clarity_stub_for_ticketplus(tab):
 
 def parse_refresh_datetime(target_str):
     # Parse refresh_datetime setting to a datetime object.
-    # Supports: "YYYY/MM/DD HH:MM:SS" | "HH:MM:SS" (today) | "" (disabled)
+    # Supports: "YYYY/MM/DD HH:MM:SS(.SSS)" | "HH:MM:SS(.SSS)" (today) | "" (disabled)
     # Returns: datetime or None
     if not target_str or not target_str.strip():
         return None
     target_str = target_str.strip()
+    target_dt = parse_refresh_datetime_value(target_str)
+    if target_dt is not None:
+        return target_dt
     try:
-        if '/' in target_str:
-            return datetime.strptime(target_str, '%Y/%m/%d %H:%M:%S')
-        else:
-            # Stage 0: legacy HH:MM:SS format, treat as today
-            today = datetime.now().date()
-            t = datetime.strptime(target_str, '%H:%M:%S').time()
-            return datetime.combine(today, t)
+        # Stage 0: legacy HH:MM:SS format, treat as today.
+        today = datetime.now().date()
+        for fmt in ('%H:%M:%S.%f', '%H:%M:%S'):
+            try:
+                t = datetime.strptime(target_str, fmt).time()
+                return datetime.combine(today, t)
+            except ValueError:
+                pass
     except ValueError:
-        return None
+        pass
+    return None
 
 
-async def check_refresh_datetime_gate(tab, config_dict, state):
+def _should_suppress_target_boundary_action(current_url: str) -> bool:
+    url = (current_url or "").lower()
+    confirmed_path_markers = (
+        "/confirm",
+        "/checkout",
+        "/payment",
+        "/order",
+        "/cart",
+        "/ticket/verify",
+        "/booking",
+    )
+    return any(marker in url for marker in confirmed_path_markers)
+
+
+async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
     # Gate platform dispatching until refresh_datetime is reached.
     # Returns True if gate is active (caller should continue),
     # False if gate is cleared (proceed with dispatching).
     current_str = config_dict.get("refresh_datetime", "")
+    calibration, timing_decision = get_effective_refresh_calibration(config_dict, current_url)
+    state_key = current_str + "|" + json.dumps(calibration, sort_keys=True) + "|" + json.dumps(
+        timing_decision.to_dict(),
+        sort_keys=True,
+    )
+    controller = state.get("controller")
+    if controller is None:
+        controller = RefreshTriggerController()
+        state["controller"] = controller
 
-    # Detect config change: reset state if user changed the value
-    if current_str != state["target_str"]:
+    # Detect config change: reset state if user changed the value or delay-calibration offsets.
+    if state_key != state.get("state_key", "") and controller.phase not in (
+        TriggerPhase.FROZEN,
+        TriggerPhase.TRIGGERED,
+        TriggerPhase.POST_TRIGGER_RELOAD,
+    ):
+        state["state_key"] = state_key
         state["target_str"] = current_str
         state["reached"] = False
         state["last_countdown_print"] = 0
+        state["reported_plan"] = False
+        state["reported_platform_timing"] = False
+        state["target_boundary_done"] = False
+        state["target_boundary_deadline_monotonic_ns"] = None
+
+    if not state.get("reported_platform_timing", False):
+        for warning in timing_decision.warnings:
+            print(f"[REFRESH] {warning}")
+        state["reported_platform_timing"] = True
 
     # If already reached, no gating
-    if state["reached"]:
+    if state["reached"] or controller.phase == TriggerPhase.TRIGGERED:
         return False
 
     target_dt = parse_refresh_datetime(current_str)
@@ -537,22 +594,84 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
         return False
 
     now = datetime.now()
+    trigger_dt = calculate_refresh_trigger_datetime(target_dt, calibration)
+    plan = controller.arm(target_dt, calibration, state_key)
 
-    # Already past target time (covers "bot starts after target" case)
-    if now >= target_dt:
+    if calibration.get("enable", False):
+        freeze_seconds = calibration.get("freeze_before_seconds", 10)
+        if controller.maybe_freeze(target_dt, freeze_seconds):
+            print(
+                "[REFRESH-B] Freeze trigger:",
+                plan.computed_trigger_display,
+                "| target:",
+                target_dt.strftime('%Y/%m/%d %H:%M:%S.%f')[:-3],
+                "|",
+                describe_refresh_calibration(calibration),
+            )
+        if controller.plan is not None:
+            plan = controller.plan
+            trigger_dt = plan.local_trigger_time
+
+    target_boundary_required = calibration.get("enable", False) and plan.local_trigger_time < target_dt
+    if target_boundary_required and state.get("target_boundary_deadline_monotonic_ns") is None:
+        state["target_boundary_deadline_monotonic_ns"] = wall_datetime_to_monotonic_deadline_ns(target_dt, controller.clock)
+
+    if (
+        controller.phase == TriggerPhase.POST_TRIGGER_RELOAD
+        and target_boundary_required
+        and not state.get("target_boundary_done", False)
+    ):
+        boundary_deadline_ns = state.get("target_boundary_deadline_monotonic_ns")
+        if boundary_deadline_ns is not None and compute_remaining_ns(boundary_deadline_ns, controller.clock.monotonic_ns()) <= 0:
+            state["target_boundary_done"] = True
+            state["reached"] = True
+            if _should_suppress_target_boundary_action(current_url):
+                print(f"[REFRESH] Public-sale target boundary suppressed; workflow appears advanced: {current_url}")
+            else:
+                try:
+                    await tab.reload()
+                    print(
+                        "[REFRESH] Public-sale target boundary reached:",
+                        target_dt.strftime('%Y/%m/%d %H:%M:%S.%f')[:-3],
+                    )
+                except Exception as exc:
+                    print(f"[REFRESH] Target-boundary reload failed: {exc}")
+        return False
+
+    if controller.phase == TriggerPhase.POST_TRIGGER_RELOAD:
+        return False
+
+    # Already far past target: do not reload stale schedules repeatedly.
+    if (now - target_dt).total_seconds() > 60:
         state["reached"] = True
+        return False
+
+    # Reached trigger time. In B mode this can be before official sale time so
+    # the page request lands closer to the server-side opening boundary.
+    if controller.should_trigger_once():
+        state["reached"] = not target_boundary_required
         try:
             await tab.reload()
-            print("[REFRESH] Target time reached, starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
-        except Exception:
-            pass
+            controller.mark_post_trigger_reload()
+            print(
+                "[REFRESH] Trigger reached:",
+                plan.computed_trigger_display,
+                "| target:",
+                target_dt.strftime('%Y/%m/%d %H:%M:%S.%f')[:-3],
+                "|",
+                describe_refresh_calibration(calibration),
+            )
+        except Exception as exc:
+            print(f"[REFRESH] Trigger reload failed: {exc}")
         return False
 
     # Before target time: gate is active
-    remaining = (target_dt - now).total_seconds()
+    remaining_ns = controller.remaining_ns()
+    remaining = remaining_ns / 1_000_000_000
+    target_remaining = max(0.0, (target_dt - now).total_seconds())
 
     # Countdown display
-    now_mono = time.time()
+    now_mono = time.monotonic()
     should_print = False
     if remaining <= 60:
         if now_mono - state["last_countdown_print"] >= 1.0:
@@ -565,27 +684,37 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
         if remaining > 3600:
             hrs = int(remaining // 3600)
             mins = int((remaining % 3600) // 60)
-            print(f"[WAIT] Target: {current_str} | Remaining: {hrs}h {mins}m")
+            print(f"[WAIT] Target: {current_str} | Trigger remaining: {hrs}h {mins}m")
         elif remaining > 60:
             mins = int(remaining // 60)
             secs = int(remaining % 60)
-            print(f"[WAIT] Target: {current_str} | Remaining: {mins}m {secs}s")
+            print(f"[WAIT] Target: {current_str} | Trigger remaining: {mins}m {secs}s")
         else:
-            print(f"[WAIT] Target: {current_str} | Remaining: {remaining:.1f}s")
+            print(
+                f"[WAIT] Target: {current_str} | Trigger: {plan.computed_trigger_display} | "
+                f"Trigger remaining: {format_remaining_seconds(remaining_ns)} | Target remaining: {target_remaining:.1f}s"
+            )
         state["last_countdown_print"] = now_mono
 
-    # Final 2-second approach: yield to event loop instead of busy-waiting
-    # asyncio.sleep precision (~1ms on Windows) is sufficient; help text already
-    # instructs users to set refresh_datetime 1-2 seconds before the target.
+    # Final 2-second approach: bounded monotonic scheduling until the computed trigger.
     if remaining <= 2.0:
-        if remaining > 0:
-            await asyncio.sleep(remaining)
-        state["reached"] = True
-        try:
-            await tab.reload()
-            print("[REFRESH] Target time reached, starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
-        except Exception:
-            pass
+        if controller.trigger_deadline_monotonic_ns is not None:
+            await sleep_until_deadline(controller.trigger_deadline_monotonic_ns, controller.clock)
+        if controller.should_trigger_once():
+            state["reached"] = not target_boundary_required
+            try:
+                await tab.reload()
+                controller.mark_post_trigger_reload()
+                print(
+                    "[REFRESH] Trigger reached:",
+                    plan.computed_trigger_display,
+                    "| target:",
+                    target_dt.strftime('%Y/%m/%d %H:%M:%S.%f')[:-3],
+                    "|",
+                    describe_refresh_calibration(calibration),
+                )
+            except Exception as exc:
+                print(f"[REFRESH] Trigger reload failed: {exc}")
         return False
 
     return True
@@ -600,12 +729,14 @@ async def reload_config(config_dict, last_mtime, config_filepath):
             await asyncio.sleep(0.1)
             with open(config_filepath, 'r', encoding='utf-8') as json_data:
                 new_config = json.load(json_data)
+                new_config = settings.migrate_config(new_config)
 
                 # Update fields
                 fields = [
                     "ticket_number", "date_auto_select", "area_auto_select", "keyword_exclude",
                     "ocr_captcha", "tixcraft", "kktix", "cityline",
-                    "refresh_datetime", "contact", "date_auto_fallback", "area_auto_fallback"
+                    "refresh_datetime", "refresh_calibration", "contact",
+                    "date_auto_fallback", "area_auto_fallback"
                 ]
                 for field in fields:
                     if field in new_config:
@@ -758,11 +889,15 @@ async def main(args):
     config_mtime = 0
     if os.path.exists(config_filepath):
         config_mtime = os.path.getmtime(config_filepath)
+    last_config_reload_check = 0.0
 
     while True:
         await asyncio.sleep(0.05)
 
-        config_dict, config_mtime = await reload_config(config_dict, config_mtime, config_filepath)
+        loop_mono = time.monotonic()
+        if is_interval_due(loop_mono, last_config_reload_check, CONFIG_RELOAD_CHECK_INTERVAL_SEC):
+            last_config_reload_check = loop_mono
+            config_dict, config_mtime = await reload_config(config_dict, config_mtime, config_filepath)
 
         heartbeat_now = time.time()
         if heartbeat_now - last_heartbeat_time >= heartbeat_interval_sec:
@@ -832,7 +967,7 @@ async def main(args):
             continue
 
         # Gate: block platform dispatching until refresh_datetime target time
-        if await check_refresh_datetime_gate(tab, config_dict, refresh_datetime_state):
+        if await check_refresh_datetime_gate(tab, config_dict, refresh_datetime_state, url):
             await asyncio.sleep(0.1)
             continue
 

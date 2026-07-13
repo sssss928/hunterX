@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, overload
@@ -26,6 +27,16 @@ async def _maybe_await(value: T | None | Awaitable[T | None]) -> T | None:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def _finite_float(value: Any, error_message: str) -> float:
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(error_message) from exc
+    if not math.isfinite(normalized):
+        raise ValueError(error_message)
+    return normalized
 
 
 @overload
@@ -64,12 +75,15 @@ async def bounded_poll(
     polling continues until the timeout; this keeps transient DOM lookup errors
     from crashing normal browser flows while still making failures visible.
     """
-    if timeout < 0:
+    timeout_value = _finite_float(timeout, "timeout must be non-negative")
+    interval_value = _finite_float(interval, "interval must be positive")
+
+    if timeout_value < 0:
         raise ValueError("timeout must be non-negative")
-    if interval <= 0:
+    if interval_value <= 0:
         raise ValueError("interval must be positive")
 
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout_value
     last_error: Exception | None = None
 
     while True:
@@ -92,7 +106,7 @@ async def bounded_poll(
                 )
             return None
 
-        await asyncio.sleep(min(interval, remaining))
+        await asyncio.sleep(min(interval_value, remaining))
 
 
 async def run_cpu_bound(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -103,3 +117,35 @@ async def run_cpu_bound(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 def js_string_literal(value: str) -> str:
     """Serialize a Python string as a safe JavaScript string literal."""
     return json.dumps(value, ensure_ascii=False)
+
+
+def is_interval_due(now: float, last_check: float, interval: float) -> bool:
+    """Return True when a periodic background check should run."""
+    try:
+        interval_value = float(interval)
+    except (TypeError, ValueError):
+        interval_value = 0.0
+
+    if last_check <= 0 or interval_value <= 0 or not math.isfinite(interval_value):
+        return True
+    return (now - last_check) >= interval_value
+
+
+def get_auto_reload_interval(config_dict: dict[str, Any] | None, default: float = 0.0) -> float:
+    """Read the auto-reload interval as a non-negative number."""
+    advanced = config_dict.get("advanced", {}) if isinstance(config_dict, dict) else {}
+    raw_value = advanced.get("auto_reload_page_interval", default)
+    if raw_value in (None, ""):
+        raw_value = default
+    try:
+        interval = float(raw_value)
+    except (TypeError, ValueError):
+        interval = float(default)
+    if not math.isfinite(interval):
+        try:
+            interval = float(default)
+        except (TypeError, ValueError):
+            interval = 0.0
+    if not math.isfinite(interval):
+        interval = 0.0
+    return max(0.0, interval)

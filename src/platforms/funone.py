@@ -13,6 +13,7 @@ except Exception:
     pass
 
 import util
+from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     check_and_handle_pause,
     play_sound_while_ordering,
@@ -1944,7 +1945,7 @@ async def nodriver_funone_main(tab, url, config_dict):
                     # Check sold-out status first
                     is_sold_out, remaining, ticket_info = await nodriver_funone_check_sold_out(tab, config_dict)
                     ticket_number = config_dict.get("ticket_number", 2)
-                    auto_reload_interval = config_dict["advanced"].get("auto_reload_page_interval", 2)
+                    auto_reload_interval = get_auto_reload_interval(config_dict, default=2)
 
                     # Handle sold-out or insufficient tickets
                     if is_sold_out or (remaining > 0 and remaining < ticket_number):
@@ -1958,6 +1959,13 @@ async def nodriver_funone_main(tab, url, config_dict):
                                 _state["last_sold_out_logged"] = True
                         else:
                             debug.log(f"[FUNONE] Remaining {remaining} < needed {ticket_number}, refreshing...")
+
+                        if auto_reload_interval <= 0:
+                            if not _state.get("refresh_disabled_logged", False):
+                                debug.log("[FUNONE] Auto reload disabled; waiting without refresh")
+                                _state["refresh_disabled_logged"] = True
+                            await asyncio.sleep(0.5)
+                            return tab
 
                         # Click refresh button to trigger WebSocket update
                         refresh_clicked = await nodriver_funone_click_refresh_button(tab, config_dict)
@@ -1977,6 +1985,7 @@ async def nodriver_funone_main(tab, url, config_dict):
                     # Tickets available - reset retry counter and proceed
                     _state["refresh_retry_count"] = 0
                     _state["last_sold_out_logged"] = False
+                    _state["refresh_disabled_logged"] = False
 
                 # Try area selection first (for zone_box pages)
                 area_selected = await nodriver_funone_area_auto_select(tab, url, config_dict)
@@ -1990,6 +1999,13 @@ async def nodriver_funone_main(tab, url, config_dict):
                     if not qty_set:
                         # Keyword ticket is sold out - keep refreshing until available
                         if _state.get("qty_fail_reason") == "sold_out":
+                            if auto_reload_interval <= 0:
+                                if not _state.get("qty_reload_disabled_logged", False):
+                                    debug.log("[FUNONE] Keyword ticket sold out; auto reload disabled")
+                                    _state["qty_reload_disabled_logged"] = True
+                                await asyncio.sleep(0.5)
+                                return tab
+
                             refresh_clicked = await nodriver_funone_click_refresh_button(tab, config_dict)
                             if not _state.get("qty_sold_out_refreshing"):
                                 debug.log(f"[FUNONE] Keyword ticket sold out, auto-refreshing every {auto_reload_interval}s...")
@@ -2002,6 +2018,7 @@ async def nodriver_funone_main(tab, url, config_dict):
                         return tab
 
                     _state["qty_sold_out_refreshing"] = False
+                    _state["qty_reload_disabled_logged"] = False
                     await tab.sleep(0.3)
 
                     # Check agreements

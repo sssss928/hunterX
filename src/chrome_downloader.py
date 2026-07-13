@@ -217,9 +217,9 @@ def download_chrome(download_dir: Optional[str] = None, no_ssl: bool = False) ->
     # Verify extraction
     chrome_path = get_downloaded_chrome_path(download_dir)
     if chrome_path:
-        # Make executable on Unix systems
+        # Make executable for the current user on Unix systems.
         if not sys.platform.startswith("win"):
-            os.chmod(chrome_path, 0o755)
+            os.chmod(chrome_path, 0o700)
         print(f"[Chrome Downloader] Chrome installed successfully: {chrome_path}")
         return chrome_path
 

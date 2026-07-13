@@ -19,6 +19,7 @@ import webbrowser
 from zendriver import cdp
 
 import util
+from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     asyncio_sleep_with_pause_check,
     check_and_handle_pause,
@@ -71,11 +72,7 @@ _state = {}
 
 
 def _get_auto_reload_interval(config_dict):
-    try:
-        interval = float(config_dict.get("advanced", {}).get("auto_reload_page_interval", 0) or 0)
-    except (TypeError, ValueError):
-        interval = 0
-    return max(0, interval)
+    return get_auto_reload_interval(config_dict)
 
 
 async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
@@ -91,9 +88,12 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
         _state[url_key] = current_url
         _state[next_key] = 0
 
+    if interval <= 0:
+        return False
+
     next_at = _state.get(next_key, 0)
-    if interval <= 0 or now >= next_at:
-        _state[next_key] = now + interval if interval > 0 else 0
+    if now >= next_at:
+        _state[next_key] = now + interval
         debug.log(f"{log_prefix} Reloading page now")
         try:
             await tab.reload()
@@ -3411,11 +3411,12 @@ async def nodriver_kham_seat_auto_select(tab, config_dict):
     try:
         # 使用純 JavaScript 執行全部邏輯：偵測方向 -> 分組 -> 排序 -> 選擇 -> 點擊
         import json
-        result = await tab.evaluate(f'''
+        ticket_number_js = json.dumps(ticket_number)
+        seat_selection_script = '''
             (function() {{
-                const ticketNumber = {ticket_number};
-                const allowNonAdjacent = {json.dumps(allow_non_adjacent)};
-                const showDebug = {json.dumps(show_debug)};
+                const ticketNumber = __TICKET_NUMBER__;
+                const allowNonAdjacent = __ALLOW_NON_ADJACENT__;
+                const showDebug = __SHOW_DEBUG__;
 
                 // Step 0: Detect stage direction
                 const stageDiv = document.querySelector('.stageDirection');
@@ -3746,7 +3747,16 @@ async def nodriver_kham_seat_auto_select(tab, config_dict):
                     usedFallback: usedFallback
                 }};
             }})();
-        ''')
+        '''
+        seat_selection_script = (
+            seat_selection_script
+            .replace("__TICKET_NUMBER__", ticket_number_js)
+            .replace("__ALLOW_NON_ADJACENT__", json.dumps(allow_non_adjacent))
+            .replace("__SHOW_DEBUG__", json.dumps(show_debug))
+            .replace("{{", "{")
+            .replace("}}", "}")
+        )
+        result = await tab.evaluate(seat_selection_script)
 
         # 轉換 CDP 格式為 Python dict
         result_dict = {}

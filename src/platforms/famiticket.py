@@ -7,6 +7,7 @@ import json
 import random
 
 import util
+from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     CONST_FROM_TOP_TO_BOTTOM,
 )
@@ -234,7 +235,7 @@ async def nodriver_fami_date_auto_select(tab, config_dict, last_activity_url):
     date_keyword = config_dict["date_auto_select"].get("date_keyword", "").strip()
     date_auto_fallback = config_dict.get('date_auto_fallback', False)
     auto_reload_coming_soon_page_enable = config_dict["tixcraft"].get("auto_reload_coming_soon_page", False)
-    auto_reload_page_interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
+    auto_reload_page_interval = get_auto_reload_interval(config_dict)
 
     debug.log(f"[FAMI DATE] date_keyword: {date_keyword}")
     debug.log(f"[FAMI DATE] auto_select_mode: {auto_select_mode}")
@@ -357,14 +358,13 @@ async def nodriver_fami_date_auto_select(tab, config_dict, last_activity_url):
                 return next_result
 
             if auto_reload_coming_soon_page_enable:
-                debug.log("[FAMI DATE] Date list is empty, triggering auto-reload")
-
-                if auto_reload_page_interval > 0:
+                if auto_reload_page_interval > 0 and last_activity_url:
+                    debug.log("[FAMI DATE] Date list is empty, triggering auto-reload")
                     await asyncio.sleep(auto_reload_page_interval)
-
-                if last_activity_url:
                     await tab.get(last_activity_url)
                     await asyncio.sleep(0.3)
+                else:
+                    debug.log("[FAMI DATE] Auto reload disabled or no activity URL; waiting")
 
     except Exception as exc:
         debug.log(f"[FAMI DATE] Error: {str(exc)}")
@@ -706,7 +706,7 @@ async def nodriver_fami_home_auto_select(tab, config_dict, last_activity_url):
             is_area_selected = await nodriver_fami_date_to_area(tab, config_dict, last_activity_url)
 
             if not is_area_selected:
-                auto_reload_interval = config_dict["advanced"].get("auto_reload_page_interval", 5)
+                auto_reload_interval = get_auto_reload_interval(config_dict, default=5)
                 if auto_reload_interval > 0:
                     debug.log(f"[FAMI HOME] No area selected, waiting {auto_reload_interval}s before retry...")
                     await tab.sleep(auto_reload_interval)
