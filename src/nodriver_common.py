@@ -139,6 +139,19 @@ def get_config_dict(args):
                         d = d[key]
                     d[path[-1]] = value
 
+            config_dict["_config_filepath"] = config_filepath
+            date_config = config_dict.get("date_auto_select", {})
+            print(
+                "[CONFIG] Loaded %s | date_enable=%s | date_mode=%s | date_keyword=%s | date_fallback=%s"
+                % (
+                    os.path.basename(config_filepath),
+                    date_config.get("enable"),
+                    date_config.get("mode"),
+                    util.redact_sensitive_text(date_config.get("date_keyword", "")),
+                    config_dict.get("date_auto_fallback", False),
+                )
+            )
+
             # special case for headless to enable away from keyboard mode.
             is_headless_enable_ocr = False
             if config_dict["advanced"]["headless"]:

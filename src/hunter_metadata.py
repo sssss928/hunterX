@@ -1,7 +1,7 @@
 """Project metadata for the HunterX fork."""
 
 APP_NAME = "HunterX"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.3"
 APP_DISPLAY_VERSION = f"{APP_NAME} ({APP_VERSION})"
 REPOSITORY = "sssss928/hunterX"
 REPOSITORY_URL = f"https://github.com/{REPOSITORY}"

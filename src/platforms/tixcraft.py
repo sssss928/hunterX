@@ -78,6 +78,62 @@ __all__ = [
 _state = {}
 
 
+def _parse_tixcraft_row_htmls(raw_value):
+    """Normalize NoDriver evaluate() output into a list of row HTML strings."""
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        try:
+            raw_value = json.loads(raw_value)
+        except Exception:
+            return None
+    if isinstance(raw_value, list):
+        row_htmls = []
+        for item in raw_value:
+            if item is None:
+                row_htmls.append("")
+            else:
+                row_htmls.append(str(item))
+        return row_htmls
+    return None
+
+
+def _parse_tixcraft_area_text_cache(raw_value):
+    """Normalize area text cache from NoDriver evaluate() into dict rows."""
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        try:
+            raw_value = json.loads(raw_value)
+        except Exception:
+            return None
+    if not isinstance(raw_value, list):
+        return None
+
+    normalized = []
+    for item in raw_value:
+        if not isinstance(item, dict):
+            return None
+        normalized.append({
+            "text": str(item.get("text", "")),
+            "fontText": str(item.get("fontText", "")),
+        })
+    return normalized
+
+
+def _tixcraft_text_contains_keyword(row_text, keyword):
+    normalized_row = util.normalize_keyword_text(row_text or "")
+    normalized_keyword = util.normalize_keyword_text(keyword or "")
+    if not normalized_keyword:
+        return True
+    if normalized_keyword in normalized_row:
+        return True
+
+    compact_row = re.sub(r"\s+", "", normalized_row)
+    compact_keyword = re.sub(r"\s+", "", normalized_keyword)
+    return bool(compact_keyword and compact_keyword in compact_row)
+
+
 # Keywords that identify serial-number / membership-code style verify prompts.
 # Used as a guard for the discount_code fallback in nodriver_tixcraft_input_check_code
 # to avoid wasting an attempt on unrelated questions (math, common knowledge, etc.).
@@ -1676,9 +1732,10 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
         # Batch fetch all row HTML in one CDP round-trip (~9-16x faster than sequential get_html())
         all_row_htmls = None
         try:
-            all_row_htmls = await tab.evaluate(
-                "Array.from(document.querySelectorAll('#gameList > table > tbody > tr')).map(r => r.outerHTML)"
+            all_row_htmls_raw = await tab.evaluate(
+                "JSON.stringify(Array.from(document.querySelectorAll('#gameList > table > tbody > tr')).map(r => r.outerHTML))"
             )
+            all_row_htmls = _parse_tixcraft_row_htmls(all_row_htmls_raw)
         except Exception:
             pass
         for i, row in enumerate(area_list):
@@ -1719,6 +1776,16 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                     formated_area_list_text.append(row_text)
                     # 移除：可用場次訊息過度詳細
 
+        if debug.enabled:
+            if formated_area_list_text:
+                preview_rows = [
+                    re.sub(r"\s+", " ", item).strip()[:120]
+                    for item in formated_area_list_text[:8]
+                ]
+                debug.log(f"[DATE SELECT] Candidate date rows: {preview_rows}")
+            else:
+                debug.log("[DATE SELECT] No enabled date rows after filters")
+
         # T004-T008: NEW LOGIC - Early return pattern (Feature 003)
         # Keyword priority matching: first match wins and stops immediately
         if not date_keyword:
@@ -1731,9 +1798,7 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
             keyword_matched_index = -1
 
             try:
-                import json
-                import re
-                keyword_array = json.loads("[" + date_keyword + "]")
+                keyword_array = util.parse_keyword_string_to_array(date_keyword)
 
                 # T005: Start checking keywords log
                 debug.log(f"[DATE KEYWORD] Start checking keywords in order: {keyword_array}")
@@ -1746,17 +1811,17 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
 
                     # Check all rows for this keyword
                     for i, row_text in enumerate(formated_area_list_text):
-                        normalized_row_text = re.sub(r'\s+', ' ', row_text)
                         is_match = False
 
                         if isinstance(keyword_item_set, str):
                             # OR logic: single keyword
-                            normalized_keyword = re.sub(r'\s+', ' ', keyword_item_set)
-                            is_match = normalized_keyword in normalized_row_text
+                            is_match = _tixcraft_text_contains_keyword(row_text, keyword_item_set)
                         elif isinstance(keyword_item_set, list):
                             # AND logic: all keywords must match
-                            normalized_keywords = [re.sub(r'\s+', ' ', kw) for kw in keyword_item_set]
-                            match_results = [kw in normalized_row_text for kw in normalized_keywords]
+                            match_results = [
+                                _tixcraft_text_contains_keyword(row_text, kw)
+                                for kw in keyword_item_set
+                            ]
                             is_match = all(match_results)
 
                         if is_match:
@@ -1940,12 +2005,13 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
     area_text_cache = None
     try:
         area_list_cache = await el.query_selector_all('a')
-        area_text_cache = await tab.evaluate("""
-            Array.from(document.querySelectorAll('.zone a')).map(a => ({
+        area_text_cache_raw = await tab.evaluate("""
+            JSON.stringify(Array.from(document.querySelectorAll('.zone a')).map(a => ({
                 text: a.innerText.trim(),
                 fontText: a.querySelector('font')?.textContent?.trim() ?? ''
-            }))
+            })))
         """)
+        area_text_cache = _parse_tixcraft_area_text_cache(area_text_cache_raw)
         if area_list_cache and area_text_cache and len(area_list_cache) != len(area_text_cache):
             area_text_cache = None
         if area_text_cache:

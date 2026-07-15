@@ -1333,7 +1333,7 @@ def send_telegram_test_messages(url, chat_ids, text, bot_token):
                 desc = result.get("description", "HTTP %d" % response.status_code)
                 errors.append(f"{cid}: {desc}")
         except (requests.RequestException, ValueError) as exc:
-            safe_msg = str(exc).replace(bot_token, "***") if bot_token else str(exc)
+            safe_msg = util.redact_sensitive_text(str(exc), [bot_token, url])
             errors.append(f"{cid}: {safe_msg}")
     return ok_count, errors
 
@@ -1395,8 +1395,9 @@ class TestDiscordWebhookHandler(tornado.web.RequestHandler):
                 debug.log("[Discord Webhook] Test failed: HTTP %d" % response.status_code)
                 self.write({"success": False, "message": "HTTP %d" % response.status_code})
         except Exception as exc:
-            debug.log("[Discord Webhook] Test failed: %s" % str(exc))
-            self.write({"success": False, "message": str(exc)})
+            safe_msg = util.redact_sensitive_text(str(exc), [webhook_url])
+            debug.log("[Discord Webhook] Test failed: %s" % safe_msg)
+            self.write({"success": False, "message": safe_msg})
 
 class TestTelegramHandler(tornado.web.RequestHandler):
     async def post(self):

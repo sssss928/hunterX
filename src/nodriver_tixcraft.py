@@ -9,12 +9,10 @@ import os
 import pathlib
 import platform
 import random
-import ssl
 import subprocess
 import sys
 import threading
 import time
-import warnings
 import webbrowser
 from datetime import datetime
 
@@ -27,7 +25,6 @@ if sys.platform == 'win32':
 
 import zendriver as uc
 from zendriver import cdp
-from urllib3.exceptions import InsecureRequestWarning
 import urllib.parse
 
 import util
@@ -77,8 +74,6 @@ CONST_TICKET_SIGN_IN_URL = "https://ticket.com.tw/application/utk13/utk1306_.asp
 CONST_UDN_SIGN_IN_URL = "https://tickets.udnfunlife.com/application/UTK01/UTK0101_.aspx"
 CONST_URBTIX_SIGN_IN_URL = "https://www.urbtix.hk/member-login"
 
-warnings.simplefilter('ignore',InsecureRequestWarning)
-ssl._create_default_https_context = ssl._create_unverified_context
 logging.basicConfig()
 logger = logging.getLogger('logger')
 

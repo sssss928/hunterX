@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import threading
+import unicodedata
 from datetime import datetime
 from typing import Optional
 
@@ -156,10 +157,42 @@ def is_connectable(port: int, host: Optional[str] = "localhost") -> bool:
 def remove_html_tags(text):
     ret = ""
     if not text is None:
-        clean = re.compile('<.*?>')
-        ret = re.sub(clean, '', text)
-        ret = ret.strip()
+        ret = re.sub(r"<\s*(br|/p|/div|/tr|/td|/li)\b[^>]*>", " ", text, flags=re.IGNORECASE)
+        ret = re.sub(r"<.*?>", " ", ret)
+        ret = re.sub(r"\s+", " ", ret).strip()
     return ret
+
+def redact_sensitive_text(text, secrets=None):
+    if text is None:
+        return ""
+
+    redacted = str(text)
+    for secret in secrets or []:
+        if secret is None:
+            continue
+        secret = str(secret)
+        if secret:
+            redacted = redacted.replace(secret, "***")
+
+    redacted = re.sub(
+        r"(https://(?:discord(?:app)?\.com)/api/webhooks/)[^\s\"']+",
+        r"\1***",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"(https://api\.telegram\.org/bot)[^/\s\"']+",
+        r"\1***",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"\b(password|passwd|token|secret|cookie|authorization|webhook)(\s*[:=]\s*)[^\s,;\"']+",
+        r"\1\2***",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    return redacted
 
 # common functions.
 def find_between( s, first, last ):
@@ -421,16 +454,23 @@ def t_or_f(arg):
         ret = True
     return ret
 
-def format_keyword_string(keyword):
+def normalize_keyword_text(keyword):
     """
-    Minimal keyword formatting - no normalization.
-    Input text is matched exactly as provided (Issue #23).
-    Only removes full-width spaces that are clearly erroneous.
+    Normalize keyword/search text for tolerant matching.
+
+    This keeps semicolon OR and space AND behavior unchanged, while making
+    visually equivalent full-width/half-width forms comparable.
     """
-    if not keyword is None:
-        if len(keyword) > 0:
-            keyword = keyword.replace('　','')  # Remove full-width space only
+    if keyword is None:
+        return keyword
+    keyword = unicodedata.normalize("NFKC", str(keyword))
+    keyword = keyword.replace('　', ' ')
+    keyword = re.sub(r"\s+", " ", keyword).strip()
     return keyword
+
+
+def format_keyword_string(keyword):
+    return normalize_keyword_text(keyword)
 
 def format_quota_string(formated_html_text):
     formated_html_text = formated_html_text.replace('「','【')
@@ -1409,40 +1449,55 @@ def create_debug_logger(config_dict=None, enabled=None):
 
 def parse_keyword_string_to_array(keyword_string):
     """
-    Parse keyword string to array using JSON format.
+    Parse keyword string to array.
 
-    Expected input format: '"keyword1","keyword2"' or '"keyword1 sub1","keyword2"'
+    Supported input formats:
+        - '"keyword1","keyword2"' (legacy JSON fragment)
+        - '["keyword1","keyword2"]' (JSON array)
+        - 'keyword1;keyword2' (semicolon OR delimiter)
+        - 'keyword1' (single raw keyword)
+
     Inner space = AND logic, outer comma = OR logic.
-
-    This function only handles parsing. For custom fallback logic,
-    check the return value and implement fallback at call site.
-
-    Args:
-        keyword_string: Comma-separated quoted keywords
-
-    Returns:
-        list: Parsed keywords, or empty list on failure
-
-    Example:
-        parse_keyword_string_to_array('"VIP","1F"') -> ["VIP", "1F"]
-        parse_keyword_string_to_array('"VIP Rock Area"') -> ["VIP Rock Area"]
-        parse_keyword_string_to_array('') -> []
-        parse_keyword_string_to_array('invalid') -> []
-
-    Note:
-        For locations requiring custom fallback (e.g., comma split, semicolon split),
-        implement fallback at call site:
-
-        keywords = parse_keyword_string_to_array(keyword)
-        if not keywords:
-            keywords = [kw.strip() for kw in keyword.split(',') if kw.strip()]
     """
     if not keyword_string or not keyword_string.strip():
         return []
+
+    keyword_string = keyword_string.strip()
+
+    def _normalize_items(items):
+        normalized = []
+        for item in items:
+            if item is None:
+                continue
+            item_text = str(item).strip()
+            if item_text:
+                normalized.append(item_text)
+        return normalized
+
     try:
-        return json.loads("[" + keyword_string + "]")
+        parsed = json.loads(keyword_string)
+        if isinstance(parsed, list):
+            return _normalize_items(parsed)
+        if isinstance(parsed, str):
+            return [parsed] if parsed else []
     except Exception:
-        return []
+        pass
+
+    try:
+        parsed = json.loads("[" + keyword_string + "]")
+        if isinstance(parsed, list):
+            return _normalize_items(parsed)
+    except Exception:
+        pass
+
+    if CONST_KEYWORD_DELIMITER in keyword_string:
+        return _normalize_items([
+            item.strip().strip('"').strip("'")
+            for item in keyword_string.split(CONST_KEYWORD_DELIMITER)
+        ])
+
+    keyword_string = keyword_string.strip().strip('"').strip("'")
+    return [keyword_string] if keyword_string else []
 
 
 def get_matched_blocks_by_keyword(config_dict, auto_select_mode, keyword_string, formated_area_list):
@@ -2199,10 +2254,8 @@ def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kkt
         cmd_argument.append('--instance=' + instance)
     if len(homepage) > 0:
         cmd_argument.append('--homepage=' + homepage)
-    if len(kktix_account) > 0:
-        cmd_argument.append('--kktix_account=' + kktix_account)
-    if len(kktix_password) > 0:
-        cmd_argument.append('--kktix_password=' + kktix_password)
+    # Do not pass account credentials through process command-line arguments.
+    # Child processes read credentials from the selected settings/profile instead.
     if len(window_size) > 0:
         cmd_argument.append('--window_size=' + window_size)
     if len(headless) > 0:
@@ -2508,7 +2561,7 @@ def send_telegram_message(
                 desc = result.get("description", "HTTP %d" % response.status_code)
                 debug.log(f"[Telegram] Send to {cid} failed: {desc}")
         except (requests.RequestException, ValueError) as exc:
-            safe_msg = str(exc).replace(bot_token, "***") if bot_token else str(exc)
+            safe_msg = redact_sensitive_text(str(exc), [bot_token])
             debug.log(f"[Telegram] Send to {cid} failed: {safe_msg}")
     return any_success
 
