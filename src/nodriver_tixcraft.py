@@ -855,10 +855,8 @@ async def main(args):
     Captcha_Browser = None
     try:
         if config_dict["ocr_captcha"]["enable"]:
-            ocr = create_ocr_for_platform(config_dict)
-            if ocr is None:
-                ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])
-                ocr.set_ranges(1)
+            debug = util.create_debug_logger(config_dict)
+            ocr = create_ocr_for_platform(config_dict, debug=debug, fallback_ranges=1)
             Captcha_Browser = NonBrowser()
             if len(config_dict["accounts"]["tixcraft_sid"]) > 1:
                 #set_non_browser_cookies(driver, config_dict["homepage"], Captcha_Browser)

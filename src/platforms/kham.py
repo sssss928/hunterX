@@ -19,6 +19,7 @@ import webbrowser
 from zendriver import cdp
 
 import util
+import performance
 from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     asyncio_sleep_with_pause_check,
@@ -768,7 +769,7 @@ async def nodriver_kham_date_auto_select(tab, domain_name, config_dict):
 
     return is_date_assign_by_bot
 
-async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False):
+async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, perf_trace=None):
     """
     Input captcha code manually or auto-submit
     Reference: chrome_tixcraft.py kham_keyin_captcha_code (line 9359-9424)
@@ -836,15 +837,19 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False):
                 pass
 
     if is_start_to_input_answer:
+        fill_started_ns = performance.perf_counter_ns()
         try:
             await form_verifyCode.click()
             await form_verifyCode.apply('function(el) { el.value = ""; }')
             await form_verifyCode.send_keys(answer)
         except Exception as exc:
             print("Send keys OCR answer fail:", answer, exc)
+        finally:
+            performance.record_elapsed(perf_trace, performance.FILL_STAGE, fill_started_ns)
 
     # Auto submit if enabled (for away_from_keyboard mode)
     if auto_submit:
+        submit_started_ns = performance.perf_counter_ns()
         try:
             # Find and click submit button using NoDriver CDP
             # Year Ticket (ticket.com.tw): AddShopingCart button
@@ -877,6 +882,8 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False):
             print(f"[AUTO SUBMIT] Error: {exc}")
             import traceback
             traceback.print_exc()
+        finally:
+            performance.record_elapsed(perf_trace, performance.SUBMIT_STAGE, submit_started_ns)
 
     return is_verifyCode_editing
 
@@ -1292,14 +1299,17 @@ async def nodriver_kham_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
     ocr_answer = None
     if ocr:
         import time
+        perf_trace = performance.PerformanceTrace("kham_captcha")
         ocr_start_time = time.time()
 
         # Get captcha image using DOMSnapshot (shared with ibon)
-        img_base64 = await nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict)
+        img_base64 = await nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict, perf_trace=perf_trace)
 
         if img_base64:
             try:
+                ocr_started_ns = performance.perf_counter_ns()
                 ocr_answer = ocr.classification(img_base64)
+                performance.record_elapsed(perf_trace, performance.OCR_STAGE, ocr_started_ns)
             except Exception as exc:
                 debug.log("OCR classification error:", exc)
 
@@ -1316,7 +1326,9 @@ async def nodriver_kham_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
         if len(ocr_answer) == 4:
             # Valid 4-character answer
             previous_answer = ocr_answer  # Update previous_answer to mark as sent
-            who_care_var = await nodriver_kham_keyin_captcha_code(tab, answer=ocr_answer, auto_submit=away_from_keyboard_enable)
+            who_care_var = await nodriver_kham_keyin_captcha_code(
+                tab, answer=ocr_answer, auto_submit=away_from_keyboard_enable, perf_trace=perf_trace
+            )
         else:
             # Invalid length - retry
             if not away_from_keyboard_enable:
@@ -1345,6 +1357,9 @@ async def nodriver_kham_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
             await nodriver_kham_keyin_captcha_code(tab, "")
         else:
             is_need_redo_ocr = True
+
+    if "perf_trace" in locals():
+        performance.log_trace(debug, perf_trace, "[KHAM PERF]")
 
     return is_need_redo_ocr, previous_answer, is_form_submitted
 

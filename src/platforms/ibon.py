@@ -17,11 +17,12 @@ import webbrowser
 from zendriver import cdp
 
 import util
+import performance
 from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     asyncio_sleep_with_pause_check,
     check_and_handle_pause,
-    create_universal_ocr,
+    create_ocr_for_platform,
     nodriver_check_checkbox,
     nodriver_current_url,
     nodriver_get_captcha_image_from_dom_snapshot,
@@ -112,6 +113,16 @@ def _ensure_state():
     }
     for key, default in defaults.items():
         _state.setdefault(key, default)
+
+
+def _get_ibon_ocr_instance(config_dict, debug=None):
+    """Return a cached iBon OCR instance for the current OCR settings."""
+    return create_ocr_for_platform(
+        config_dict,
+        debug=debug,
+        fallback_ranges=0,
+        platform_hint="ibon",
+    )
 
 
 async def register_ibon_alert_handler(tab, config_dict):
@@ -2302,7 +2313,7 @@ async def nodriver_ibon_ticket_number_auto_select(tab, config_dict):
     # nodriver_ibon_get_captcha_image_from_shadow_dom moved to nodriver_common.py
     # as nodriver_get_captcha_image_from_dom_snapshot (shared by ibon and kham)
 
-async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, config_dict=None):
+async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, config_dict=None, perf_trace=None):
     """
     ibon captcha input handling
     Returns: (is_verifyCode_editing, is_form_submitted)
@@ -2393,6 +2404,7 @@ async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, co
 
         # Fill in answer
         try:
+            fill_started_ns = performance.perf_counter_ns()
             await form_verifyCode.click()
 
             # Clear placeholder value
@@ -2400,11 +2412,13 @@ async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, co
 
             # Type answer
             await form_verifyCode.send_keys(answer)
+            performance.record_elapsed(perf_trace, performance.FILL_STAGE, fill_started_ns)
 
             debug.log(f"[CAPTCHA INPUT] Filled answer: {answer}")
 
             # Auto submit if enabled
             if auto_submit:
+                submit_started_ns = performance.perf_counter_ns()
                 # Check if ticket number is selected (any SELECT, not just first one)
                 # Fix (2026-01-07): Multi-ticket types may have selected ticket at index > 0
                 ticket_ok = await tab.evaluate('''
@@ -2525,6 +2539,7 @@ async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, co
                         pass
                 else:
                     debug.log("[CAPTCHA INPUT] Ticket number not selected, skip submit")
+                performance.record_elapsed(perf_trace, performance.SUBMIT_STAGE, submit_started_ns)
 
         except Exception as exc:
             debug.log(f"[CAPTCHA INPUT ERROR] {exc}")
@@ -2594,6 +2609,8 @@ async def nodriver_ibon_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
         debug.log("[CAPTCHA OCR] OCR module not available")
         return is_need_redo_ocr, previous_answer, is_form_submitted
 
+    perf_trace = performance.PerformanceTrace("ibon_captcha")
+
     # iBon clears ticket number after captcha error - reselect if needed
     ticket_ok = await tab.evaluate('''
         (function() {
@@ -2637,14 +2654,16 @@ async def nodriver_ibon_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
     # Get captcha image and do OCR
     ocr_start_time = time.time()
 
-    img_base64 = await nodriver_ibon_get_captcha_image_from_shadow_dom(tab, config_dict)
+    img_base64 = await nodriver_ibon_get_captcha_image_from_shadow_dom(tab, config_dict, perf_trace=perf_trace)
 
     ocr_answer = None
     if img_base64:
         try:
+            ocr_started_ns = performance.perf_counter_ns()
             # Use global OCR instance (beta=True works best for iBon - 91.3% accuracy in tests)
             # Preprocessing actually reduces accuracy (73.9% vs 91.3%)
             ocr_answer = ocr.classification(img_base64)
+            performance.record_elapsed(perf_trace, performance.OCR_STAGE, ocr_started_ns)
 
             debug.log(f"[CAPTCHA OCR] Using global OCR (beta=True), raw result: {ocr_answer}")
 
@@ -2679,7 +2698,11 @@ async def nodriver_ibon_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
             # Valid 4-digit answer
             current_url_before_submit, _ = await nodriver_current_url(tab)
             who_care_var, is_form_submitted = await nodriver_ibon_keyin_captcha_code(
-                tab, answer=ocr_answer, auto_submit=away_from_keyboard_enable, config_dict=config_dict
+                tab,
+                answer=ocr_answer,
+                auto_submit=away_from_keyboard_enable,
+                config_dict=config_dict,
+                perf_trace=perf_trace,
             )
 
             # Check if captcha was correct by verifying URL change
@@ -2725,6 +2748,8 @@ async def nodriver_ibon_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
                 is_need_redo_ocr = True
                 if previous_answer != ocr_answer:
                     previous_answer = ocr_answer
+
+    performance.log_trace(debug, perf_trace, "[IBON PERF]")
 
     return is_need_redo_ocr, previous_answer, is_form_submitted
 
@@ -4314,14 +4339,8 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                     # Step 3: Handle captcha (after ticket number is selected)
                     is_captcha_sent = False
                     try:
-                        ocr = None
-                        if config_dict["ocr_captcha"]["enable"]:
-                            import ddddocr
-                            ocr = create_universal_ocr(config_dict)
-                            if ocr is None:
-                                ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])
-                                ocr.set_ranges(0)
-                        is_captcha_sent = await nodriver_ibon_captcha(tab, config_dict, ocr)
+                        captcha_ocr = _get_ibon_ocr_instance(config_dict, debug)
+                        is_captcha_sent = await nodriver_ibon_captcha(tab, config_dict, captcha_ocr)
                     except Exception as exc:
                         debug.log(f"[IBON] Captcha error: {exc}")
 
@@ -4405,14 +4424,8 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                     # Step 2: Handle captcha (only executed when tickets are available)
                     is_captcha_sent = False
                     try:
-                        ocr = None
-                        if config_dict["ocr_captcha"]["enable"]:
-                            import ddddocr
-                            ocr = create_universal_ocr(config_dict)
-                            if ocr is None:
-                                ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])
-                                ocr.set_ranges(0)
-                        is_captcha_sent = await nodriver_ibon_captcha(tab, config_dict, ocr)
+                        captcha_ocr = _get_ibon_ocr_instance(config_dict, debug)
+                        is_captcha_sent = await nodriver_ibon_captcha(tab, config_dict, captcha_ocr)
                     except Exception as exc:
                         debug.log(f"[IBON] Captcha error: {exc}")
 
@@ -4608,19 +4621,10 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                 if not Captcha_Browser is None:
                     Captcha_Browser.set_domain(domain_name, captcha_url=captcha_url)
 
-                ocr = None
-                if config_dict["ocr_captcha"]["enable"]:
-                    try:
-                        import ddddocr
-                        ocr = create_universal_ocr(config_dict)
-                        if ocr is None:
-                            ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])
-                            ocr.set_ranges(0)
-                    except Exception as exc:
-                        debug.log(f"[NEW EVENTBUY] OCR init error: {exc}")
+                captcha_ocr = _get_ibon_ocr_instance(config_dict, debug)
 
                 # Call ibon captcha handler (handles both OCR and manual mode)
-                is_captcha_sent = await nodriver_ibon_captcha(tab, config_dict, ocr)
+                is_captcha_sent = await nodriver_ibon_captcha(tab, config_dict, captcha_ocr)
 
             # Step 3: Click purchase button if everything is ready
             if is_ticket_number_assigned:
@@ -4763,19 +4767,10 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                         if not Captcha_Browser is None:
                             Captcha_Browser.set_domain(domain_name, captcha_url=captcha_url)
 
-                        ocr = None
-                        if config_dict["ocr_captcha"]["enable"]:
-                            try:
-                                import ddddocr
-                                ocr = create_universal_ocr(config_dict)
-                                if ocr is None:
-                                    ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])
-                                    ocr.set_ranges(0)
-                            except Exception as exc:
-                                debug.log(f"[IBON] OCR init error: {exc}")
+                        captcha_ocr = _get_ibon_ocr_instance(config_dict, debug)
 
                         # Call ibon captcha handler (handles both OCR and manual mode)
-                        is_captcha_sent = await nodriver_ibon_captcha(tab, config_dict, ocr)
+                        is_captcha_sent = await nodriver_ibon_captcha(tab, config_dict, captcha_ocr)
                     
                     #print("is_ticket_number_assigned:", is_ticket_number_assigned)
                     if is_ticket_number_assigned:

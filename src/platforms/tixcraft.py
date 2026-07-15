@@ -23,6 +23,7 @@ except Exception:
 from zendriver import cdp
 
 import util
+import performance
 from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     check_and_handle_pause,
@@ -2619,7 +2620,7 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
         debug.log("[TICKET SELECT] Ticket count unavailable, reloading page to retry...")
         await _reload_page_when_due(tab, config_dict, "tixcraft_ticket_reload", "[TICKET SELECT]")
 
-async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False, config_dict=None):
+async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False, config_dict=None, perf_trace=None):
     """輸入驗證碼到表單"""
     debug = util.create_debug_logger(config_dict) if config_dict else util.create_debug_logger(enabled=False)
     is_verifyCode_editing = False
@@ -2670,14 +2671,17 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
             if answer:
                 debug.log("[TIXCRAFT CAPTCHA] Starting to fill in captcha...")
                 try:
+                    fill_started_ns = performance.perf_counter_ns()
                     if not is_text_clicked:
                         await form_verifyCode.click()
 
                     # 清空並輸入答案
                     await form_verifyCode.apply('function (element) { element.value = ""; }')
                     await form_verifyCode.send_keys(answer)
+                    performance.record_elapsed(perf_trace, performance.FILL_STAGE, fill_started_ns)
 
                     if auto_submit:
+                        submit_started_ns = performance.perf_counter_ns()
                         # 提交前確認票券數量是否已設定
                         ticket_number = str(config_dict.get("ticket_number", 2)) if config_dict else "2"
                         allow_less_tickets = config_dict.get("tixcraft", {}).get("allow_less_tickets", False) if config_dict else False
@@ -2785,6 +2789,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                             _state["captcha_submit_until"] = time.time() + 1.5
                         else:
                             debug.log(f"[TIXCRAFT CAPTCHA] Form not ready - Ticket:{form_ready.get('ticket')} Select:{form_ready.get('ticket_select')} Captcha:{form_ready.get('verify')} Agreement:{form_ready.get('agree')}")
+                        performance.record_elapsed(perf_trace, performance.SUBMIT_STAGE, submit_started_ns)
                     else:
                         # 選取輸入框內容並顯示提示
                         await tab.evaluate('''
@@ -2853,12 +2858,15 @@ async def nodriver_tixcraft_reload_captcha(tab, domain_name, config_dict=None):
         debug.log(f"[TIXCRAFT OCR] reload_captcha failed: {exc}")
     return False
 
-async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, Captcha_Browser, domain_name):
+async def nodriver_tixcraft_get_ocr_answer(
+    tab, ocr, ocr_captcha_image_source, Captcha_Browser, domain_name, perf_trace=None
+):
     """取得驗證碼圖片並進行 OCR 識別"""
     debug = util.create_debug_logger(enabled=False)  # OCR: intentionally silent
 
     ocr_answer = None
     if not ocr is None:
+        capture_started_ns = performance.perf_counter_ns()
         img_base64 = None
 
         if ocr_captcha_image_source == CONST_OCR_CAPTCH_IMAGE_SOURCE_NON_BROWSER:
@@ -2909,9 +2917,12 @@ async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, C
                 debug.log("[TIXCRAFT OCR] Canvas error:", str(exc))
 
         # OCR 識別
+        performance.record_elapsed(perf_trace, performance.CAPTURE_STAGE, capture_started_ns)
         if not img_base64 is None:
             try:
+                ocr_started_ns = performance.perf_counter_ns()
                 ocr_answer = ocr.classification(img_base64)
+                performance.record_elapsed(perf_trace, performance.OCR_STAGE, ocr_started_ns)
             except Exception as exc:
                 debug.log("[TIXCRAFT OCR] Classification error:", str(exc))
 
@@ -2938,12 +2949,15 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
         debug.log("[TIXCRAFT OCR] ddddocr component unavailable, you may be running on ARM")
 
     if is_input_box_exist:
+        perf_trace = performance.PerformanceTrace("tixcraft_captcha")
         debug.log("[TIXCRAFT OCR] away_from_keyboard_enable:", away_from_keyboard_enable)
         debug.log("[TIXCRAFT OCR] previous_answer:", previous_answer)
         debug.log("[TIXCRAFT OCR] ocr_captcha_image_source:", ocr_captcha_image_source)
 
         ocr_start_time = time.time()
-        ocr_answer = await nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, Captcha_Browser, domain_name)
+        ocr_answer = await nodriver_tixcraft_get_ocr_answer(
+            tab, ocr, ocr_captcha_image_source, Captcha_Browser, domain_name, perf_trace=perf_trace
+        )
         ocr_done_time = time.time()
         ocr_elapsed_time = ocr_done_time - ocr_start_time
         debug.log("[TIXCRAFT OCR] Processing time:", "{:.3f}".format(ocr_elapsed_time))
@@ -2977,7 +2991,13 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
                         else:
                             debug.log(f"[TIXCRAFT OCR] Hash verified ok: {ocr_answer}")
                 if ocr_answer is not None:
-                    who_care_var, is_form_submitted = await nodriver_tixcraft_keyin_captcha_code(tab, answer=ocr_answer, auto_submit=away_from_keyboard_enable, config_dict=config_dict)
+                    who_care_var, is_form_submitted = await nodriver_tixcraft_keyin_captcha_code(
+                        tab,
+                        answer=ocr_answer,
+                        auto_submit=away_from_keyboard_enable,
+                        config_dict=config_dict,
+                        perf_trace=perf_trace,
+                    )
             else:
                 if not away_from_keyboard_enable:
                     await nodriver_tixcraft_keyin_captcha_code(tab, config_dict=config_dict)
@@ -2993,6 +3013,9 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
                             await asyncio.sleep(0.3)
     else:
         debug.log("[TIXCRAFT OCR] Input box not found, exiting OCR...")
+
+    if "perf_trace" in locals():
+        performance.log_trace(debug, perf_trace, "[TIXCRAFT PERF]")
 
     return is_need_redo_ocr, previous_answer, is_form_submitted
 

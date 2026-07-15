@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.1
+
+- Add shared OCR cache/preload infrastructure for captcha workflows.
+- Reuse cached OCR instances for iBon, TixCraft/KHAM startup OCR, and FunOne without changing their conservative captcha input and submit guards.
+- Keep platform-specific OCR behavior intact, including iBon digit OCR, TixCraft hash validation, KHAM manual-safe captcha handling, and FunOne `set_ranges(5)`.
+- Add `ocr_cache` regression tests for cache reuse, cache invalidation, TixCraft model selection, and FunOne standard OCR selection.
+- Restore settings UI vendor assets required by the existing metadata smoke tests.
+- Update visible version strings and release instructions to `0.2.1`.
+
 ## v0.2.0
 
 - Remove the user-facing delay-calibrated refresh workflow from the settings UI.

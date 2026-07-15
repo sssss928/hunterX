@@ -16,6 +16,7 @@ import util
 from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     check_and_handle_pause,
+    create_ocr_for_platform,
     play_sound_while_ordering,
     send_discord_notification,
     send_telegram_notification,
@@ -1329,14 +1330,19 @@ async def nodriver_funone_ocr_captcha(tab, config_dict, base64_data):
 
         debug.log(f"[FUNONE OCR] Image size: {len(img_bytes)} bytes")
 
-        # Use cached OCR instance or create new one
+        # Use shared cached OCR instance.
         # IMPORTANT: beta=False required for set_ranges to work
         # set_ranges(5) = uppercase A-Z + 0-9 (FunOne captcha charset)
-        if "ocr_instance" not in _state:
-            ocr_obj = ddddocr.DdddOcr(show_ad=False, beta=False)
-            ocr_obj.set_ranges(5)
-            _state["ocr_instance"] = ocr_obj
-        ocr_instance = _state["ocr_instance"]
+        ocr_instance = create_ocr_for_platform(
+            config_dict,
+            debug=debug,
+            fallback_ranges=5,
+            platform_hint="funone",
+            prefer_universal=False,
+        )
+        if ocr_instance is None:
+            debug.log("[FUNONE OCR] OCR module not available")
+            return False
         ocr_answer = ocr_instance.classification(img_bytes)
 
         if ocr_answer:

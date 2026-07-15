@@ -19,6 +19,8 @@ from zendriver.core.config import Config
 import util
 import settings
 import chrome_downloader
+import ocr_cache
+import performance
 from hunter_metadata import APP_DISPLAY_VERSION
 
 try:
@@ -68,72 +70,29 @@ def create_universal_ocr(config_dict):
     Reads use_universal and path from config_dict["ocr_captcha"].
     Returns ddddocr instance with universal model, or None if disabled or files not found.
     """
-    use_universal = config_dict.get("ocr_captcha", {}).get("use_universal", True)
-    if not use_universal:
-        return None
-
-    ocr_path = config_dict.get("ocr_captcha", {}).get("path", "")
-    if not ocr_path:
-        return None
-
-    if not os.path.isabs(ocr_path):
-        ocr_path = os.path.join(util.get_app_root(), ocr_path)
-
-    onnx_path = os.path.join(ocr_path, "custom.onnx")
-    charsets_path = os.path.join(ocr_path, "charsets.json")
-    if not (os.path.exists(onnx_path) and os.path.exists(charsets_path)):
-        debug = util.create_debug_logger(config_dict)
-        debug.log(f"[OCR] Universal model files not found at: {ocr_path}")
-        return None
-
-    try:
-        return ddddocr.DdddOcr(
-            det=False, ocr=False, show_ad=False,
-            import_onnx_path=onnx_path,
-            charsets_path=charsets_path
-        )
-    except Exception as exc:
-        debug = util.create_debug_logger(config_dict)
-        debug.log(f"[OCR] Failed to load universal model: {exc}")
-        return None
+    debug = util.create_debug_logger(config_dict)
+    return ocr_cache.create_universal_ocr(config_dict, debug=debug)
 
 
 CONST_TIXCRAFT_TM_MODEL_PATH = "assets/model/tixcraft_tm"
 CONST_DEFAULT_UNIVERSAL_PATH = "assets/model/universal"
 
-def create_ocr_for_platform(config_dict):
+def create_ocr_for_platform(config_dict, debug=None, fallback_ranges=1, platform_hint=None, prefer_universal=True):
     """Create the best OCR instance for the current platform.
 
     Priority:
-    1. use_universal=False -> None (ddddocr fallback in caller)
+    1. use_universal=False -> cached ddddocr fallback
     2. User custom path (not the default) -> use user's path
     3. tixcraft / ticketmaster / indievox homepage -> try tixcraft_tm model
     4. Fallback -> universal model
     """
-    ocr_cfg = config_dict.get("ocr_captcha", {})
-    if not ocr_cfg.get("use_universal", True):
-        return None
-
-    user_path = ocr_cfg.get("path", "")
-
-    # If user explicitly set a non-default path, respect it
-    if user_path and user_path != CONST_DEFAULT_UNIVERSAL_PATH:
-        return create_universal_ocr(config_dict)
-
-    # Auto-select based on homepage
-    homepage = config_dict.get("homepage", "")
-    tixcraft_domains = ["tixcraft.com", "indievox.com", "ticketmaster."]
-    if any(domain in homepage for domain in tixcraft_domains):
-        override = dict(config_dict)
-        override["ocr_captcha"] = dict(ocr_cfg)
-        override["ocr_captcha"]["path"] = CONST_TIXCRAFT_TM_MODEL_PATH
-        ocr = create_universal_ocr(override)
-        if ocr is not None:
-            debug = util.create_debug_logger(config_dict)
-            debug.log(f"[OCR] Auto-selected tixcraft_tm model for {homepage}")
-            return ocr
-
-    return create_universal_ocr(config_dict)
+    return ocr_cache.get_ocr_instance(
+        config_dict,
+        platform_hint=platform_hint,
+        fallback_ranges=fallback_ranges,
+        debug=debug,
+        prefer_universal=prefer_universal,
+    )
 
 
 # ===== Config Loading =====
@@ -1057,7 +1016,7 @@ def nodriver_overwrite_prefs(conf):
 
 # ===== Shared captcha image capture =====
 
-async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
+async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict, perf_trace=None):
     """
     Use DOMSnapshot to find captcha image inside Shadow DOM and get base64 data.
     Supports IMG elements with '/pic.aspx?TYPE=' pattern and CANVAS fallback.
@@ -1065,6 +1024,7 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
     Returns: img_base64 (bytes) or None
     """
     debug = util.create_debug_logger(config_dict)
+    capture_started_ns = performance.perf_counter_ns()
 
     # Wait for page to stabilize before capturing
     import random
@@ -1130,6 +1090,7 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
 
         if not img_backend_node_id:
             debug.log("[CAPTCHA] Neither IMG nor CANVAS found")
+            performance.record_elapsed(perf_trace, performance.CAPTURE_STAGE, capture_started_ns)
             return None
 
         # Make URL absolute if needed
@@ -1224,4 +1185,5 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
             import traceback
             traceback.print_exc()
 
+    performance.record_elapsed(perf_trace, performance.CAPTURE_STAGE, capture_started_ns)
     return img_base64
