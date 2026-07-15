@@ -5,6 +5,8 @@ import importlib
 
 SAFE_MODULES = [
     "hunter_metadata",
+    "ocr_cache",
+    "performance",
     "util",
     "settings",
     "platforms",

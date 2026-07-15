@@ -38,7 +38,7 @@ build_scripts\build_and_test.bat
 
 ### 輸出檔案
 
-- `dist/release/hunterX_windows_0.2.0.zip` - 發布 ZIP
+- `dist/release/hunterX_windows_0.2.1.zip` - 發布 ZIP
 - `.temp/test_output.txt` - 測試輸出記錄
 
 ### 執行時間
@@ -124,7 +124,7 @@ dist/
 │   ├── www/
 │   └── CHANGELOG.txt
 └── release/
-    └── hunterX_windows_0.2.0.zip      ← 發布 ZIP
+    └── hunterX_windows_0.2.1.zip      ← 發布 ZIP
 
 .temp/
 └── test_output.txt             ← 測試輸出記錄（build_and_test.bat）

@@ -47,7 +47,7 @@ set "TEST_PASSED=0"
 set "TEST_FAILED=0"
 
 REM Get version
-set VERSION=0.2.0
+set VERSION=0.2.1
 for /f "tokens=*" %%i in ('git describe --tags --abbrev=0 2^>nul') do set VERSION=%%i
 set VERSION=%VERSION:v=%
 
