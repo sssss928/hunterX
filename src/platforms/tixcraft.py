@@ -25,8 +25,14 @@ from zendriver import cdp
 import util
 import performance
 from platforms.common_async import get_auto_reload_interval
+from action_ledger import ActionLedger
+from notification_context import clean_event_name, make_notification_context
+from page_classifier import PageClass, classify_page
+from reload_guard import guarded_reload
+from submit_guard import SubmitGuard
 from nodriver_common import (
     check_and_handle_pause,
+    check_and_handle_quit,
     sleep_with_pause_check,
     convert_remote_object,
     nodriver_check_checkbox,
@@ -163,6 +169,18 @@ _TIXCRAFT_SOFT_BLOCK_SCOPE_HOSTS = (
     "indievox.com",
 )
 
+_TIXCRAFT_SOFT_BLOCK_TEXT_MARKERS = (
+    "your browsing activity has been paused",
+    "browsing activity has been paused",
+    "we've detected unusual behavior",
+    "detected unusual behavior",
+    "unusual behavior on either your network or your browser",
+    "活動已暫停",
+    "瀏覽活動已暫停",
+    "偵測到異常行為",
+    "異常行為",
+)
+
 
 def _is_serial_code_question(question_text):
     if not question_text:
@@ -177,6 +195,11 @@ def _is_serial_code_question(question_text):
 def _is_tixcraft_soft_block_scope(url):
     url_lower = (url or "").lower()
     return any(host in url_lower for host in _TIXCRAFT_SOFT_BLOCK_SCOPE_HOSTS)
+
+
+def _is_tixcraft_soft_block_text(text):
+    text_lower = re.sub(r"\s+", " ", str(text or "").lower())
+    return any(marker in text_lower for marker in _TIXCRAFT_SOFT_BLOCK_TEXT_MARKERS)
 
 
 def _parse_tixcraft_soft_block_delay(config_dict):
@@ -212,6 +235,141 @@ def _resolve_soft_block_wait_seconds(config_dict, scope_url, default_wait_second
     return default_wait_seconds, False
 
 
+async def _read_page_text_for_soft_block(tab):
+    try:
+        result = await tab.evaluate('''
+            (function() {
+                const title = document.title || '';
+                const body = document.body && document.body.innerText || '';
+                return JSON.stringify({
+                    title: title,
+                    bodyText: body.slice(0, 5000)
+                });
+            })()
+        ''')
+        result = util.parse_nodriver_result(result)
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except Exception:
+                return result
+        if isinstance(result, dict):
+            return f"{result.get('title', '')}\n{result.get('bodyText', '')}"
+    except Exception:
+        pass
+    return ""
+
+
+async def _detect_tixcraft_soft_block(tab, url, config_dict=None):
+    """Detect TixCraft-family soft-block pages without taking recovery action."""
+    try:
+        result_json = await tab.evaluate('''
+            (function() {
+                try {
+                    if (typeof action !== "undefined" && action === "block" && typeof rr !== "undefined") {
+                        return JSON.stringify({
+                            blocked: true,
+                            kind: "eps_js",
+                            rr: rr || "",
+                            client_ip: typeof client_ip !== "undefined" ? client_ip : ""
+                        });
+                    }
+                } catch(e) {}
+                return JSON.stringify({blocked: false, kind: "", rr: "", client_ip: ""});
+            })()
+        ''')
+        result_json = util.parse_nodriver_result(result_json)
+        result = json.loads(result_json) if isinstance(result_json, str) else result_json
+        if isinstance(result, dict) and result.get("blocked", False):
+            return {
+                "blocked": True,
+                "kind": result.get("kind") or "eps_js",
+                "original_url": result.get("rr", "") or "",
+                "client_ip": result.get("client_ip", "") or "unknown",
+            }
+    except Exception:
+        pass
+
+    if not _is_tixcraft_soft_block_scope(url):
+        return {"blocked": False}
+
+    page_text = await _read_page_text_for_soft_block(tab)
+    if _is_tixcraft_soft_block_text(page_text):
+        return {
+            "blocked": True,
+            "kind": "text_marker",
+            "original_url": "",
+            "client_ip": "unknown",
+        }
+
+    return {"blocked": False}
+
+
+def _get_tixcraft_soft_block_recovery_url(config_dict, current_url="", original_url=""):
+    candidates = (
+        _state.get("last_valid_area_url", ""),
+        original_url,
+        current_url,
+        (config_dict or {}).get("homepage", ""),
+    )
+    for candidate in candidates:
+        candidate = str(candidate or "").strip()
+        if candidate:
+            return candidate
+    return ""
+
+
+async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detection=None):
+    debug = util.create_debug_logger(config_dict)
+    detection = detection or {"kind": "unknown", "original_url": "", "client_ip": "unknown"}
+    original_url = detection.get("original_url", "") or ""
+    scope_url = original_url or current_url
+    wait_seconds, is_custom_delay = _resolve_soft_block_wait_seconds(config_dict, scope_url)
+    kind = detection.get("kind", "unknown")
+    client_ip = detection.get("client_ip", "unknown")
+
+    _reset_tixcraft_submit_state()
+    _reset_tixcraft_area_retry_state()
+
+    if kind == "text_marker":
+        debug.log(f"[EPS BLOCK] Soft-block page detected by text marker; waiting {wait_seconds}s")
+    elif is_custom_delay:
+        debug.log(
+            f"[EPS BLOCK] IP blocked (IP: {client_ip}), using custom TixCraft soft-block delay: {wait_seconds}s"
+        )
+    else:
+        debug.log(f"[EPS BLOCK] IP blocked (IP: {client_ip}), using default delay: {wait_seconds}s before retry")
+    debug.log("[EPS BLOCK] Automation is backing off; browser remains open and no page refresh will run during this wait")
+
+    _state["ip_block_until"] = time.time() + wait_seconds
+    waited = 0
+    while waited < wait_seconds:
+        if await check_and_handle_quit(config_dict):
+            debug.log("[EPS BLOCK] Quit requested during soft-block wait; returning control to main loop")
+            return True
+        if await check_and_handle_pause(config_dict):
+            debug.log("[EPS BLOCK] Automation stopped/paused during soft-block wait; browser remains open")
+            return True
+        chunk = min(10, wait_seconds - waited)
+        await asyncio.sleep(chunk)
+        waited += chunk
+        remaining = wait_seconds - waited
+        if remaining > 0 and waited % 60 == 0:
+            debug.log(f"[EPS BLOCK] Waiting for soft-block to expire, {remaining}s remaining")
+
+    _state["ip_block_until"] = 0
+    recovery_url = _get_tixcraft_soft_block_recovery_url(config_dict, current_url, original_url)
+    if recovery_url:
+        debug.log(f"[EPS BLOCK] Soft-block wait finished, navigating back to: {recovery_url}")
+        try:
+            await tab.get(recovery_url)
+        except Exception as exc:
+            debug.log(f"[EPS BLOCK] Soft-block recovery navigation failed: {exc}")
+    else:
+        debug.log("[EPS BLOCK] Soft-block wait finished but no recovery URL was available")
+    return True
+
+
 def _process_queue_it_state(url, state, current_time):
     """Update queue-it tracking state and decide whether the main loop should pause.
 
@@ -238,6 +396,254 @@ def _get_auto_reload_interval(config_dict):
     return get_auto_reload_interval(config_dict)
 
 
+_TIXCRAFT_RETRYABLE_ALERT_KEYWORDS = (
+    "請重新選擇",
+    "請返回重新選擇",
+    "請重新選取",
+    "請重新訂購",
+    "e0024",
+    "已售完",
+    "已無足夠",
+    "選購一空",
+    "票券已被選購一空",
+    "票券已售完",
+    "座位已售出",
+    "座位已被選走",
+    "不足票數",
+    "票數不足",
+    "剩餘票券不足",
+    "無足夠",
+    "沒有足夠",
+    "目前無法取得",
+    "暫無可售",
+    "無可售",
+    "sold out",
+    "unavailable",
+    "not enough tickets",
+    "insufficient",
+    "no ticket",
+)
+
+
+def _ensure_runtime_helpers():
+    if "action_ledger" not in _state:
+        _state["action_ledger"] = ActionLedger()
+    if "submit_guard" not in _state:
+        _state["submit_guard"] = SubmitGuard()
+
+
+def _record_action(name, value=""):
+    try:
+        _ensure_runtime_helpers()
+        _state["action_ledger"].record(name, value)
+    except Exception:
+        pass
+
+
+def _is_retryable_alert(message):
+    text = (message or "").lower()
+    return any(keyword in text for keyword in _TIXCRAFT_RETRYABLE_ALERT_KEYWORDS)
+
+
+def _reset_tixcraft_submit_state():
+    _state["captcha_submit_until"] = 0
+    _state["ocr_completed_url"] = ""
+    _state["captcha_alert_detected"] = False
+    _state["manual_intervention_required"] = False
+    if "submit_guard" in _state:
+        _state["submit_guard"].reset()
+    for key in list(_state.keys()):
+        if str(key).startswith("ticket_assigned_"):
+            _state[key] = False
+
+
+def _reset_tixcraft_area_retry_state():
+    _state["area_retry_count"] = 0
+    _state["ticketmaster_phase"] = "area_select"
+    for key in (
+        "tixcraft_area_reload_next_at",
+        "tixcraft_area_reload_last_wait_log",
+        "tixcraft_date_reload_next_at",
+        "tixcraft_date_reload_last_wait_log",
+    ):
+        _state[key] = 0
+    for key in (
+        "tixcraft_area_reload_url",
+        "tixcraft_date_reload_url",
+    ):
+        _state[key] = ""
+
+
+def _clean_tixcraft_area_name(value):
+    from notification_context import clean_seat_area
+
+    return clean_seat_area(value)
+
+
+async def _read_tixcraft_event_name(tab, fallback_url=""):
+    js = """
+        (function() {
+            const candidates = [
+                '.game-title h2',
+                '.game-title',
+                'h1',
+                'h2',
+                '.event-info h2',
+                '.activity-title'
+            ];
+            for (const selector of candidates) {
+                const el = document.querySelector(selector);
+                const text = el && el.innerText ? el.innerText.trim() : '';
+                if (text) return text;
+            }
+            return document.title || '';
+        })();
+    """
+    try:
+        event_name = await tab.evaluate(js)
+        event_name = util.parse_nodriver_result(event_name)
+    except Exception:
+        event_name = ""
+    if not event_name and fallback_url:
+        event_name = fallback_url.rstrip("/").split("/")[-1]
+    return event_name or "Unknown Event"
+
+
+async def _remember_tixcraft_event_name(tab, url):
+    current = clean_event_name(_state.get("event_name", ""), "")
+    if current:
+        return current
+    event_name = clean_event_name(await _read_tixcraft_event_name(tab, fallback_url=url), "")
+    if event_name:
+        _state["event_name"] = event_name
+        return event_name
+    return ""
+
+
+async def _read_tixcraft_ticket_count(tab, config_dict):
+    try:
+        result = await tab.evaluate("""
+            (function() {
+                const selects = Array.from(document.querySelectorAll(
+                    '.mobile-select, select[id*="TicketForm_ticketPrice_"]'
+                )).filter(s => s && !s.disabled && s.value && s.value !== "0");
+                const selected = selects.map(s => s.value).filter(Boolean);
+                return selected.length ? selected.join(',') : '';
+            })();
+        """)
+        result = util.parse_nodriver_result(result)
+        if result:
+            _state["last_ticket_count"] = str(result)
+            return str(result)
+    except Exception:
+        pass
+    return str(_state.get("last_ticket_count") or config_dict.get("ticket_number", "-"))
+
+
+async def _read_tixcraft_seat_rows(tab):
+    try:
+        result = await tab.evaluate("""
+            (function() {
+                const found = [];
+                const pushSeat = (text) => {
+                    if (!text) return;
+                    const normalized = text.replace(/\\s+/g, '');
+                    const matches = normalized.match(/[A-Za-z0-9\\u4e00-\\u9fff-]*\\d+排\\d+號/g) || [];
+                    for (const item of matches) {
+                        if (!found.includes(item)) found.push(item);
+                    }
+                };
+                const selectors = ['table tr', '.order-info', '.ticket-info', '.checkout', '.content', 'li', 'div'];
+                for (const selector of selectors) {
+                    for (const el of Array.from(document.querySelectorAll(selector))) {
+                        pushSeat(el.innerText || el.textContent || '');
+                    }
+                }
+                if (!found.length) pushSeat(document.body && document.body.innerText || '');
+                return JSON.stringify(found.slice(0, 20));
+            })();
+        """)
+        result = util.parse_nodriver_result(result)
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except Exception:
+                result = []
+        if isinstance(result, list):
+            return [str(item).strip() for item in result if str(item).strip()]
+    except Exception:
+        pass
+    return []
+
+
+async def _build_tixcraft_notification_context(tab, config_dict, stage, url):
+    event_name = clean_event_name(_state.get("event_name", ""), "")
+    if not event_name:
+        event_name = await _remember_tixcraft_event_name(tab, url)
+    ticket_count = await _read_tixcraft_ticket_count(tab, config_dict)
+    seat_area = _state.get("last_selected_area", "") or "Unknown Area"
+    seat_rows = "訂單建立中﹍" if stage == "order_pending" else "-"
+    if stage in {"checkout_reached", "payment_reached"}:
+        rows = await _read_tixcraft_seat_rows(tab)
+        if rows:
+            seat_rows = rows
+            ticket_count = str(len(rows))
+    return make_notification_context(
+        platform="TixCraft",
+        stage=stage,
+        event_name=event_name or "Unknown Event",
+        ticket_count=ticket_count,
+        seat_area=seat_area,
+        seat_rows=seat_rows,
+        current_url=url,
+        page_class=classify_page(url).value,
+        last_valid_area_url=_state.get("last_valid_area_url", ""),
+    )
+
+
+async def _recover_to_last_valid_area(tab, config_dict, reason):
+    debug = util.create_debug_logger(config_dict)
+    last_area_url = _state.get("last_valid_area_url", "")
+    if not last_area_url:
+        debug.log(f"[TIXCRAFT RECOVERY] No last_valid_area_url for {reason}")
+        _reset_tixcraft_submit_state()
+        _reset_tixcraft_area_retry_state()
+        return False
+    _reset_tixcraft_submit_state()
+    _reset_tixcraft_area_retry_state()
+    _state["tixcraft_area_reload_next_at"] = 0
+    debug.log(f"[TIXCRAFT RECOVERY] {reason}; navigating back to area: {last_area_url}")
+    try:
+        await tab.get(last_area_url)
+        _record_action("rejected_recover_to_area" if reason != "manual_cancel" else "manual_cancel_recover_to_area")
+        return True
+    except Exception as exc:
+        debug.log(f"[TIXCRAFT RECOVERY] Failed to recover to area: {exc}")
+        return False
+
+
+async def _classify_recovery_page(tab, url, initial_page_class):
+    if initial_page_class in {PageClass.AREA, PageClass.CHECKOUT, PageClass.PAYMENT}:
+        return initial_page_class
+    try:
+        page_text = await tab.evaluate('''
+            (function() {
+                return (document.body && document.body.innerText || '').slice(0, 5000);
+            })()
+        ''')
+    except Exception:
+        page_text = ""
+
+    text = (page_text or "").lower()
+    if any(item in text for item in ("訂單已取消", "已取消訂單", "取消訂單成功", "order canceled", "order cancelled")):
+        return PageClass.CANCELED_ORDER
+    if "繼續選購" in text or "continue shopping" in text:
+        return PageClass.CONTINUE_SHOPPING
+    if _is_retryable_alert(text):
+        return PageClass.REJECTED_ERROR
+    return initial_page_class
+
+
 async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
     """Throttle reloads without blocking the ticket-purchase polling loop."""
     debug = util.create_debug_logger(config_dict)
@@ -260,8 +666,7 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
         _state[next_key] = now + interval
         debug.log(f"{log_prefix} Reloading page now")
         try:
-            await tab.reload()
-            return True
+            return await guarded_reload(tab, reason=state_key)
         except Exception as exc:
             debug.log(f"{log_prefix} Reload failed: {exc}")
             return False
@@ -1980,6 +2385,12 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         return False
 
     debug = util.create_debug_logger(config_dict)
+    _state["last_valid_area_url"] = url
+    if _state.get("manual_intervention_required"):
+        debug.log("[AREA SELECT] Manual intervention cleared after returning to area page")
+        _reset_tixcraft_submit_state()
+        _reset_tixcraft_area_retry_state()
+    _record_action("entered_area_page", url)
 
     # T010: Check main switch (defensive programming)
     if not config_dict["area_auto_select"]["enable"]:
@@ -2016,6 +2427,7 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
             area_text_cache = None
         if area_text_cache:
             debug.log(f"[AREA KEYWORD] Batch pre-fetch: {len(area_text_cache)} areas cached")
+            _record_action("area_dom_read", str(len(area_text_cache)))
     except Exception:
         area_list_cache = None
         area_text_cache = None
@@ -2098,7 +2510,9 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 area_text = await target_area.text
                 if not area_text:
                     area_text = await target_area.inner_text
-                area_text = area_text.strip()[:80] if area_text else "Unknown"
+                area_text = _clean_tixcraft_area_name(area_text.strip()[:120] if area_text else "Unknown")
+                _state["last_selected_area"] = area_text
+                _record_action("area_candidate_selected", area_text)
                 selection_type = "fallback" if is_fallback_selection else "keyword match"
                 debug.log(f"[AREA SELECT] Selected area: {area_text} ({selection_type})")
             except Exception:
@@ -2106,9 +2520,11 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
 
         try:
             await target_area.click()
+            _record_action("area_clicked", _state.get("last_selected_area", ""))
         except Exception:
             try:
                 await target_area.evaluate('el => el.click()')
+                _record_action("area_clicked", _state.get("last_selected_area", ""))
             except Exception:
                 pass
 
@@ -2602,6 +3018,7 @@ async def nodriver_tixcraft_ticket_main_agree(tab, config_dict):
         is_finish_checkbox_click = await nodriver_check_checkbox_enhanced(tab, '#TicketForm_agree', config_dict)
         if is_finish_checkbox_click:
             debug.log("Agreement checkbox checked successfully")
+            _record_action("agreement_checked")
             break
         else:
             debug.log(f"Failed to check agreement, retry {i+1}/3")
@@ -2617,6 +3034,7 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
 
     # 檢查是否已經設定過票券數量（方案 B：狀態標記）
     current_url, _ = await nodriver_current_url(tab)
+    _record_action("entered_ticket_page", current_url)
     ticket_number = str(config_dict["ticket_number"])
     allow_less_tickets = config_dict.get("tixcraft", {}).get("allow_less_tickets", False)
     ticket_state_key = f"ticket_assigned_{current_url}_{ticket_number}_{int(allow_less_tickets)}"
@@ -2630,7 +3048,7 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
         if not await _is_tixcraft_ticket_count_ready(tab, config_dict):
             debug.log("[TICKET SELECT] Cached ticket state is stale or below requested count, resetting")
             _state[ticket_state_key] = False
-            await _reload_page_when_due(tab, config_dict, "tixcraft_ticket_reload", "[TICKET SELECT]")
+            await _recover_to_last_valid_area(tab, config_dict, "ticket_count_cache_stale")
             return
 
         debug.log(f"Ticket number already set ({ticket_number}), skipping")
@@ -2671,20 +3089,21 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
     # Record state after successful setting
     if is_ticket_number_assigned:
         if not await _is_tixcraft_ticket_count_ready(tab, config_dict):
-            debug.log("[TICKET SELECT] Ticket count validation failed, reloading instead of submitting")
+            debug.log("[TICKET SELECT] Ticket count validation failed, recovering to area instead of reloading")
             _state[ticket_state_key] = False
-            await _reload_page_when_due(tab, config_dict, "tixcraft_ticket_reload", "[TICKET SELECT]")
+            await _recover_to_last_valid_area(tab, config_dict, "ticket_count_validation_failed")
             return
 
         _state[ticket_state_key] = True
         _state["tixcraft_ticket_reload_next_at"] = 0
+        _record_action("ticket_count_selected", await _read_tixcraft_ticket_count(tab, config_dict))
         debug.log("Ticket number set successfully, starting OCR captcha processing")
         await nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Browser, domain_name)
     else:
         # T026: Fix Issue #174 - reload page when ticket number cannot be set
         # This prevents infinite loop when desired ticket count is unavailable
-        debug.log("[TICKET SELECT] Ticket count unavailable, reloading page to retry...")
-        await _reload_page_when_due(tab, config_dict, "tixcraft_ticket_reload", "[TICKET SELECT]")
+        debug.log("[TICKET SELECT] Ticket count unavailable, recovering to area...")
+        await _recover_to_last_valid_area(tab, config_dict, "ticket_count_unavailable")
 
 async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False, config_dict=None, perf_trace=None):
     """輸入驗證碼到表單"""
@@ -2736,6 +3155,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
 
             if answer:
                 debug.log("[TIXCRAFT CAPTCHA] Starting to fill in captcha...")
+                _record_action("captcha_input_attempted")
                 try:
                     fill_started_ns = performance.perf_counter_ns()
                     if not is_text_clicked:
@@ -2845,11 +3265,19 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                         form_ready = util.parse_nodriver_result(form_ready)
 
                         if form_ready.get('ready', False):
+                            _ensure_runtime_helpers()
+                            current_url = getattr(getattr(tab, "target", None), "url", "") or ""
+                            submit_guard = _state["submit_guard"]
+                            if not submit_guard.can_submit(current_url):
+                                debug.log("[TIXCRAFT CAPTCHA] SubmitGuard pending; skip duplicate submit")
+                                return is_verifyCode_editing, False
                             # 提交表單 (按 Enter) - 使用完整的鍵盤事件
                             await tab.send(cdp.input_.dispatch_key_event("keyDown", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
                             await tab.send(cdp.input_.dispatch_key_event("keyUp", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
                             is_verifyCode_editing = False
                             is_form_submitted = True
+                            submit_guard.mark_submitted(current_url, pending_seconds=1.5)
+                            _record_action("submit_clicked")
                             # Short submit-in-progress guard: stop the main loop from
                             # re-clicking the captcha input while navigation is pending.
                             _state["captcha_submit_until"] = time.time() + 1.5
@@ -3180,63 +3608,12 @@ async def nodriver_ticketmaster_check_ip_block(tab, config_dict, current_url="")
         return True
 
     try:
-        result_json = await tab.evaluate('''
-            (function() {
-                try {
-                    if (typeof action !== "undefined" && action === "block" && typeof rr !== "undefined") {
-                        return JSON.stringify({
-                            blocked: true,
-                            rr: rr || "",
-                            client_ip: typeof client_ip !== "undefined" ? client_ip : ""
-                        });
-                    }
-                } catch(e) {}
-                return JSON.stringify({blocked: false, rr: "", client_ip: ""});
-            })()
-        ''')
-
-        if not result_json:
+        detection = await _detect_tixcraft_soft_block(tab, current_url, config_dict)
+        if not detection.get("blocked", False):
+            _state["ip_block_count"] = 0
             return False
-
-        result = json.loads(result_json)
-        if not result.get("blocked", False):
-            return False
-
-        original_url = result.get("rr", "")
-        client_ip = result.get("client_ip", "unknown")
-        scope_url = original_url or current_url
-        wait_seconds, is_custom_delay = _resolve_soft_block_wait_seconds(config_dict, scope_url)
-
-        if is_custom_delay:
-            debug.log(
-                f"[EPS BLOCK] IP blocked (IP: {client_ip}), using custom TixCraft soft-block delay: {wait_seconds}s"
-            )
-        else:
-            debug.log(
-                f"[EPS BLOCK] IP blocked (IP: {client_ip}), using default delay: {wait_seconds}s before retry"
-            )
-        _state["ip_block_until"] = time.time() + wait_seconds
-
-        waited = 0
-        while waited < wait_seconds:
-            if await check_and_handle_pause(config_dict):
-                return True
-            chunk = min(10, wait_seconds - waited)
-            await asyncio.sleep(chunk)
-            waited += chunk
-            remaining = wait_seconds - waited
-            if remaining > 0 and waited % 60 == 0:
-                debug.log(f"[EPS BLOCK] Waiting for block to expire, {remaining}s remaining")
-
-        _state["ip_block_until"] = 0
-
-        if original_url:
-            debug.log(f"[EPS BLOCK] Block expired, navigating back to: {original_url}")
-            try:
-                await tab.get(original_url)
-            except Exception:
-                pass
-
+        _state["ip_block_count"] = int(_state.get("ip_block_count", 0)) + 1
+        await _handle_tixcraft_soft_block(tab, config_dict, current_url, detection)
         return True
 
     except Exception as exc:
@@ -3251,9 +3628,8 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
     debug = util.create_debug_logger(config_dict)
 
-    # Global alert handler - auto-dismiss all alerts (sold out, errors, etc.)
-    # Handles alerts that appear after page navigation (e.g., area selection redirects)
-    # Reference: KHAM platform implementation (Line 10681-10697)
+    # Global alert handler: only accept known retryable alerts. Unknown alerts
+    # stay visible for manual intervention and the browser remains open.
     async def handle_global_alert(event):
         # Skip alert handling when bot is paused (let user handle manually)
         if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_FILE)):
@@ -3268,32 +3644,29 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
         debug.log(f"[GLOBAL ALERT] Alert detected: '{event.message}'")
 
-        # Track captcha error alerts for retry logic
-        is_captcha_error = False
         captcha_error_keywords = [
             'verification code',
+            '驗證碼',
             'incorrect',
             'try again',
             'captcha',
             'wrong code'
         ]
         alert_message_lower = event.message.lower()
-        for keyword in captcha_error_keywords:
-            if keyword in alert_message_lower:
-                is_captcha_error = True
-                break
+        is_captcha_error = any(keyword in alert_message_lower for keyword in captcha_error_keywords)
+        is_retryable_alert = _is_retryable_alert(event.message)
+
+        if not is_captcha_error and not is_retryable_alert:
+            _state["manual_intervention_required"] = True
+            debug.log("[GLOBAL ALERT] Unknown alert; waiting for manual intervention")
+            return
 
         if is_captcha_error:
             _state["captcha_alert_detected"] = True
             # Wrong answer submitted: clear the submit guard so retry is immediate.
-            _state["captcha_submit_until"] = 0
-            debug.log(f"[GLOBAL ALERT] Captcha error detected, flagging for retry")
+            _reset_tixcraft_submit_state()
+            debug.log("[GLOBAL ALERT] Captcha error detected, flagging for retry")
 
-        # Issue #188: Detect sold out alerts to add cooldown delay
-        sold_out_keywords = ['售完', '已售完', '選購一空', 'sold out', 'no tickets']
-        is_sold_out_alert = any(kw in alert_message_lower for kw in sold_out_keywords)
-
-        # Dismiss the alert - try multiple times with small delays
         dismiss_success = False
         for attempt in range(3):
             try:
@@ -3313,13 +3686,8 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
                 else:
                     debug.log(f"[GLOBAL ALERT] Failed to dismiss alert: {dismiss_exc}")
 
-        # Issue #188: Set cooldown timestamp instead of async sleep (event handler doesn't block main loop)
-        if is_sold_out_alert and dismiss_success:
-            interval = get_auto_reload_interval(config_dict)
-            if interval > 0:
-                cooldown_until = time.time() + interval
-                _state["sold_out_cooldown_until"] = cooldown_until
-                debug.log(f"[GLOBAL ALERT] Sold out detected, setting cooldown for {interval}s")
+        if is_retryable_alert and dismiss_success:
+            await _recover_to_last_valid_area(tab, config_dict, "retryable_alert")
 
     if not _state:
         _state.update({
@@ -3332,16 +3700,22 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             "area_retry_count": 0,
             "played_sound_ticket": False,
             "played_sound_order": False,
+            "notified_order_pending": False,
+            "notified_checkout_reached": False,
             "alert_handler_registered": False,
             "captcha_alert_detected": False,
             "captcha_submit_until": 0,
             "ocr_completed_url": "",
+            "last_valid_area_url": "",
+            "last_selected_area": "",
+            "manual_intervention_required": False,
             "last_homepage_redirect_time": 0,
             "sold_out_cooldown_until": 0,
             "printed_completed": False,
             "ticketmaster_phase": "area_select",
             "ticketmaster_captcha_processed_url": "",
             "ip_block_until": 0,
+            "ip_block_count": 0,
             "queue_it_enter_time": None,
         })
 
@@ -3349,6 +3723,10 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     # Only register once to prevent infinite loop
     if not _state.get("alert_handler_registered", False):
         try:
+            try:
+                await tab.send(cdp.page.enable())
+            except Exception:
+                pass
             tab.add_handler(cdp.page.JavascriptDialogOpening, handle_global_alert)
             _state["alert_handler_registered"] = True
             debug.log(f"[GLOBAL ALERT] Global alert handler registered")
@@ -3369,9 +3747,28 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
     await nodriver_tixcraft_home_close_window(tab)
 
-    # EPS block detection for TixCraft family and Ticketmaster domains (Issue #289)
+    # EPS / soft-block detection must run before normal page dispatching so a
+    # pause page that keeps an /area/ URL is not treated as a selectable area.
     if _is_tixcraft_soft_block_scope(url) or 'ticketmaster' in url:
         if await nodriver_ticketmaster_check_ip_block(tab, config_dict, current_url=url):
+            return False
+
+    page_class = classify_page(url)
+    if page_class in {PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA, PageClass.TICKET}:
+        await _remember_tixcraft_event_name(tab, url)
+    if _state.get("last_valid_area_url"):
+        page_class = await _classify_recovery_page(tab, url, page_class)
+    if _state.get("last_valid_area_url") and page_class in {
+        PageClass.HOME,
+        PageClass.ACTIVITY,
+        PageClass.DATE,
+        PageClass.CANCELED_ORDER,
+        PageClass.CONTINUE_SHOPPING,
+        PageClass.REJECTED_ERROR,
+    }:
+        recovery_reason = "manual_cancel" if page_class == PageClass.CANCELED_ORDER else "manual_navigation_or_redirect"
+        recovered = await _recover_to_last_valid_area(tab, config_dict, recovery_reason)
+        if recovered:
             return False
 
     # special case for same event re-open, redirect to user's homepage.
@@ -3385,8 +3782,8 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         if not homepage_is_root:
             current_time = time.time()
             last_redirect_time = _state.get("last_homepage_redirect_time", 0)
-            # Use auto_reload_page_interval from settings, default to 3 seconds
-            redirect_interval = config_dict["advanced"].get("auto_reload_page_interval", 3)
+            # Use active safe-page reload interval from settings, default to 3 seconds.
+            redirect_interval = get_auto_reload_interval(config_dict, default=3)
             if redirect_interval <= 0:
                 redirect_interval = 3  # Minimum 3 seconds to prevent rapid loop
 
@@ -3518,6 +3915,12 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
     if '/ticket/order' in url:
         _state["done_time"] = time.time()
+        _record_action("order_pending", url)
+        if not _state.get("notified_order_pending", False):
+            notify_context = await _build_tixcraft_notification_context(tab, config_dict, "order_pending", url)
+            send_discord_notification(config_dict, "order_pending", "TixCraft", context=notify_context)
+            send_telegram_notification(config_dict, "order_pending", "TixCraft", context=notify_context)
+            _state["notified_order_pending"] = True
 
     is_quit_bot = False
     if '/ticket/checkout' in url:
@@ -3528,24 +3931,25 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
                     print("bot elapsed time:", "{:.3f}".format(bot_elapsed_time))
                 _state["elapsed_time"] = bot_elapsed_time
 
-        # Always set is_quit_bot when checkout page is detected (not just in headless mode)
         if not _state["is_popup_checkout"]:
-            is_quit_bot = True
             _state["is_popup_checkout"] = True
+            _record_action("checkout_reached", url)
 
             # Issue #193: Move inside the block to execute only once on first checkout detection
             # Headless-specific behavior: open checkout URL in new browser window
             if config_dict["advanced"]["headless"]:
                 domain_name = url.split('/')[2]
                 checkout_url = "https://%s/ticket/checkout" % (domain_name)
-                print("Ticket purchase successful, please check order at: %s" % (checkout_url))
+                print("Checkout reached, please check order at: %s" % (checkout_url))
                 webbrowser.open_new(checkout_url)
 
         if not _state["played_sound_order"]:
             if config_dict["advanced"]["play_sound"]["order"]:
                 play_sound_while_ordering(config_dict)
-            send_discord_notification(config_dict, "order", "TixCraft")
-            send_telegram_notification(config_dict, "order", "TixCraft")
+            notify_context = await _build_tixcraft_notification_context(tab, config_dict, "checkout_reached", url)
+            send_discord_notification(config_dict, "checkout_reached", "TixCraft", context=notify_context)
+            send_telegram_notification(config_dict, "checkout_reached", "TixCraft", context=notify_context)
+            _state["notified_checkout_reached"] = True
         _state["played_sound_order"] = True
     else:
         _state["is_popup_checkout"] = False
@@ -3555,7 +3959,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     # Approach B: handle printed_completed internally
     if is_quit_bot:
         if not _state.get("printed_completed", False):
-            print("TixCraft ticket purchase completed")
+            print("TixCraft checkout reached")
             _state["printed_completed"] = True
 
     return is_quit_bot

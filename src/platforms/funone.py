@@ -14,6 +14,7 @@ except Exception:
 
 import util
 from platforms.common_async import get_auto_reload_interval
+from reload_guard import guarded_reload
 from nodriver_common import (
     check_and_handle_pause,
     create_ocr_for_platform,
@@ -1718,7 +1719,7 @@ async def nodriver_funone_auto_reload(tab, config_dict):
 
             if page_status == 'error':
                 debug.log(f"[FUNONE] Error page detected: {reason}, reloading...")
-                await tab.reload()
+                await guarded_reload(tab, reason="legacy_platform_reload")
                 return True
 
             elif page_status == 'coming_soon':
@@ -1726,7 +1727,7 @@ async def nodriver_funone_auto_reload(tab, config_dict):
                 if auto_reload_coming_soon:
                     debug.log("[FUNONE] Coming soon page, auto-reloading...")
                     await tab.sleep(1)
-                    await tab.reload()
+                    await guarded_reload(tab, reason="legacy_platform_reload")
                     return True
 
             elif page_status == 'sold_out':
@@ -1753,7 +1754,7 @@ async def nodriver_funone_error_handler(tab, error, config_dict):
     if 'timeout' in error_str:
         debug.log("[FUNONE] Timeout error, reloading page...")
         try:
-            await tab.reload()
+            await guarded_reload(tab, reason="legacy_platform_reload")
             return True
         except Exception:
             pass
@@ -1762,7 +1763,7 @@ async def nodriver_funone_error_handler(tab, error, config_dict):
         debug.log("[FUNONE] Network error, waiting and retrying...")
         await tab.sleep(2)
         try:
-            await tab.reload()
+            await guarded_reload(tab, reason="legacy_platform_reload")
             return True
         except Exception:
             pass
@@ -1868,7 +1869,7 @@ async def nodriver_funone_main(tab, url, config_dict):
         if not homepage_is_root:
             current_time = time.time()
             last_redirect_time = _state.get("last_homepage_redirect_time", 0)
-            redirect_interval = config_dict["advanced"].get("auto_reload_page_interval", 3)
+            redirect_interval = get_auto_reload_interval(config_dict, default=3)
             if redirect_interval <= 0:
                 redirect_interval = 3
             if current_time - last_redirect_time > redirect_interval:
@@ -1984,7 +1985,7 @@ async def nodriver_funone_main(tab, url, config_dict):
                             # Fallback: reload page if refresh button not found
                             debug.log("[FUNONE] Refresh button not found, reloading page...")
                             await asyncio.sleep(auto_reload_interval)
-                            await tab.reload()
+                            await guarded_reload(tab, reason="legacy_platform_reload")
 
                         return tab  # Next iteration will re-check status
 
@@ -2020,7 +2021,7 @@ async def nodriver_funone_main(tab, url, config_dict):
                                 await asyncio.sleep(auto_reload_interval)
                             else:
                                 await asyncio.sleep(auto_reload_interval)
-                                await tab.reload()
+                                await guarded_reload(tab, reason="legacy_platform_reload")
                         return tab
 
                     _state["qty_sold_out_refreshing"] = False
@@ -2108,4 +2109,3 @@ async def nodriver_funone_main(tab, url, config_dict):
             await nodriver_funone_auto_reload(tab, config_dict)
 
     return tab
-

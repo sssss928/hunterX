@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import traceback
+from urllib.parse import urlparse
 
 from zendriver import cdp
 from zendriver.core.config import Config
@@ -22,6 +23,8 @@ import chrome_downloader
 import ocr_cache
 import performance
 from hunter_metadata import APP_DISPLAY_VERSION
+from browser_session import BrowserSessionManager
+from notification_context import make_notification_context
 
 try:
     import ddddocr
@@ -37,6 +40,7 @@ CONST_MAXBOT_ANSWER_ONLINE_FILE = "MAXBOT_ONLINE_ANSWER.txt"
 CONST_MAXBOT_CONFIG_FILE = "settings.json"
 CONST_MAXBOT_INT28_FILE = "MAXBOT_INT28_IDLE.txt"
 CONST_MAXBOT_INT28_QUIT_FILE = "MAXBOT_INT28_QUIT.txt"
+CONST_MAXBOT_AUTOMATION_STOP_FILE = "MAXBOT_AUTOMATION_STOP.txt"
 CONST_MAXBOT_LAST_URL_FILE = "MAXBOT_LAST_URL.txt"
 CONST_MAXBOT_QUESTION_FILE = "MAXBOT_QUESTION.txt"
 
@@ -51,12 +55,9 @@ CONST_WEBDRIVER_TYPE_NODRIVER = "nodriver"
 CONST_CHROME_FAMILY = ["chrome","edge","brave"]
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
 
-# ===== Cloudflare bypass settings =====
-# "auto"   - auto silent mode (recommended for daily use)
-# "debug"  - verbose processing output, for debugging
-# "manual" - detect and prompt only, no auto handling
-# "off"    - completely disable Cloudflare bypass
-CLOUDFLARE_BYPASS_MODE = "auto"
+# ===== Cloudflare challenge settings =====
+# HunterX detects challenge pages but does not optimize bypass behavior.
+CLOUDFLARE_BYPASS_MODE = "manual"
 CLOUDFLARE_MAX_RETRY = 3         # max retry count
 CLOUDFLARE_WAIT_TIME = 3         # wait time after each attempt (seconds)
 CLOUDFLARE_ENABLE_EXPERT_MODE = False  # True enables more aggressive browser args
@@ -124,6 +125,8 @@ def get_config_dict(args):
                 "browser": ["browser"],
                 "proxy_server": ["advanced", "proxy_server_port"],
                 "window_size": ["advanced", "window_size"],
+                "run_mode": ["advanced", "run_mode"],
+                "leak_refresh_interval_seconds": ["advanced", "leak_refresh_interval_seconds"],
                 "date_auto_select_mode": ["date_auto_select", "mode"],
                 "date_keyword": ["date_auto_select", "date_keyword"],
                 "area_auto_select_mode": ["area_auto_select", "mode"],
@@ -184,7 +187,50 @@ def play_sound_while_ordering(config_dict):
     captcha_sound_filename = os.path.join(app_root, config_dict["advanced"]["play_sound"]["filename"].strip())
     util.play_mp3_async(captcha_sound_filename)
 
-def send_discord_notification(config_dict, stage, platform_name):
+
+def build_shared_notification_context(config_dict, stage, platform_name, context=None):
+    if context is not None:
+        return context
+    config_dict = config_dict or {}
+    homepage = config_dict.get("homepage", "")
+    event_name = (
+        config_dict.get("_notification_event_name")
+        or config_dict.get("event_name")
+        or ""
+    )
+    if not event_name and homepage:
+        try:
+            parsed = urlparse(homepage)
+            event_name = parsed.path.strip("/").split("/")[-1] or parsed.netloc
+        except Exception:
+            event_name = homepage
+    area_config = config_dict.get("area_auto_select", {}) if isinstance(config_dict.get("area_auto_select"), dict) else {}
+    seat_area = (
+        config_dict.get("_notification_seat_area")
+        or area_config.get("area_keyword")
+        or "-"
+    )
+    ticket_count = (
+        config_dict.get("_notification_ticket_count")
+        or config_dict.get("ticket_number")
+        or "-"
+    )
+    seat_rows = config_dict.get("_notification_seat_rows") or "-"
+    if stage in {"order", "order_pending"}:
+        seat_rows = "訂單建立中﹍"
+    return make_notification_context(
+        platform=platform_name,
+        stage=stage,
+        event_name=event_name or "Unknown Event",
+        ticket_count=ticket_count,
+        seat_area=seat_area,
+        seat_rows=seat_rows,
+        current_url=homepage,
+        last_valid_area_url=config_dict.get("_notification_last_valid_safe_url", ""),
+    )
+
+
+def send_discord_notification(config_dict, stage, platform_name, context=None):
     """Send Discord webhook notification if configured.
 
     Args:
@@ -197,12 +243,14 @@ def send_discord_notification(config_dict, stage, platform_name):
     if webhook_url:
         verbose = adv.get("verbose", False)
         custom_message = adv.get("discord_message", "")
+        context = build_shared_notification_context(config_dict, stage, platform_name, context=context)
+        safe_message = context.format_message(custom_message)
         util.send_discord_webhook_async(
             webhook_url, stage, platform_name,
-            verbose=verbose, custom_message=custom_message
+            verbose=verbose, custom_message=safe_message
         )
 
-def send_telegram_notification(config_dict, stage, platform_name):
+def send_telegram_notification(config_dict, stage, platform_name, context=None):
     """Send Telegram bot notification if configured.
 
     Args:
@@ -216,9 +264,11 @@ def send_telegram_notification(config_dict, stage, platform_name):
     if bot_token and chat_id:
         verbose = adv.get("verbose", False)
         custom_message = adv.get("telegram_message", "")
+        context = build_shared_notification_context(config_dict, stage, platform_name, context=context)
+        safe_message = context.format_message(custom_message)
         util.send_telegram_message_async(
             bot_token, chat_id, stage, platform_name,
-            verbose=verbose, custom_message=custom_message
+            verbose=verbose, custom_message=safe_message
         )
     elif bot_token or chat_id:
         debug = util.create_debug_logger(config_dict)
@@ -606,7 +656,7 @@ async def _cdp_click(tab, x, y):
 
 async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
     """
-    Handle Cloudflare Turnstile challenge.
+    Detect Cloudflare Turnstile challenge.
 
     Strategy (per attempt, in order):
     1. CDP DOM pierce: find iframe via DOM.getDocument(pierce=True) + getBoxModel for position
@@ -619,7 +669,7 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
         max_retry: max retries (default: CLOUDFLARE_MAX_RETRY)
 
     Returns:
-        bool: True if challenge bypassed successfully
+        bool: True if challenge resolved without automation, False if manual intervention is required
     """
     max_retry = max_retry or CLOUDFLARE_MAX_RETRY
 
@@ -627,7 +677,10 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
                 CLOUDFLARE_BYPASS_MODE == "debug")
 
     debug = util.create_debug_logger(enabled=cf_debug)
-    debug.log("[CLOUDFLARE] Starting to handle Cloudflare challenge...")
+    if CLOUDFLARE_BYPASS_MODE == "manual":
+        debug.log("[CLOUDFLARE] Challenge detected; manual intervention required")
+        return False
+    debug.log("[CLOUDFLARE] Starting challenge handling...")
 
     for retry_count in range(max_retry):
         try:
@@ -762,7 +815,7 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
                     debug.log(f"[CLOUDFLARE] Post-click verification failed: {exc}")
                     still_active = True
                 if not still_active:
-                    debug.log("[CLOUDFLARE] Challenge bypassed successfully")
+                    debug.log("[CLOUDFLARE] Challenge resolved")
                     return True
             else:
                 # No click dispatched; use full detection
@@ -773,14 +826,7 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
             debug.log(f"[CLOUDFLARE] Attempt {retry_count + 1} unsuccessful")
 
             if retry_count == max_retry - 1:
-                try:
-                    debug.log("[CLOUDFLARE] Last attempt: Refreshing page")
-                    await tab.reload()
-                    await tab.sleep(5)
-                    if not await detect_cloudflare_challenge(tab, cf_debug):
-                        return True
-                except Exception:
-                    pass
+                debug.log("[CLOUDFLARE] Max retry reached; manual intervention required")
 
         except Exception as exc:
             debug.log(f"[CLOUDFLARE] Error during processing: {exc}")
@@ -794,6 +840,8 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
 async def check_and_handle_pause(config_dict=None):
     """check this instance's pause file and handle pause state"""
     if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_FILE)):
+        return True
+    if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_AUTOMATION_STOP_FILE)):
         return True
     return False
 
@@ -907,7 +955,7 @@ def get_nodriver_browser_args():
 
     # Expert mode: cautiously add high-risk args
     if CLOUDFLARE_ENABLE_EXPERT_MODE:
-        # Warning: these args may increase detection risk but provide stronger bypass
+        # Warning: these args may increase detection risk and are disabled by default.
         expert_args = [
             "--no-sandbox",  # needed in some environments, detection risk
             "--disable-web-security",  # high risk but effective
@@ -916,10 +964,10 @@ def get_nodriver_browser_args():
 
     return browser_args
 
-def get_extension_config(config_dict, args=None):
+def get_extension_config(config_dict, args=None, session_manager=None):
     sandbox=True
     browser_args = get_nodriver_browser_args()
-    if len(config_dict["advanced"]["proxy_server_port"]) > 2:
+    if session_manager is None and len(config_dict["advanced"]["proxy_server_port"]) > 2:
         browser_args.append('--proxy-server=%s' % config_dict["advanced"]["proxy_server_port"])
 
     # MCP connect mode: Connect to existing Chrome instance (for MCP integration)
@@ -952,6 +1000,9 @@ def get_extension_config(config_dict, args=None):
         mcp_debug_enabled = True
         print("[MCP DEBUG] Mode enabled (via settings.json) - actual port will be shown after browser starts")
 
+    if session_manager is not None:
+        return session_manager.build_config(browser_args, sandbox=sandbox)
+
     # Ensure Chrome is available (download if needed)
     # This fixes Issue #236: NoDriver fails when Chrome is not installed
     app_root = util.get_app_root()
@@ -965,6 +1016,10 @@ def get_extension_config(config_dict, args=None):
     # Normal mode: auto-detect (host=None, port=None) to let NoDriver start the browser
     conf = Config(browser_args=browser_args, sandbox=sandbox, headless=config_dict["advanced"]["headless"], browser_executable_path=chrome_path)
     return conf
+
+
+def create_browser_session_manager(config_dict, args=None):
+    return BrowserSessionManager(config_dict, args=args)
 
 def nodriver_overwrite_prefs(conf):
     #print(conf.user_data_dir)

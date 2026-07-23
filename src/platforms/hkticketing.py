@@ -15,6 +15,7 @@ from zendriver import cdp
 
 import util
 from platforms.common_async import get_auto_reload_interval
+from reload_guard import guarded_reload
 from nodriver_common import (
     nodriver_check_modal_dialog_popup,
     play_sound_while_ordering,
@@ -623,7 +624,7 @@ async def nodriver_hkticketing_date_auto_select(tab, config_dict, fail_list):
                 await asyncio.sleep(reload_interval)
 
                 try:
-                    await tab.reload()
+                    await guarded_reload(tab, reason="legacy_platform_reload")
                 except Exception as exc:
                     pass
             else:
@@ -2535,7 +2536,7 @@ async def nodriver_hkticketing_main(tab, url, config_dict):
     #   - Event page: hkt.hkticketing.com/hant/#/allEvents/detail/{activityId}
     #   - Ticket page: hkt.hkticketing.com/hant/#/allEvents/detail/selectTicket?activityId=xxx
     #   - Confirm page: hkt.hkticketing.com/hant/#/confirmOrder?eventIds=xxx
-    #   - Checkout page: hkt.hkticketing.com/hant/#/generateSeat/{orderId} (success!)
+    #   - Checkout page: hkt.hkticketing.com/hant/#/generateSeat/{orderId} (checkout reached)
     # ==========================================================================
     is_type02_site = 'hkt.hkticketing.com' in url
 
@@ -2729,4 +2730,3 @@ async def nodriver_hkticketing_main(tab, url, config_dict):
         _state["played_sound_ticket"] = False
 
     return tab
-

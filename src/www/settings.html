@@ -160,7 +160,7 @@
 
 <!-- 版本資訊 -->
 <div class="alert alert-info" role="alert">
-  <p class="mb-0"><strong>版本</strong>：HunterX (0.2.1) | <strong>技術支援</strong>：Claude Code AI 輔助開發</p>
+  <p class="mb-0"><strong>版本</strong>：HunterX (0.4.1) | <strong>技術支援</strong>：Claude Code AI 輔助開發</p>
 </div>
 
 <!-- 開發狀態提示（可展開） -->
@@ -522,7 +522,7 @@
           </label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <div class="input-group">
-              <input class="form-control" id="discord_webhook_url" type="url" value="" placeholder="https://discord.com/api/webhooks/..." />
+              <input class="form-control" id="discord_webhook_url" type="url" value="" placeholder="Discord webhook URL" />
               <button class="btn btn-outline-secondary" type="button" id="btn_test_discord_webhook">測試</button>
             </div>
           </div>
@@ -556,6 +556,38 @@
         </div>
 
         <div class="row mb-3">
+          <label for="browser_type" class="col-sm-2 col-form-label">瀏覽器</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <select class="form-select" id="browser_type">
+              <option value="chrome">Chrome</option>
+              <option value="edge">Edge</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">無痕模式</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="browser_private_mode">
+              <label class="form-check-label" for="browser_private_mode">啟用</label>
+            </div>
+            <small class="form-text text-muted">Chrome 使用 Incognito，Edge 使用 InPrivate。一般模式使用 HunterX 獨立 profile。</small>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <label for="run_mode" class="col-sm-2 col-form-label">執行模式<span class="help-icon" data-help="run_mode" title="執行模式說明" tabindex="0" role="button" aria-label="執行模式 說明"></span></label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <select class="form-select" id="run_mode">
+              <option value="onsale">正式搶票模式</option>
+              <option value="leak_watch">撿漏模式</option>
+            </select>
+            <small class="form-text text-muted">正式模式保留既有購票 hot path；撿漏模式只調整安全頁刷新與重讀 DOM 策略。</small>
+          </div>
+        </div>
+
+        <div class="row mb-3">
           <label for="auto_reload_page_interval" class="col-sm-2 col-form-label">自動刷新頁面間隔(秒)<span class="help-icon" data-help="auto_reload_page_interval" title="自動刷新頁面間隔說明" tabindex="0" role="button" aria-label="自動刷新頁面間隔 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <input class="form-control" id="auto_reload_page_interval" value="" />
@@ -569,11 +601,19 @@
           </div>
         </div>
 
+        <div class="row mb-3">
+          <label for="leak_refresh_interval_seconds" class="col-sm-2 col-form-label">撿漏刷新間隔(秒)<span class="help-icon" data-help="leak_refresh_interval_seconds" title="撿漏刷新間隔說明" tabindex="0" role="button" aria-label="撿漏刷新間隔 說明"></span></label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <input class="form-control" id="leak_refresh_interval_seconds" type="number" min="0" step="0.1" value="" />
+            <small class="form-text text-muted">只在撿漏模式使用。回安全頁後先重讀 DOM；沒票才依此秒數刷新/重掃。</small>
+          </div>
+        </div>
+
         <div class="row mb-3 disappear" id="tixcraft-soft-block-delay-row" data-under="tixcraft">
-          <label for="tixcraft_soft_block_delay" class="col-sm-2 col-form-label">暫時鎖定等待秒數<span class="help-icon" data-help="tixcraft_soft_block_delay" title="暫時鎖定等待秒數說明" tabindex="0" role="button" aria-label="暫時鎖定等待秒數 說明"></span></label>
+          <label for="tixcraft_soft_block_delay" class="col-sm-2 col-form-label">軟鎖後等待秒數<span class="help-icon" data-help="tixcraft_soft_block_delay" title="軟鎖後等待秒數說明" tabindex="0" role="button" aria-label="軟鎖後等待秒數 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <input class="form-control" id="tixcraft_soft_block_delay" type="number" min="1" max="600" value="" placeholder="留空使用預設 240-420 秒" />
-            <small class="form-text text-muted">只影響拓元、添翼、Indievox 白畫面暫時鎖定等待時間。留空沿用預設值。</small>
+            <small class="form-text text-muted">這不是刷新間隔。只在偵測到白畫面/軟鎖時停手等待，留空沿用預設值。</small>
           </div>
         </div>
 

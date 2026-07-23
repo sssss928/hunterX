@@ -16,6 +16,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, overload
 
+from run_modes import get_effective_reload_interval
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -132,20 +134,12 @@ def is_interval_due(now: float, last_check: float, interval: float) -> bool:
 
 
 def get_auto_reload_interval(config_dict: dict[str, Any] | None, default: float = 0.0) -> float:
-    """Read the auto-reload interval as a non-negative number."""
-    advanced = config_dict.get("advanced", {}) if isinstance(config_dict, dict) else {}
-    raw_value = advanced.get("auto_reload_page_interval", default)
-    if raw_value in (None, ""):
-        raw_value = default
-    try:
-        interval = float(raw_value)
-    except (TypeError, ValueError):
-        interval = float(default)
-    if not math.isfinite(interval):
-        try:
-            interval = float(default)
-        except (TypeError, ValueError):
-            interval = 0.0
-    if not math.isfinite(interval):
-        interval = 0.0
-    return max(0.0, interval)
+    """Read the active safe-page reload interval.
+
+    Onsale mode preserves the v0.4.0 hotfix behavior and reads
+    ``auto_reload_page_interval``. Leak-watch mode reads the dedicated
+    ``leak_refresh_interval_seconds`` value. Platform modules call this helper
+    from safe selection pages; protected ticket/order/checkout/payment reloads
+    remain blocked by ReloadGuard.
+    """
+    return get_effective_reload_interval(config_dict, default)

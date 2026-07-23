@@ -29,11 +29,15 @@ const discord_webhook_url = document.querySelector('#discord_webhook_url');
 const notification_message = document.querySelector('#notification_message');
 const telegram_bot_token = document.querySelector('#telegram_bot_token');
 const telegram_chat_id = document.querySelector('#telegram_chat_id');
+const browser_type = document.querySelector('#browser_type');
+const browser_private_mode = document.querySelector('#browser_private_mode');
+const run_mode = document.querySelector('#run_mode');
 
 const auto_press_next_step_button = document.querySelector('#auto_press_next_step_button');
 const max_dwell_time = document.querySelector('#max_dwell_time');
 
 const auto_reload_page_interval = document.querySelector('#auto_reload_page_interval');
+const leak_refresh_interval_seconds = document.querySelector('#leak_refresh_interval_seconds');
 const tixcraft_soft_block_delay = document.querySelector('#tixcraft_soft_block_delay');
 const tixcraft_allow_less_tickets = document.querySelector('#tixcraft_allow_less_tickets');
 const reset_browser_interval = document.querySelector('#reset_browser_interval');
@@ -325,7 +329,7 @@ function applyOrRestore(selector, property, englishValue) {
 function renderReadmePane() {
     const englishHtml = `
 <div class="alert alert-info" role="alert">
-  <p class="mb-0"><strong>Version</strong>: HunterX (0.2.1) | <strong>Technical support</strong>: Claude Code AI-assisted development</p>
+  <p class="mb-0"><strong>Version</strong>: HunterX (0.4.1) | <strong>Technical support</strong>: Claude Code AI-assisted development</p>
 </div>
 
 <div class="accordion mb-3" id="devStatusAccordion">
@@ -528,8 +532,10 @@ function renderAdvancedTabTranslations() {
     setRowLabelForField('telegram_bot_token', fieldLabel('Telegram bot token', 'telegram_bot_token'));
     setRowLabelForField('telegram_chat_id', fieldLabel('Telegram chat ID', 'telegram_chat_id'));
     setRowLabelForField('notification_message', 'Notification message');
+    setRowLabelForField('run_mode', fieldLabel('Run mode', 'run_mode'));
     setRowLabelForField('auto_reload_page_interval', fieldLabel('Auto reload interval (sec)', 'auto_reload_page_interval'));
-    setRowLabelForField('tixcraft_soft_block_delay', fieldLabel('TixCraft soft-block delay (sec)', 'tixcraft_soft_block_delay'));
+    setRowLabelForField('leak_refresh_interval_seconds', fieldLabel('Leak-watch refresh interval (sec)', 'leak_refresh_interval_seconds'));
+    setRowLabelForField('tixcraft_soft_block_delay', fieldLabel('Soft-block wait after detection (sec)', 'tixcraft_soft_block_delay'));
     setRowLabelForField('tixcraft_allow_less_tickets', fieldLabel('Buy fewer TixCraft tickets if needed', 'tixcraft_allow_less_tickets'));
     setRowLabelForField('reset_browser_interval', fieldLabel('Browser restart interval (sec)', 'reset_browser_interval'));
     setRowLabelForField('server_port', fieldLabel('Settings UI port', 'server_port'));
@@ -551,7 +557,7 @@ function renderAdvancedTabTranslations() {
     applyOrRestore('#btn_test_discord_webhook', 'textContent', 'Test');
     applyOrRestore('#btn_test_telegram', 'textContent', 'Test');
     applyOrRestore('#notification_message', 'placeholder', 'Leave empty to use the default English notification');
-    applyOrRestore('#discord_webhook_url', 'placeholder', 'https://discord.com/api/webhooks/...');
+    applyOrRestore('#discord_webhook_url', 'placeholder', 'Discord webhook URL');
     applyOrRestore('#telegram_bot_token', 'placeholder', '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11');
     applyOrRestore('#telegram_chat_id', 'placeholder', '123456789, 987654321');
     applyOrRestore('#server_port', 'placeholder', '16888');
@@ -795,6 +801,7 @@ function uiText(key, extra = '') {
         'saved': { 'zh-TW': '已存檔', en: 'Saved' },
         'missing_ticket_number': { 'zh-TW': '提示: 請指定張數', en: 'Please select the number of tickets.' },
         'invalid_refresh_datetime': { 'zh-TW': '刷新在指定時間格式需為 YYYY/MM/DD HH:MM:SS 或 YYYY/MM/DD HH:MM:SS.SSS。', en: 'Refresh time must use YYYY/MM/DD HH:MM:SS or YYYY/MM/DD HH:MM:SS.SSS.' },
+        'invalid_leak_refresh_interval_seconds': { 'zh-TW': '提示: 撿漏刷新間隔請填 0 以上的秒數。', en: 'Enter a non-negative number for the leak-watch refresh interval.' },
         'invalid_tixcraft_soft_block_delay': { 'zh-TW': '提示: 暫時鎖定等待秒數請填 1 到 600 的整數，或留空使用預設值。', en: 'Enter an integer from 1 to 600 for the TixCraft soft-block delay, or leave it empty to use the default.' },
         'status_paused': { 'zh-TW': '已暫停', en: 'Paused' },
         'status_running': { 'zh-TW': '已啟動', en: 'Running' },
@@ -810,11 +817,13 @@ function uiText(key, extra = '') {
         'instance_running': { 'zh-TW': '運行中', en: 'Running' },
         'btn_pause': { 'zh-TW': '暫停', en: 'Pause' },
         'btn_resume': { 'zh-TW': '繼續', en: 'Resume' },
-        'btn_stop': { 'zh-TW': '停止', en: 'Stop' },
+        'btn_stop': { 'zh-TW': '停止自動化', en: 'Stop automation' },
+        'btn_quit': { 'zh-TW': '關閉瀏覽器', en: 'Quit browser' },
         'btn_cleanup_offline': { 'zh-TW': '清理離線暫存', en: 'Clean offline state' },
         'cleanup_done': { 'zh-TW': `已清理離線暫存：${extra}`, en: `Cleaned offline state: ${extra}` },
         'cleanup_none': { 'zh-TW': '沒有可清理的離線暫存。', en: 'No offline state to clean.' },
-        'stop_confirm': { 'zh-TW': `停止會關閉實例「${extra}」的瀏覽器並結束行程，無法復原。確定要停止嗎？`, en: `Stopping closes the browser for instance "${extra}" and ends its process. This cannot be undone. Stop it?` },
+        'stop_confirm': { 'zh-TW': `停止會讓實例「${extra}」停止自動化，但保留瀏覽器。確定要停止嗎？`, en: `Stop automation for instance "${extra}" and keep the browser open?` },
+        'quit_confirm': { 'zh-TW': `關閉實例「${extra}」的瀏覽器並結束行程，無法復原。確定要關閉嗎？`, en: `Close the browser for instance "${extra}" and end the process?` },
         'risk_kktix': { 'zh-TW': 'KKTIX 多開風險：可能打亂排隊順序甚至被導入假排隊', en: 'KKTIX multi-open risk: may disrupt your queue order or trap you in a fake queue' },
         'risk_tixcraft': { 'zh-TW': '拓元/遠大多開風險：同帳號同活動會被踢 session', en: 'Tixcraft family multi-open risk: same account on the same event gets session-kicked' },
         'risk_ibon': { 'zh-TW': 'iBon 多開風險：Queue-it 排隊序可能受影響', en: 'iBon multi-open risk: Queue-it ordering may be affected' },
@@ -1447,11 +1456,15 @@ function load_settins_to_form(settings)
         notification_message.value = settings.advanced.discord_message || settings.advanced.telegram_message || '';
         telegram_bot_token.value = settings.advanced.telegram_bot_token || '';
         telegram_chat_id.value = settings.advanced.telegram_chat_id || '';
+        browser_type.value = settings.advanced.browser_type || 'chrome';
+        browser_private_mode.checked = settings.advanced.browser_private_mode || false;
+        if (run_mode) run_mode.value = settings.advanced.run_mode || 'onsale';
 
         auto_press_next_step_button.checked = settings.kktix.auto_press_next_step_button;
         max_dwell_time.value = settings.kktix.max_dwell_time;
 
         auto_reload_page_interval.value = settings.advanced.auto_reload_page_interval;
+        if (leak_refresh_interval_seconds) leak_refresh_interval_seconds.value = settings.advanced.leak_refresh_interval_seconds ?? 3;
         tixcraft_soft_block_delay.value = settings.advanced.tixcraft_soft_block_delay || '';
         tixcraft_allow_less_tickets.checked = settings.tixcraft?.allow_less_tickets || false;
         reset_browser_interval.value = settings.advanced.reset_browser_interval;
@@ -1714,6 +1727,7 @@ function save_changes_to_dict(silent_flag)
 {
     const ticket_number_value = parseInt(ticket_number.value);
     const tixcraft_soft_block_delay_value = (tixcraft_soft_block_delay?.value || '').trim();
+    const leak_refresh_interval_value = (leak_refresh_interval_seconds?.value || '').trim();
     //console.log(ticket_number_value);
         if (!ticket_number_value)
         {
@@ -1730,6 +1744,18 @@ function save_changes_to_dict(silent_flag)
 
             if (tixcraft_soft_block_delay) {
                 tixcraft_soft_block_delay.classList.remove('is-invalid');
+            }
+            if (leak_refresh_interval_seconds) {
+                leak_refresh_interval_seconds.classList.remove('is-invalid');
+            }
+
+            if (leak_refresh_interval_value) {
+                const parsed_leak_interval = Number(leak_refresh_interval_value);
+                if (!Number.isFinite(parsed_leak_interval) || parsed_leak_interval < 0) {
+                    leak_refresh_interval_seconds.classList.add('is-invalid');
+                    message(uiText('invalid_leak_refresh_interval_seconds'));
+                    return false;
+                }
             }
 
             if (tixcraft_soft_block_delay_value) {
@@ -1769,12 +1795,16 @@ function save_changes_to_dict(silent_flag)
             settings.advanced.telegram_bot_token = telegram_bot_token.value;
             settings.advanced.telegram_chat_id = telegram_chat_id.value;
             settings.advanced.telegram_message = notification_message.value;
+            settings.advanced.browser_type = browser_type.value || 'chrome';
+            settings.advanced.browser_private_mode = browser_private_mode.checked;
+            settings.advanced.run_mode = run_mode ? run_mode.value : 'onsale';
 
             settings.kktix.auto_press_next_step_button = auto_press_next_step_button.checked;
             settings.kktix.max_dwell_time = parseInt(max_dwell_time.value);
             if (!settings.tixcraft) settings.tixcraft = {};
 
             settings.advanced.auto_reload_page_interval = Number(auto_reload_page_interval.value);
+            settings.advanced.leak_refresh_interval_seconds = leak_refresh_interval_value === '' ? 3 : Number(leak_refresh_interval_value);
             settings.advanced.tixcraft_soft_block_delay = tixcraft_soft_block_delay_value;
             settings.tixcraft.allow_less_tickets = tixcraft_allow_less_tickets.checked;
             settings.advanced.reset_browser_interval = parseInt(reset_browser_interval.value);
@@ -2010,7 +2040,9 @@ function check_unsaved_fields()
         const field_list_advance = [
             "user_guess_string",
             "remote_url",
+            "run_mode",
             "auto_reload_page_interval",
+            "leak_refresh_interval_seconds",
             "tixcraft_soft_block_delay",
             "reset_browser_interval",
             "proxy_server_port",
@@ -2161,6 +2193,8 @@ function render_instances(rows) {
             action_td.append(action_btn);
             const stop_btn = $('<button type="button" class="btn btn-sm btn-outline-secondary ms-1"></button>').text(uiText('btn_stop')).on('click', function(){ instance_stop(it.id); });
             action_td.append(stop_btn);
+            const quit_btn = $('<button type="button" class="btn btn-sm btn-outline-danger ms-1"></button>').text(uiText('btn_quit')).on('click', function(){ instance_quit(it.id); });
+            action_td.append(quit_btn);
         }
         tr.append(action_td);
         tbody.append(tr);
@@ -2187,9 +2221,13 @@ function instance_resume(id) {
 }
 
 function instance_stop(id) {
-    // Irreversible (closes the browser, ends the process) -> require confirmation.
     if (!window.confirm(uiText('stop_confirm', id))) return;
     $.get('/stop' + instance_query(id)).always(instances_dashboard_api);
+}
+
+function instance_quit(id) {
+    if (!window.confirm(uiText('quit_confirm', id))) return;
+    $.get('/quit' + instance_query(id)).always(instances_dashboard_api);
 }
 
 function pause_all_instances() {

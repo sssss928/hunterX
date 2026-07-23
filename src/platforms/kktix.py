@@ -19,6 +19,7 @@ from zendriver import cdp
 
 import util
 from platforms.common_async import get_auto_reload_interval
+from reload_guard import guarded_reload
 from nodriver_common import (
     check_and_handle_pause,
     nodriver_check_checkbox,
@@ -81,7 +82,7 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
         _state[next_key] = now + interval
         debug.log(f"{log_prefix} Reloading page now")
         try:
-            await tab.reload()
+            await guarded_reload(tab, reason="legacy_platform_reload")
             return True
         except Exception as exc:
             debug.log(f"{log_prefix} Reload failed: {exc}")
@@ -265,7 +266,7 @@ async def nodriver_kktix_redirect_to_signin_if_guest(tab, url, config_dict):
         return False
 
     current_time = time.time()
-    redirect_interval = config_dict["advanced"].get("auto_reload_page_interval", 3)
+    redirect_interval = get_auto_reload_interval(config_dict, default=3)
     if redirect_interval <= 0:
         redirect_interval = 3
     if current_time - _state.get("last_signin_redirect_time", 0) > redirect_interval:
@@ -2091,7 +2092,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
             if not homepage_is_root:
                 current_time = time.time()
                 last_redirect_time = _state.get("last_homepage_redirect_time", 0)
-                redirect_interval = config_dict["advanced"].get("auto_reload_page_interval", 3)
+                redirect_interval = get_auto_reload_interval(config_dict, default=3)
                 if redirect_interval <= 0:
                     redirect_interval = 3
                 if current_time - last_redirect_time > redirect_interval:
@@ -2111,7 +2112,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 _state["played_sound_ticket"] = False
                 debug.log("[KKTIX] Alert triggered reload, refreshing page...")
                 try:
-                    await tab.reload()
+                    await guarded_reload(tab, reason="legacy_platform_reload")
                 except Exception as reload_exc:
                     debug.log(f"[KKTIX] Alert-triggered reload failed: {reload_exc}")
                 # Reload is a recovery path, not a terminal state.
@@ -2127,7 +2128,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 _state["played_sound_ticket"] = False
                 debug.log("[KKTIX] Failure modal dismissed, refreshing page...")
                 try:
-                    await tab.reload()
+                    await guarded_reload(tab, reason="legacy_platform_reload")
                 except Exception as reload_exc:
                     debug.log(f"[KKTIX] Post-modal reload failed: {reload_exc}")
                 return False
@@ -2298,7 +2299,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
 
     is_quit_bot = False
     if is_kktix_got_ticket:
-        # 搶票成功，設定結束標記
+        # Entered order flow; preserve the legacy completion branch.
         is_quit_bot = True
 
         # 只在第一次偵測成功時執行動作
@@ -2330,14 +2331,11 @@ async def nodriver_kktix_main(tab, url, config_dict):
                             masked_account = kktix_account[:3] + "***" + kktix_account[-2:]
                         else:
                             masked_account = "***"
-                        print("搶票成功, 帳號:", masked_account)
+                        print("已進入訂單階段，帳號:", masked_account)
 
                         script_name = "nodriver_tixcraft"
 
                         threading.Thread(target=util.launch_maxbot, args=(script_name,"", url, kktix_account, kktix_password,"","false",)).start()
-                        #driver.quit()
-                        #sys.exit()
-
                     is_event_page = False
                     if len(url.split('/'))>=7:
                         is_event_page = True
@@ -2348,7 +2346,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                         if confirm_clicked:
                             domain_name = url.split('/')[2]
                             checkout_url = "https://%s/account/orders" % (domain_name)
-                            print("搶票成功, 請前往該帳號訂單查看: %s" % (checkout_url))
+                            print("已進入訂單階段，請前往該帳號訂單查看: %s" % (checkout_url))
                             webbrowser.open_new(checkout_url)
 
                     _state["is_popup_checkout"] = True

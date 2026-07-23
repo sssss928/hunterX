@@ -69,6 +69,7 @@ CONST_MAXBOT_ANSWER_ONLINE_FILE = "MAXBOT_ONLINE_ANSWER.txt"
 CONST_MAXBOT_CONFIG_FILE = "settings.json"
 CONST_MAXBOT_INT28_FILE = "MAXBOT_INT28_IDLE.txt"
 CONST_MAXBOT_INT28_QUIT_FILE = "MAXBOT_INT28_QUIT.txt"
+CONST_MAXBOT_AUTOMATION_STOP_FILE = "MAXBOT_AUTOMATION_STOP.txt"
 CONST_MAXBOT_LAST_URL_FILE = "MAXBOT_LAST_URL.txt"
 CONST_MAXBOT_QUESTION_FILE = "MAXBOT_QUESTION.txt"
 
@@ -262,6 +263,9 @@ def get_default_config():
     config_dict["advanced"]["block_facebook_network"] = False
 
     config_dict["advanced"]["headless"] = False
+    config_dict["advanced"]["browser_type"] = "chrome"
+    config_dict["advanced"]["browser_private_mode"] = False
+    config_dict["advanced"]["run_mode"] = "onsale"
     config_dict["advanced"]["verbose"] = False
     config_dict["advanced"]["show_timestamp"] = True
     config_dict["advanced"]["auto_guess_options"] = False
@@ -274,6 +278,7 @@ def get_default_config():
     config_dict["advanced"]["remote_url"] = ""
 
     config_dict["advanced"]["auto_reload_page_interval"] = 5
+    config_dict["advanced"]["leak_refresh_interval_seconds"] = 3
     config_dict["advanced"]["tixcraft_soft_block_delay"] = ""
     config_dict["advanced"]["auto_reload_overheat_count"] = 4
     config_dict["advanced"]["auto_reload_overheat_cd"] = 1.0
@@ -451,9 +456,17 @@ def migrate_config(config_dict):
     )
 
     if "advanced" in config_dict:
+        run_mode = str(config_dict["advanced"].get("run_mode", default["advanced"]["run_mode"])).strip().lower()
+        if run_mode not in {"onsale", "leak_watch"}:
+            run_mode = default["advanced"]["run_mode"]
+        config_dict["advanced"]["run_mode"] = run_mode
         config_dict["advanced"]["auto_reload_page_interval"] = normalize_non_negative_float(
             config_dict["advanced"].get("auto_reload_page_interval"),
             default["advanced"]["auto_reload_page_interval"],
+        )
+        config_dict["advanced"]["leak_refresh_interval_seconds"] = normalize_non_negative_float(
+            config_dict["advanced"].get("leak_refresh_interval_seconds"),
+            default["advanced"]["leak_refresh_interval_seconds"],
         )
 
     return config_dict
@@ -577,10 +590,23 @@ def maxbot_idle(profile_name=""):
 
 def maxbot_resume(profile_name=""):
     idle_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_INT28_FILE)
+    stop_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_AUTOMATION_STOP_FILE)
     for i in range(3):
          util.force_remove_file(idle_filepath)
+         util.force_remove_file(stop_filepath)
 
 def maxbot_stop(profile_name=""):
+    maxbot_idle(profile_name)
+    stop_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_AUTOMATION_STOP_FILE)
+    try:
+        os.makedirs(os.path.dirname(stop_filepath), exist_ok=True)
+        with open(stop_filepath, "w") as text_file:
+            text_file.write("")
+    except Exception as e:
+        print(f"[ERROR] Failed to create automation stop file: {e}")
+
+
+def maxbot_quit(profile_name=""):
     stop_filepath = get_instance_state_filepath(profile_name, CONST_MAXBOT_INT28_QUIT_FILE)
     try:
         os.makedirs(os.path.dirname(stop_filepath), exist_ok=True)
@@ -600,6 +626,7 @@ def launch_maxbot(profile_name="", instance_override=""):
     effective_instance = instance_override if instance_override else profile_name
     util.force_remove_file(get_instance_state_filepath(effective_instance, CONST_MAXBOT_INT28_QUIT_FILE))
     util.force_remove_file(get_instance_state_filepath(effective_instance, CONST_MAXBOT_INT28_FILE))
+    util.force_remove_file(get_instance_state_filepath(effective_instance, CONST_MAXBOT_AUTOMATION_STOP_FILE))
 
     config_filepath, config_dict = load_json(profile_name)
 
@@ -1109,6 +1136,18 @@ class StopHandler(tornado.web.RequestHandler):
         maxbot_stop(profile_name)
         self.write({"stop": True})
 
+
+class QuitHandler(tornado.web.RequestHandler):
+    def get(self):
+        profile_name = self.get_query_argument("profile", "")
+        if profile_name and not is_valid_profile_name(profile_name):
+            self.set_status(400)
+            self.write({"quit": False, "error": "invalid profile name"})
+            return
+        maxbot_quit(profile_name)
+        self.write({"quit": True})
+
+
 class RunHandler(tornado.web.RequestHandler):
     def get(self):
         profile_name = self.get_query_argument("profile", "")
@@ -1264,7 +1303,7 @@ class ProfilesHandler(tornado.web.RequestHandler):
         alive_instances = [instance_id for instance_id in related_instances if is_instance_alive(instance_id)]
         if alive_instances:
             for instance_id in alive_instances:
-                maxbot_stop(instance_id)
+                maxbot_quit(instance_id)
             still_alive = wait_for_instances_to_stop(alive_instances)
             if still_alive:
                 self.set_status(409)
@@ -1635,6 +1674,7 @@ async def main_server():
         ("/pause", PauseHandler),
         ("/resume", ResumeHandler),
         ("/stop", StopHandler),
+        ("/quit", QuitHandler),
         ("/run", RunHandler),
         
         # json api
@@ -1690,6 +1730,53 @@ def web_server():
     else:
         print("port:", server_port, " is in used.")
 
+def handle_cli_command(argv):
+    """Handle short smoke-test commands without starting the long-running UI server."""
+    normalized = [str(arg).strip().lower() for arg in argv]
+    if not normalized:
+        return False
+
+    if "/version" in normalized or "--version" in normalized:
+        print(APP_DISPLAY_VERSION)
+        return True
+
+    if "/shutdown" in normalized or "--shutdown" in normalized:
+        server_port = get_server_port()
+        shutdown_url = f"http://127.0.0.1:{server_port}/shutdown"
+        try:
+            response = requests.get(shutdown_url, timeout=1.5)
+            print(f"shutdown requested: HTTP {response.status_code}")
+        except requests.RequestException:
+            print("shutdown requested: no running settings server")
+        return True
+
+    if len(normalized) >= 4 and normalized[0] == "http" and "/run" in normalized and "smoke" in normalized and "test" in normalized:
+        config_filepath, _ = load_json()
+        www_root = os.path.join(SCRIPT_DIR, "www")
+        required_assets = [
+            os.path.join(www_root, "settings.html"),
+            os.path.join(www_root, "settings.js"),
+            os.path.join(www_root, "help-content.js"),
+            os.path.join(www_root, "css", "settings.css"),
+            os.path.join(www_root, "dist", "jquery.min.js"),
+            os.path.join(www_root, "dist", "bootstrap", "bootstrap.min.css"),
+            os.path.join(www_root, "dist", "bootstrap", "bootstrap.min.js"),
+        ]
+        missing_assets = [asset for asset in required_assets if not os.path.exists(asset)]
+        if missing_assets:
+            print("smoke test failed: missing assets:", ", ".join(missing_assets))
+            return True
+        if hasattr(sys, "frozen"):
+            bot_executable, _ = util.resolve_frozen_executable("nodriver_tixcraft")
+            if not os.path.isfile(bot_executable):
+                print("smoke test failed: missing bot executable:", bot_executable)
+                return True
+        print(f"smoke test ok: {APP_DISPLAY_VERSION}")
+        print(f"config: {config_filepath}")
+        return True
+
+    return False
+
 def settgins_gui_timer():
     while True:
         change_maxbot_status_by_keyword()
@@ -1700,15 +1787,16 @@ def settgins_gui_timer():
 if __name__ == "__main__":
     global GLOBAL_SERVER_SHUTDOWN
     GLOBAL_SERVER_SHUTDOWN = False
-    
-    threading.Thread(target=settgins_gui_timer, daemon=True).start()
-    threading.Thread(target=web_server, daemon=True).start()
-    
-    clean_tmp_file()
 
-    print("To exit web server press Ctrl + C.")
-    while True:
-        time.sleep(0.4)
-        if GLOBAL_SERVER_SHUTDOWN:
-            break
-    print("Bye bye, see you next time.")
+    if not handle_cli_command(sys.argv[1:]):
+        threading.Thread(target=settgins_gui_timer, daemon=True).start()
+        threading.Thread(target=web_server, daemon=True).start()
+
+        clean_tmp_file()
+
+        print("To exit web server press Ctrl + C.")
+        while True:
+            time.sleep(0.4)
+            if GLOBAL_SERVER_SHUTDOWN:
+                break
+        print("Bye bye, see you next time.")

@@ -9,6 +9,7 @@ import time
 
 import util
 from platforms.common_async import get_auto_reload_interval
+from reload_guard import guarded_reload
 from nodriver_common import (
     check_and_handle_pause,
     handle_cloudflare_challenge,
@@ -221,7 +222,7 @@ async def nodriver_cityline_date_auto_select(tab, config_dict):
                     debug.log("[DATE FALLBACK] Auto-reloading page...")
                     try:
                         await asyncio.sleep(reload_interval)
-                        await tab.reload()
+                        await guarded_reload(tab, reason="legacy_platform_reload")
                     except Exception:
                         pass
                 else:
@@ -985,7 +986,7 @@ async def nodriver_cityline_main(tab, url, config_dict):
             debug = util.create_debug_logger(config_dict)
             current_time = time.time()
             last_redirect_time = _state.get("last_homepage_redirect_time", 0)
-            redirect_interval = config_dict["advanced"].get("auto_reload_page_interval", 3)
+            redirect_interval = get_auto_reload_interval(config_dict, default=3)
             if redirect_interval <= 0:
                 redirect_interval = 3
             if current_time - last_redirect_time > redirect_interval:

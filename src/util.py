@@ -224,6 +224,26 @@ def get_app_root():
     return app_root
 
 
+def resolve_frozen_executable(script_name, app_root=None):
+    """Resolve a bundled executable across flat and split PyInstaller layouts."""
+    if app_root is None:
+        app_root = get_app_root()
+    executable_name = script_name
+    if platform.system() == 'Windows' and not executable_name.lower().endswith('.exe'):
+        executable_name = f"{script_name}.exe"
+
+    parent_dir = os.path.dirname(app_root)
+    candidates = [
+        os.path.join(app_root, executable_name),
+        os.path.join(app_root, script_name, executable_name),
+        os.path.join(parent_dir, script_name, executable_name),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate, os.path.dirname(candidate)
+    return candidates[0], app_root
+
+
 # ===== Multi-instance support =====
 # Default keeps legacy root-level files; named instances write under
 # instances/<id>/ so concurrent runs do not clobber one another's state.
@@ -2264,15 +2284,17 @@ def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kkt
     working_dir = get_app_root()
     if hasattr(sys, 'frozen'):
         print("execute in frozen mode")
-        executable = f"./{script_name}"
         if platform.system() == 'Darwin':
             print("execute MacOS python script")
         if platform.system() == 'Linux':
             print("execute linux binary")
         if platform.system() == 'Windows':
             print("execute .exe binary.")
-            executable = f"{script_name}.exe"
-        subprocess.Popen([executable, *cmd_argument], cwd=working_dir)
+        executable, executable_dir = resolve_frozen_executable(script_name, working_dir)
+        try:
+            subprocess.Popen([executable, *cmd_argument], cwd=executable_dir)
+        except Exception as exc:
+            print("exception:", str(exc))
     else:
         interpreter_binary = sys.executable
         print("execute in shell mode.")
@@ -2395,9 +2417,9 @@ def build_discord_message(stage: str, platform_name: str, custom_message: str = 
         platform_name = "Unknown"
 
     if stage == "ticket":
-        message = f"[{platform_name}] found ticket! Please check your computer"
+        message = f"[{platform_name}] ticket found. Please check your computer"
     elif stage == "order":
-        message = f"[{platform_name}] order success! Please checkout and pay ASAP"
+        message = f"[{platform_name}] order pending. Please checkout and pay ASAP"
     else:
         message = f"[{platform_name}] notification"
 
@@ -2506,9 +2528,9 @@ def build_telegram_message(stage: str, platform_name: str, custom_message: str =
         platform_name = "Unknown"
 
     if stage == "ticket":
-        message = f"[{platform_name}] found ticket! Please check your computer"
+        message = f"[{platform_name}] ticket found. Please check your computer"
     elif stage == "order":
-        message = f"[{platform_name}] order success! Please checkout and pay ASAP"
+        message = f"[{platform_name}] order pending. Please checkout and pay ASAP"
     else:
         message = f"[{platform_name}] notification"
 

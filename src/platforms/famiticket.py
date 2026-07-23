@@ -10,6 +10,8 @@ import util
 from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     CONST_FROM_TOP_TO_BOTTOM,
+    send_discord_notification,
+    send_telegram_notification,
 )
 
 
@@ -731,7 +733,9 @@ async def nodriver_famiticket_main(tab, url, config_dict):
         _state.update({
             "fail_list": [],
             "last_activity": "",
+            "order_notified": False,
             "payment_logged": False,
+            "payment_notified": False,
         })
 
     debug = util.create_debug_logger(config_dict)
@@ -742,9 +746,21 @@ async def nodriver_famiticket_main(tab, url, config_dict):
 
     try:
         if '/Payment/' in url:
+            if not _state.get("payment_notified", False):
+                send_discord_notification(config_dict, "payment_reached", "FamiTicket")
+                send_telegram_notification(config_dict, "payment_reached", "FamiTicket")
+                _state["payment_notified"] = True
             if not _state.get("payment_logged", False):
                 print("[FAMITICKET MAIN] Payment page detected - waiting for user to complete payment")
                 _state["payment_logged"] = True
+            return True
+
+        if '/Order/' in url or '/Checkout/' in url:
+            if not _state.get("order_notified", False):
+                stage = "checkout_reached" if '/Checkout/' in url else "order_pending"
+                send_discord_notification(config_dict, stage, "FamiTicket")
+                send_telegram_notification(config_dict, stage, "FamiTicket")
+                _state["order_notified"] = True
             return True
 
         if '/Home/User/SignIn' in url and '/SignInCheck' not in url:

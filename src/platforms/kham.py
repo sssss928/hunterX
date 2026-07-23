@@ -21,6 +21,7 @@ from zendriver import cdp
 import util
 import performance
 from platforms.common_async import get_auto_reload_interval
+from reload_guard import guarded_reload
 from nodriver_common import (
     asyncio_sleep_with_pause_check,
     check_and_handle_pause,
@@ -97,7 +98,7 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
         _state[next_key] = now + interval
         debug.log(f"{log_prefix} Reloading page now")
         try:
-            await tab.reload()
+            await guarded_reload(tab, reason="legacy_platform_reload")
             return True
         except Exception as exc:
             debug.log(f"{log_prefix} Reload failed: {exc}")
@@ -2395,8 +2396,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     await nodriver_kham_switch_to_auto_seat(tab)
 
                 # Clean sold out rows (kham specific). Only strip the rows here;
-                # do NOT location.reload() when all rows are sold out. A bare
-                # location.reload() bypasses auto_reload_page_interval and reloads
+                # do NOT use a bare page refresh when all rows are sold out. It bypasses
+                # auto_reload_page_interval and reloads
                 # the sold-out page in place every loop (~1x/sec), which Doc 13
                 # (Simple Wait) and issue-322 both rule out. When every row is
                 # sold out, nodriver_kham_performance() below sees zero area rows,
@@ -2970,15 +2971,15 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     # Use dedicated ticket login function (different selectors)
                     await nodriver_ticket_login(tab, ticket_account, ticket_password, config_dict)
 
-    # Check if reached checkout page (ticket purchase successful)
+    # Check if reached checkout page.
     if '/utk02/utk0206_.aspx' in url.lower():
         # Reset quick buy flag since we've reached checkout
         _state["udn_quick_buy_submitted"] = False
 
-        # Show success message (only once)
+        # Show checkout message (only once)
         if debug.enabled:
             if not _state["shown_checkout_message"]:
-                debug.log("[SUCCESS] Reached checkout page - ticket purchase successful!")
+                debug.log("[CHECKOUT] Reached checkout page - waiting for user payment")
         _state["shown_checkout_message"] = True
 
         # Play sound notification (only once)
@@ -2994,7 +2995,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
             if not _state["is_popup_checkout"]:
                 import webbrowser
                 checkout_url = url
-                print(f"搶票成功，請前往該帳號訂單查看: {checkout_url}")
+                print(f"已進入訂單階段，請前往該帳號訂單查看: {checkout_url}")
                 webbrowser.open_new(checkout_url)
                 _state["is_popup_checkout"] = True
 

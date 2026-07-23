@@ -10,8 +10,14 @@ from urllib.parse import quote, unquote
 from zendriver import cdp
 
 import util
-from nodriver_common import check_and_handle_pause, play_sound_while_ordering
+from nodriver_common import (
+    check_and_handle_pause,
+    play_sound_while_ordering,
+    send_discord_notification,
+    send_telegram_notification,
+)
 from nodriver_common import CONST_FROM_TOP_TO_BOTTOM
+from reload_guard import guarded_reload
 
 # =============================================================================
 # FANSI GO Platform Support
@@ -795,6 +801,7 @@ async def nodriver_fansigo_main(tab, url, config_dict):
             "is_cookie_injected": False,
             "is_signin_submitted": False,
             "played_sound_ticket": False,
+            "notified_checkout": False,
             "last_page_type": None,
             "qty_set_url": None,
         })
@@ -831,7 +838,7 @@ async def nodriver_fansigo_main(tab, url, config_dict):
             _state["is_cookie_injected"] = True
             if injected:
                 debug.log("[FANSIGO] Cookie injected on login page, reloading")
-                await tab.reload()
+                await guarded_reload(tab, reason="legacy_platform_reload")
             else:
                 debug.log("[FANSIGO] No credentials configured, please login manually")
         return tab
@@ -841,12 +848,17 @@ async def nodriver_fansigo_main(tab, url, config_dict):
         _state["is_cookie_injected"] = await nodriver_fansigo_inject_cookie(tab, config_dict)
         if _state["is_cookie_injected"]:
             debug.log("[FANSIGO] Cookie injected on non-login page, reloading")
-            await tab.reload()
+            await guarded_reload(tab, reason="legacy_platform_reload")
 
-    # Handle checkout page - stop automation
+    # Handle checkout page without closing the browser.
     if page_type == "checkout" or page_type == "order_result":
+        if not _state.get("notified_checkout", False):
+            stage = "payment_reached" if page_type == "order_result" else "checkout_reached"
+            send_discord_notification(config_dict, stage, "FANSI GO")
+            send_telegram_notification(config_dict, stage, "FANSI GO")
+            _state["notified_checkout"] = True
         if not _state["played_sound_ticket"]:
-            debug.log("[FANSIGO] Checkout page reached, automation stopped")
+            debug.log("[FANSIGO] Checkout page reached, waiting for user action")
             play_mp3 = config_dict.get("advanced", {}).get("play_ticket_sound", True)
             if play_mp3:
                 play_sound_while_ordering(config_dict)

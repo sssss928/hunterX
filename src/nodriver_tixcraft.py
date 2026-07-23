@@ -43,6 +43,7 @@ from refresh_timing import (
 )
 from NonBrowser import NonBrowser
 from platforms.common_async import is_interval_due
+from reload_guard import guarded_reload
 
 try:
     import ddddocr
@@ -280,7 +281,7 @@ async def nodriver_goto_homepage(driver, config_dict):
             # trigger a login redirect even though the cookie is already set.
             if not is_tour_ibon:
                 try:
-                    await tab.reload()
+                    await guarded_reload(tab, reason="ibon_cookie_session_apply", recovery=True)
                     await asyncio.sleep(random.uniform(1.0, 1.5))
                     await dismiss_pending_ibon_dialog(tab, config_dict)
                     debug.log("[IBON] Page reloaded to apply cookie session")
@@ -333,7 +334,7 @@ async def nodriver_goto_homepage(driver, config_dict):
 
                     # Reload page to apply cookie
                     debug.log("[FUNONE] Reloading page to apply cookie...")
-                    await tab.reload()
+                    await guarded_reload(tab, reason="funone_cookie_session_apply", recovery=True)
                     await asyncio.sleep(1.5)
                 else:
                     debug.log("[FUNONE] Warning: ticket_session cookie not found after setting")
@@ -624,7 +625,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
                 print(f"[REFRESH] Public-sale target boundary suppressed; workflow appears advanced: {current_url}")
             else:
                 try:
-                    await tab.reload()
+                    await guarded_reload(tab, reason="refresh_datetime_target_boundary")
                     print(
                         "[REFRESH] Public-sale target boundary reached:",
                         target_dt.strftime('%Y/%m/%d %H:%M:%S.%f')[:-3],
@@ -646,7 +647,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
     if controller.should_trigger_once():
         state["reached"] = not target_boundary_required
         try:
-            await tab.reload()
+            await guarded_reload(tab, reason="refresh_datetime_trigger")
             controller.mark_post_trigger_reload()
             print(
                 "[REFRESH] Trigger reached:",
@@ -698,7 +699,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
         if controller.should_trigger_once():
             state["reached"] = not target_boundary_required
             try:
-                await tab.reload()
+                await guarded_reload(tab, reason="refresh_datetime_trigger_retry")
                 controller.mark_post_trigger_reload()
                 print(
                     "[REFRESH] Trigger reached:",
@@ -742,7 +743,8 @@ async def reload_config(config_dict, last_mtime, config_filepath):
                         config_dict["advanced"] = {}
                     adv_fields = [
                         "play_sound", "disable_adjacent_seat", "hide_some_image",
-                        "auto_guess_options", "user_guess_string", "auto_reload_page_interval", "verbose",
+                        "auto_guess_options", "user_guess_string", "auto_reload_page_interval",
+                        "run_mode", "leak_refresh_interval_seconds", "verbose",
                         "tixcraft_soft_block_delay",
                         "auto_reload_overheat_count", "auto_reload_overheat_cd",
                         "idle_keyword", "resume_keyword", "idle_keyword_second", "resume_keyword_second",
@@ -792,9 +794,11 @@ async def main(args):
 
     driver = None
     tab = None
+    session_manager = None
     if not config_dict is None:
         sandbox = False
-        conf = get_extension_config(config_dict, args)
+        session_manager = create_browser_session_manager(config_dict, args)
+        conf = get_extension_config(config_dict, args, session_manager=session_manager)
         nodriver_overwrite_prefs(conf)
         # PS: nodrirver run twice always cause error:
         # Failed to connect to browser
@@ -802,6 +806,7 @@ async def main(args):
         # In that case you need to pass no_sandbox=True
         #driver = await uc.start(conf, sandbox=sandbox, headless=config_dict["advanced"]["headless"])
         driver = await uc.start(conf)
+        session_manager.attach(driver)
         if not driver is None:
             # Output actual CDP port for MCP connection (when mcp_debug is requested)
             mcp_debug_requested = (args and hasattr(args, 'mcp_debug') and args.mcp_debug) or \
@@ -828,17 +833,17 @@ async def main(args):
             tab = await nodriver_goto_homepage(driver, config_dict)
             if tab is None:
                 print("[ERROR] Homepage navigation failed. Cannot continue.")
-                sys.exit()
+                return
             if not initial_tab:
                 tab = await nodrver_block_urls(tab, config_dict)
             if not config_dict["advanced"]["headless"]:
                 await nodriver_resize_window(tab, config_dict)
         else:
             print("無法使用nodriver，程式無法繼續工作")
-            sys.exit()
+            return
     else:
         print("Load config error!")
-        sys.exit()
+        return
 
     url = ""
     last_url = ""
@@ -915,11 +920,13 @@ async def main(args):
 
         if is_quit_bot:
             try:
-                await driver.stop()
+                if session_manager is not None:
+                    await session_manager.stop_browser()
                 driver = None
             except Exception as e:
                 pass
             util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_INT28_QUIT_FILE))
+            util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_AUTOMATION_STOP_FILE))
             util.force_remove_file(util.get_instance_state_path(heartbeat_filename))
             break
 
@@ -1105,8 +1112,24 @@ def cli():
     parser.add_argument("--browser",
         help="overwrite browser setting",
         default='',
-        choices=['chrome','firefox','edge','safari','brave'],
+        choices=['chrome','edge'],
         type=str)
+
+    parser.add_argument("--browser_private_mode",
+        help="launch browser in private mode (Chrome incognito / Edge InPrivate)",
+        nargs="?",
+        const="true",
+        default=None,
+        type=str)
+
+    parser.add_argument("--run_mode",
+        help="run mode: onsale keeps the v0.4.0 hot path, leak_watch uses leak-watch safe-page scanning",
+        choices=["onsale", "leak_watch"],
+        type=str)
+
+    parser.add_argument("--leak_refresh_interval_seconds",
+        help="safe-page refresh interval in leak_watch mode",
+        type=float)
 
     parser.add_argument("--window_size",
         help="Window size",

@@ -13,6 +13,7 @@ from zendriver import cdp
 
 import util
 from platforms.common_async import get_auto_reload_interval
+from reload_guard import guarded_reload
 from nodriver_common import (
     check_and_handle_pause,
     evaluate_with_pause_check,
@@ -674,7 +675,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                     await asyncio.sleep(reload_interval)
                     clicked = await _ticketplus_click_refresh_button(tab, debug)
                     if not clicked:
-                        await tab.reload()
+                        await guarded_reload(tab, reason="legacy_platform_reload")
                         debug.log("[TicketPlus DATE] Page reloaded, waiting for content...")
                         await asyncio.sleep(0.5)
                 else:
@@ -1538,7 +1539,7 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
             try:
                 clicked = await _ticketplus_click_refresh_button(tab, debug)
                 if not clicked:
-                    await tab.reload()
+                    await guarded_reload(tab, reason="legacy_platform_reload")
                     debug.log("[AUTO RELOAD] Full page reload (button not found)")
             except Exception as reload_exc:
                 debug.log(f"[AUTO RELOAD] Reload failed: {reload_exc}")
@@ -1809,7 +1810,7 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
             if is_order_fail_handled is True:
                 debug.log("[ORDER FAIL] Reloading page to refresh ticket availability")
                 try:
-                    await tab.reload()
+                    await guarded_reload(tab, reason="legacy_platform_reload")
                     await asyncio.sleep(0.5)
                 except Exception as reload_exc:
                     debug.log(f"[ORDER FAIL] Reload failed: {reload_exc}")

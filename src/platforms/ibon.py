@@ -19,6 +19,7 @@ from zendriver import cdp
 import util
 import performance
 from platforms.common_async import get_auto_reload_interval
+from reload_guard import guarded_reload
 from nodriver_common import (
     asyncio_sleep_with_pause_check,
     check_and_handle_pause,
@@ -3156,7 +3157,7 @@ async def nodriver_ibon_navigate_on_sold_out(tab, config_dict):
         debug.log(f"[IBON] Navigation error: {e}")
         # Fallback to reload if navigation fails
         try:
-            await tab.reload()
+            await guarded_reload(tab, reason="legacy_platform_reload")
         except Exception:
             pass
 
@@ -4007,7 +4008,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
         if should_redirect:
             current_time = time.time()
             last_redirect_time = _state.get("last_homepage_redirect_time", 0)
-            redirect_interval = config_dict["advanced"].get("auto_reload_page_interval", 3)
+            redirect_interval = get_auto_reload_interval(config_dict, default=3)
             if redirect_interval <= 0:
                 redirect_interval = 3
 
@@ -4065,7 +4066,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                             debug.log("[IBON DATE] Date selection failed, reloading page...")
                             await asyncio.sleep(auto_reload_interval)
                             try:
-                                await tab.reload()
+                                await guarded_reload(tab, reason="legacy_platform_reload")
                             except Exception:
                                 pass
                         else:
@@ -4252,7 +4253,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                         debug.log("[IBON ORDERS] No available areas found, page reload required")
                         await asyncio.sleep(auto_reload_interval)
                         try:
-                            await tab.reload()
+                            await guarded_reload(tab, reason="legacy_platform_reload")
                         except Exception as exc:
                             pass
                     else:
@@ -4551,7 +4552,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                     if auto_reload_interval > 0:
                         await asyncio.sleep(auto_reload_interval)
                         try:
-                            await tab.reload()
+                            await guarded_reload(tab, reason="legacy_platform_reload")
                             debug.log("[NEW EVENT] Page reloaded successfully")
                         except Exception as reload_exc:
                             debug.log(f"[NEW EVENT] Page reload failed: {reload_exc}")
@@ -4650,7 +4651,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                     debug.log("[NEW EVENTBUY] Sold out detected, going back and refreshing")
                     try:
                         await tab.back()
-                        await tab.reload()
+                        await guarded_reload(tab, reason="legacy_platform_reload")
                     except Exception as exc:
                         debug.log(f"[NEW EVENTBUY] Back/reload failed: {exc}")
 
@@ -4708,7 +4709,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                         if auto_reload_interval > 0:
                             await asyncio.sleep(auto_reload_interval)
                             try:
-                                await tab.reload()
+                                await guarded_reload(tab, reason="legacy_platform_reload")
                                 debug.log("[IBON AREA] Page reloaded successfully")
                             except Exception as reload_exc:
                                 debug.log(f"[IBON AREA] Page reload failed: {reload_exc}")
@@ -4793,7 +4794,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                             # plan-B, easy and better than plan-A
                             try:
                                 tab.back()
-                                tab.reload()
+                                await guarded_reload(tab, reason="legacy_platform_reload")
                             except Exception as exc:
                                 pass
 
@@ -4829,12 +4830,12 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                     if not is_name_based:
                         is_button_clicked = await nodriver_press_button(tab, 'a.btn.btn-pink.continue')
 
-    # Check if reached checkout page (ticket purchase successful)
+    # Check if reached checkout page.
     # https://orders.ibon.com.tw/application/UTK02/UTK0206_.aspx
     if '/utk02/utk0206_.aspx' in url.lower():
         # Show debug message (only once)
         if not _state["shown_checkout_message"]:
-            debug.log("[IBON] Reached checkout page - ticket purchase successful!")
+            debug.log("[IBON] Reached checkout page - waiting for user payment")
         _state["shown_checkout_message"] = True
 
         # Play sound notification (only once)
@@ -4849,7 +4850,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
         if config_dict["advanced"]["headless"]:
             if not _state["is_popup_checkout"]:
                 checkout_url = url
-                print("搶票成功, 請前往該帳號訂單查看: %s" % (checkout_url))
+                print("已進入訂單階段，請前往該帳號訂單查看: %s" % (checkout_url))
                 webbrowser.open_new(checkout_url)
                 _state["is_popup_checkout"] = True
     else:
@@ -4858,4 +4859,3 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
         _state["played_sound_order"] = False
         _state["shown_checkout_message"] = False
     return tab
-

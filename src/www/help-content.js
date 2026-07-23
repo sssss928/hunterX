@@ -356,6 +356,16 @@ const HELP_CONTENT = {
 
   // --- Phase 3: Advanced settings + Verification tab ---
 
+  run_mode: {
+    title: '執行模式',
+    short: '正式搶票模式保留原流程；撿漏模式只調整安全頁刷新與重讀 DOM 策略。',
+    detail: `
+      <p><strong>正式搶票模式：</strong>保留 v0.4.0 hotfix 的日期、選區、票數、驗證碼、勾選與送出流程。</p>
+      <p><strong>撿漏模式：</strong>只在尚未進入訂單/付款的安全頁使用撿漏刷新間隔。回安全頁後會先重新讀 DOM，有票就立即依關鍵字或排序點擊。</p>
+      <p class="text-warning-emphasis small mb-0"><strong>注意：</strong>撿漏模式不會繞過驗證碼、Cloudflare、Queue-it 或其他防護；ticket、order、checkout、payment 頁不會因撿漏模式刷新。</p>`,
+    link: null
+  },
+
   auto_reload_page_interval: {
     title: '自動刷新頁面間隔',
     short: '活動頁面的自動重新整理間隔秒數（0 = 停用）',
@@ -373,11 +383,21 @@ const HELP_CONTENT = {
     link: null
   },
 
-  tixcraft_soft_block_delay: {
-    title: '暫時鎖定等待秒數',
-    short: '自訂拓元、添翼、Indievox 白畫面暫時鎖定後的等待秒數',
+  leak_refresh_interval_seconds: {
+    title: '撿漏刷新間隔',
+    short: '撿漏模式使用的安全頁刷新/重掃秒數。',
     detail: `
-      <p>當程式遇到拓元家族白畫面暫時鎖定時，可用此欄位指定多久後再嘗試返回原頁面。</p>
+      <p>此欄位只在<strong>撿漏模式</strong>使用。正式搶票模式仍使用「自動刷新頁面間隔」。</p>
+      <p>流程是：回到安全頁後先立即重讀 DOM；若沒票，才依此秒數等待後刷新/重掃。</p>
+      <p class="text-muted small mb-0">設定為 <code>0</code> 代表不做定時刷新，但仍可在頁面變化時由既有平台流程處理。</p>`,
+    link: null
+  },
+
+  tixcraft_soft_block_delay: {
+    title: '軟鎖後等待秒數',
+    short: '自訂拓元、添翼、Indievox 白畫面/軟鎖後停手等待秒數，不是刷新間隔。',
+    detail: `
+      <p>當程式遇到拓元家族白畫面暫時鎖定時，可用此欄位指定多久後再嘗試返回原頁面。等待期間不刷新、不點擊、不送出。</p>
       <table class="table table-sm table-bordered">
         <thead><tr><th>設定值</th><th>行為</th></tr></thead>
         <tbody>
@@ -442,7 +462,7 @@ const HELP_CONTENT = {
         <tbody>
           <tr>
             <td><span class="badge bg-secondary">關閉（預設）</span></td>
-            <td>只顯示重要訊息（搶票成功、錯誤等）</td>
+            <td>只顯示重要訊息（訂單、結帳、錯誤等）</td>
           </tr>
           <tr>
             <td><span class="badge bg-info text-dark">開啟</span></td>
@@ -456,9 +476,9 @@ const HELP_CONTENT = {
 
   discord_webhook_url: {
     title: 'Discord Webhook 通知',
-    short: '搶票成功後傳送 Discord 通知',
+    short: '進入訂單或結帳階段時傳送 Discord 通知',
     detail: `
-      <p>填入 Discord Webhook URL，搶票成功時程式會自動傳送通知訊息。</p>
+      <p>填入 Discord Webhook URL，進入訂單或結帳階段時程式會自動傳送通知訊息。</p>
       <p><strong>取得 Webhook URL 步驟：</strong></p>
       <ol>
         <li>在 Discord 選擇目標頻道 → 編輯頻道</li>
@@ -466,7 +486,7 @@ const HELP_CONTENT = {
         <li>複製 Webhook URL 貼入此處</li>
       </ol>
       <p><strong>格式範例：</strong><br>
-      <code>https://discord.com/api/webhooks/123456789/abcdef...</code></p>
+      <code>Discord webhook URL</code></p>
       <p class="text-muted small mb-0">留空則不傳送 Discord 通知。</p>`,
     link: 'https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md#discord-webhook-通知'
   },
@@ -475,7 +495,7 @@ const HELP_CONTENT = {
     title: 'Telegram Bot Token',
     short: 'Telegram 通知機器人的 Token',
     detail: `
-      <p>填入 Telegram Bot 的 Token，搶票成功時程式會透過此 Bot 傳送通知。</p>
+      <p>填入 Telegram Bot 的 Token，進入訂單或結帳階段時程式會透過此 Bot 傳送通知。</p>
       <p><strong>取得 Token 步驟：</strong></p>
       <ol>
         <li>在 Telegram 搜尋 <code>@BotFather</code></li>
@@ -777,7 +797,7 @@ const HELP_CONTENT = {
 
   disable_adjacent_seat: {
     title: '停用相鄰座位',
-    short: '啟用可接受非連座，提高搶票成功率',
+    short: '啟用可接受非連座，提高可選座位彈性',
     detail: `
       <p>控制是否接受不相鄰（非連座）的座位組合。</p>
       <table class="table table-sm table-bordered">
@@ -1240,11 +1260,27 @@ const HELP_CONTENT_EN_META = {
       </table>
       <p class="text-warning-emphasis small mb-0"><strong>Note:</strong> Platforms such as TixCraft may throttle or restrict overly frequent reloads. Using less than 3 seconds is not recommended.</p>`,
   },
-  tixcraft_soft_block_delay: {
-    title: 'TixCraft soft-block delay',
-    short: 'Custom wait time after the TixCraft-family white-screen soft block.',
+  run_mode: {
+    title: 'Run mode',
+    short: 'Onsale keeps the existing flow. Leak-watch changes only safe-page refresh and DOM reread strategy.',
     detailHtml: `
-      <p>When the bot hits the TixCraft-family white-screen soft block, this value controls how long it waits before returning to the original page.</p>
+      <p><strong>Onsale mode:</strong> keeps the v0.4.0 hotfix date, area, ticket count, captcha, agreement, and submit flow.</p>
+      <p><strong>Leak-watch mode:</strong> uses the leak-watch interval only on safe pages before order/payment. After returning to a safe page it rereads the DOM first; if tickets are visible, it clicks immediately according to keywords or ordering.</p>
+      <p class="text-warning-emphasis small mb-0"><strong>Note:</strong> leak-watch mode does not bypass CAPTCHA, Cloudflare, Queue-it, or other protections. Ticket/order/checkout/payment pages are not reloaded by leak-watch mode.</p>`,
+  },
+  leak_refresh_interval_seconds: {
+    title: 'Leak-watch refresh interval',
+    short: 'Safe-page refresh/rescan interval used only in leak-watch mode.',
+    detailHtml: `
+      <p>This value is used only in <strong>leak-watch mode</strong>. Onsale mode continues to use the regular auto reload interval.</p>
+      <p>After returning to a safe page, the bot first rereads the DOM immediately. If no tickets are found, it waits this many seconds before refreshing/rescanning.</p>
+      <p class="text-muted small mb-0">Set <code>0</code> to disable timed reloads while keeping existing platform handling.</p>`,
+  },
+  tixcraft_soft_block_delay: {
+    title: 'Soft-block wait after detection',
+    short: 'Custom wait time after a TixCraft-family white-screen soft block. This is not a reload interval.',
+    detailHtml: `
+      <p>When the bot hits the TixCraft-family white-screen soft block, this value controls how long it waits before returning to the original page. During this wait it does not reload, click, or submit.</p>
       <table class="table table-sm table-bordered">
         <thead><tr><th>Value</th><th>Behavior</th></tr></thead>
         <tbody>
@@ -1315,9 +1351,9 @@ const HELP_CONTENT_EN_META = {
   },
   discord_webhook_url: {
     title: 'Discord webhook',
-    short: 'Send a Discord notification after ticketing succeeds.',
+    short: 'Send a Discord notification when the flow reaches order or checkout.',
     detailHtml: `
-      <p>Enter a Discord webhook URL. The bot sends a notification automatically when ticketing succeeds.</p>
+      <p>Enter a Discord webhook URL. The bot sends a notification automatically when the flow reaches order or checkout.</p>
       <p><strong>How to get the webhook URL:</strong></p>
       <ol>
         <li>In Discord, open the target channel and choose Edit Channel.</li>
@@ -1325,14 +1361,14 @@ const HELP_CONTENT_EN_META = {
         <li>Copy the webhook URL and paste it here.</li>
       </ol>
       <p><strong>Example format:</strong><br>
-      <code>https://discord.com/api/webhooks/123456789/abcdef...</code></p>
+      <code>Discord webhook URL</code></p>
       <p class="text-muted small mb-0">If left empty, Discord notifications are disabled.</p>`,
   },
   telegram_bot_token: {
     title: 'Telegram bot token',
     short: 'Token for the Telegram bot that sends notifications.',
     detailHtml: `
-      <p>Enter the Telegram bot token. When ticketing succeeds, the bot sends notifications through this Telegram bot.</p>
+      <p>Enter the Telegram bot token. When the flow reaches order or checkout, the bot sends notifications through this Telegram bot.</p>
       <p><strong>How to get the token:</strong></p>
       <ol>
         <li>Search for <code>@BotFather</code> in Telegram.</li>
