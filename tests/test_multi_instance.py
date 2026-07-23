@@ -42,7 +42,16 @@ def test_pause_resume_stop_are_per_instance(tmp_path: Path, monkeypatch) -> None
     assert not pause_file.exists()
 
     settings.maxbot_stop("kktix-a")
-    assert (tmp_path / "instances" / "kktix-a" / settings.CONST_MAXBOT_INT28_QUIT_FILE).exists()
+    stop_file = tmp_path / "instances" / "kktix-a" / settings.CONST_MAXBOT_AUTOMATION_STOP_FILE
+    quit_file = tmp_path / "instances" / "kktix-a" / settings.CONST_MAXBOT_INT28_QUIT_FILE
+    assert stop_file.exists()
+    assert not quit_file.exists()
+
+    settings.maxbot_resume("kktix-a")
+    assert not stop_file.exists()
+
+    settings.maxbot_quit("kktix-a")
+    assert quit_file.exists()
 
 
 def test_instance_status_reads_heartbeat_pause_and_last_url(tmp_path: Path, monkeypatch) -> None:

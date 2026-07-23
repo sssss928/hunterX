@@ -39,6 +39,62 @@ def test_load_json_invalid_config_falls_back_to_default(tmp_path: Path, monkeypa
     assert config["homepage"] == settings.CONST_HOMEPAGE_DEFAULT
 
 
+def test_settings_smoke_requires_frontend_runtime_assets(tmp_path: Path, monkeypatch, capsys) -> None:
+    www_root = tmp_path / "www"
+    (www_root / "css").mkdir(parents=True)
+    (www_root / "dist" / "bootstrap").mkdir(parents=True)
+    for rel in (
+        "settings.html",
+        "settings.js",
+        "help-content.js",
+        "css/settings.css",
+        "dist/bootstrap/bootstrap.min.css",
+        "dist/bootstrap/bootstrap.min.js",
+    ):
+        (www_root / rel).write_text("", encoding="utf-8")
+    monkeypatch.setattr(settings, "SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(settings, "load_json", lambda: (str(tmp_path / "settings.json"), settings.get_default_config()))
+
+    assert settings.handle_cli_command(["HTTP", "/run", "smoke", "test"]) is True
+
+    captured = capsys.readouterr()
+    assert "smoke test failed: missing assets" in captured.out
+    assert "jquery.min.js" in captured.out
+
+
+def test_settings_smoke_passes_with_frontend_runtime_assets(tmp_path: Path, monkeypatch, capsys) -> None:
+    www_root = tmp_path / "www"
+    (www_root / "css").mkdir(parents=True)
+    (www_root / "dist" / "bootstrap").mkdir(parents=True)
+    for rel in (
+        "settings.html",
+        "settings.js",
+        "help-content.js",
+        "css/settings.css",
+        "dist/jquery.min.js",
+        "dist/bootstrap/bootstrap.min.css",
+        "dist/bootstrap/bootstrap.min.js",
+    ):
+        (www_root / rel).write_text("", encoding="utf-8")
+    monkeypatch.setattr(settings, "SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(settings, "load_json", lambda: (str(tmp_path / "settings.json"), settings.get_default_config()))
+
+    assert settings.handle_cli_command(["HTTP", "/run", "smoke", "test"]) is True
+
+    captured = capsys.readouterr()
+    assert "smoke test ok" in captured.out
+
+
+def test_settings_frontend_static_version_matches_release() -> None:
+    html = Path("src/www/settings.html").read_text(encoding="utf-8")
+    js = Path("src/www/settings.js").read_text(encoding="utf-8")
+
+    assert "HunterX (0.4.1)" in html
+    assert "HunterX (0.4.1)" in js
+    assert "HunterX (0.2.1)" not in html
+    assert "HunterX (0.2.1)" not in js
+
+
 def test_migrate_config_fills_missing_sections() -> None:
     config = {"advanced": {"server_port": 16889}, "accounts": {"discount_code": "ABC"}}
 
