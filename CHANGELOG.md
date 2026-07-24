@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.2
+
+- Add runtime log and heartbeat helpers for long waits, soft-block waits, and leak-watch diagnostics.
+- Harden TixCraft leak-watch reloads with scheduler pending guards, reload timeouts, ready-state checks, and fresh area DOM reads.
+- Keep the onsale ticket hot path intact while blocking non-recovery reloads on ticket/order/checkout/payment pages.
+- Preserve selected TixCraft area metadata regardless of verbose mode and update Discord formatting for separate area and row fields.
+- Add navigation timeouts for TixCraft recovery and safe-page redirects.
+- Fix split Windows package launch so the default profile passes the settings app's concrete `settings.json` path to `nodriver_tixcraft.exe`.
+- Fix the frozen launcher regression test so GitHub release tests pass on Ubuntu while still verifying Windows `.exe` layout behavior.
+
 ## v0.2.1
 
 - Add shared OCR cache/preload infrastructure for captcha workflows.
