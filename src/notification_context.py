@@ -32,6 +32,7 @@ GENERIC_EVENT_NAMES = {
 PLATFORM_SUFFIXES = (
     "| tixcraft拓元售票",
     "| tixcraft",
+    "| ticketmaster",
     "| KKTIX",
     "| TicketPlus",
     "| iBon",
@@ -70,10 +71,10 @@ def clean_event_name(value: str | None, fallback: str = "Unknown Event") -> str:
         if text.startswith(prefix):
             text = text[len(prefix):].strip()
     for suffix in PLATFORM_SUFFIXES:
-        if text.endswith(suffix):
+        if text.lower().endswith(suffix.lower()):
             text = text[: -len(suffix)].strip()
     text = re.sub(r"\s+", " ", text).strip()
-    if text in GENERIC_EVENT_NAMES:
+    if text in GENERIC_EVENT_NAMES or text.rstrip(":：") in GENERIC_EVENT_NAMES:
         return fallback
     return text or fallback
 
@@ -179,7 +180,7 @@ class NotificationContext:
             f"活動：{values['event_name']}\n"
             f"票數：{values['ticket_count']}\n"
             f"區域： {values['seat_area']}\n"
-            f"排數：{values['seat_rows']}\n"
+            f"排數：\n{values['seat_rows']}\n"
             f"狀態：{values['stage']}"
         )
 

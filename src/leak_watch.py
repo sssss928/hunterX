@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Iterable
 
 from page_classifier import PageClass, classify_page, is_protected_after_ticket
-from run_modes import is_leak_watch_mode
+from run_modes import get_leak_refresh_interval, is_leak_watch_mode
 
 
 @dataclass(frozen=True)
@@ -66,3 +67,93 @@ def is_safe_page(url: str) -> bool:
 
 def should_use_leak_watch(config_dict: dict | None, url: str = "") -> bool:
     return is_leak_watch_mode(config_dict) and (not url or is_safe_page(url))
+
+
+@dataclass
+class LeakWatchScheduler:
+    """Stateful leak-watch cycle guard.
+
+    The browser automation loop is single-threaded, but awaited browser
+    operations can stall. These flags prevent a reload/DOM/click cycle from
+    being stacked on top of a still-pending previous cycle.
+    """
+
+    reload_pending: bool = False
+    dom_scan_pending: bool = False
+    area_click_pending: bool = False
+    ticket_form_pending: bool = False
+    submit_pending: bool = False
+    next_cycle_at: float = 0.0
+    cycle_started_at: float = 0.0
+    last_cycle_url: str = ""
+    last_dom_read_at: float = 0.0
+    last_area_click_at: float = 0.0
+    last_clicked_url: str = ""
+    history: list[str] = field(default_factory=list)
+
+    def _record(self, event: str) -> None:
+        self.history.append(event)
+
+    def reset_for_recovery(self) -> None:
+        self.reload_pending = False
+        self.dom_scan_pending = False
+        self.area_click_pending = False
+        self.ticket_form_pending = False
+        self.submit_pending = False
+        self.next_cycle_at = 0.0
+        self.last_clicked_url = ""
+        self._record("reset_for_recovery")
+
+    def mark_dom_scan_start(self) -> bool:
+        if self.dom_scan_pending:
+            self._record("dom_scan_skip_pending")
+            return False
+        self.dom_scan_pending = True
+        self._record("dom_scan_start")
+        return True
+
+    def mark_dom_scan_end(self) -> None:
+        self.dom_scan_pending = False
+        self.last_dom_read_at = time.time()
+        self._record("dom_scan_end")
+
+    def mark_area_click_pending(self, url: str = "") -> None:
+        self.area_click_pending = True
+        self.last_area_click_at = time.time()
+        self.last_clicked_url = url or ""
+        self._record("area_click_pending")
+
+    def clear_area_click_pending(self) -> None:
+        self.area_click_pending = False
+        self._record("area_click_clear")
+
+    def can_reload(self, config_dict: dict | None, url: str, now: float | None = None) -> tuple[bool, str]:
+        now = time.time() if now is None else now
+        if not should_use_leak_watch(config_dict, url):
+            return False, "not_leak_safe_page"
+        if is_protected_url(url):
+            return False, "protected_page"
+        if self.reload_pending:
+            return False, "reload_pending"
+        if self.dom_scan_pending:
+            return False, "dom_scan_pending"
+        if self.area_click_pending:
+            interval = max(0.0, get_leak_refresh_interval(config_dict))
+            if now - self.last_area_click_at < interval:
+                return False, "area_click_pending"
+            self.clear_area_click_pending()
+        if now < self.next_cycle_at:
+            return False, "interval_wait"
+        return True, "ready"
+
+    def begin_reload_cycle(self, url: str) -> None:
+        self.reload_pending = True
+        self.cycle_started_at = time.time()
+        self.last_cycle_url = url or ""
+        self._record("cycle_start")
+
+    def finish_reload_cycle(self, config_dict: dict | None, success: bool) -> None:
+        interval = get_leak_refresh_interval(config_dict)
+        self.reload_pending = False
+        self.next_cycle_at = time.time() + max(0.0, interval)
+        self._record("cycle_done" if success else "cycle_timeout")

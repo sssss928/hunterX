@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from page_classifier import PageClass, classify_page, is_protected_after_ticket
+from runtime_health import DEFAULT_RELOAD_TIMEOUT_SECONDS, runtime_log, wait_for_operation
 
 
 @dataclass
@@ -25,17 +26,52 @@ class ReloadGuard:
         self.history.append(decision)
         return decision
 
-    async def reload(self, tab, reason: str = "", recovery: bool = False) -> bool:
+    async def reload(
+        self,
+        tab,
+        reason: str = "",
+        recovery: bool = False,
+        timeout_seconds: float = DEFAULT_RELOAD_TIMEOUT_SECONDS,
+        config_dict: dict | None = None,
+    ) -> bool:
         url = getattr(getattr(tab, "target", None), "url", "") or ""
         decision = self.can_reload(url=url, reason=reason, recovery=recovery)
         if not decision.allowed:
+            runtime_log(
+                "[RELOAD] blocked",
+                config_dict,
+                reason=decision.reason,
+                page_class=decision.page_class.value,
+                current_url=url,
+            )
             return False
-        await tab.reload()
-        return True
+        try:
+            await wait_for_operation(
+                tab.reload(),
+                timeout_seconds,
+                "RELOAD",
+                config_dict,
+                raise_on_timeout=True,
+            )
+            return True
+        except TimeoutError:
+            return False
 
 
 reload_guard = ReloadGuard()
 
 
-async def guarded_reload(tab, reason: str = "", recovery: bool = False) -> bool:
-    return await reload_guard.reload(tab, reason=reason, recovery=recovery)
+async def guarded_reload(
+    tab,
+    reason: str = "",
+    recovery: bool = False,
+    timeout_seconds: float = DEFAULT_RELOAD_TIMEOUT_SECONDS,
+    config_dict: dict | None = None,
+) -> bool:
+    return await reload_guard.reload(
+        tab,
+        reason=reason,
+        recovery=recovery,
+        timeout_seconds=timeout_seconds,
+        config_dict=config_dict,
+    )

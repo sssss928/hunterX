@@ -9,7 +9,7 @@ Hunter is a maintained fork of [`bouob/tickets_hunter`](https://github.com/bouob
 
 This repository is not the upstream Tickets Hunter project. It is a HunterX fork maintained at [`sssss928/hunterX`](https://github.com/sssss928/hunterX). Upstream credit remains with the original Tickets Hunter maintainers and contributors. HunterX uses its own versioning, release assets, issue tracker, CI, and documentation.
 
-Current fork version: `HunterX (0.4.0)`
+Current fork version: `HunterX (0.4.2)`
 
 ## Legal And Ethical Use
 

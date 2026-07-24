@@ -29,6 +29,7 @@ import urllib.parse
 
 import util
 import settings
+import runtime_health
 from refresh_timing import (
     RefreshTriggerController,
     TriggerPhase,
@@ -869,6 +870,7 @@ async def main(args):
     heartbeat_interval_sec = 5
     heartbeat_filename = "heartbeat.txt"
     last_heartbeat_time = 0.0
+    last_runtime_alive_log = 0.0
     last_empty_url_log = 0.0
     is_quit_bot = False
     refresh_datetime_state = {
@@ -900,11 +902,10 @@ async def main(args):
         heartbeat_now = time.time()
         if heartbeat_now - last_heartbeat_time >= heartbeat_interval_sec:
             last_heartbeat_time = heartbeat_now
-            try:
-                with open(util.get_instance_state_path(heartbeat_filename), "w") as heartbeat_file:
-                    heartbeat_file.write(str(int(heartbeat_now)))
-            except Exception:
-                pass
+            runtime_health.touch_heartbeat(heartbeat_filename)
+            if heartbeat_now - last_runtime_alive_log >= 30:
+                last_runtime_alive_log = heartbeat_now
+                runtime_health.runtime_log("[LOOP] alive", config_dict)
 
         # pass if driver not loaded.
         if driver is None:

@@ -24,6 +24,8 @@ from zendriver import cdp
 
 import util
 import performance
+import runtime_health
+from leak_watch import LeakWatchScheduler, should_use_leak_watch
 from platforms.common_async import get_auto_reload_interval
 from action_ledger import ActionLedger
 from notification_context import clean_event_name, make_notification_context
@@ -237,7 +239,7 @@ def _resolve_soft_block_wait_seconds(config_dict, scope_url, default_wait_second
 
 async def _read_page_text_for_soft_block(tab):
     try:
-        result = await tab.evaluate('''
+        result = await runtime_health.evaluate_with_timeout(tab, '''
             (function() {
                 const title = document.title || '';
                 const body = document.body && document.body.innerText || '';
@@ -246,7 +248,7 @@ async def _read_page_text_for_soft_block(tab):
                     bodyText: body.slice(0, 5000)
                 });
             })()
-        ''')
+        ''', reason="SOFT_BLOCK_TEXT_READ")
         result = util.parse_nodriver_result(result)
         if isinstance(result, str):
             try:
@@ -263,7 +265,7 @@ async def _read_page_text_for_soft_block(tab):
 async def _detect_tixcraft_soft_block(tab, url, config_dict=None):
     """Detect TixCraft-family soft-block pages without taking recovery action."""
     try:
-        result_json = await tab.evaluate('''
+        result_json = await runtime_health.evaluate_with_timeout(tab, '''
             (function() {
                 try {
                     if (typeof action !== "undefined" && action === "block" && typeof rr !== "undefined") {
@@ -277,7 +279,7 @@ async def _detect_tixcraft_soft_block(tab, url, config_dict=None):
                 } catch(e) {}
                 return JSON.stringify({blocked: false, kind: "", rr: "", client_ip: ""});
             })()
-        ''')
+        ''', config_dict, reason="SOFT_BLOCK_JS_READ")
         result_json = util.parse_nodriver_result(result_json)
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
         if isinstance(result, dict) and result.get("blocked", False):
@@ -342,27 +344,32 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
     debug.log("[EPS BLOCK] Automation is backing off; browser remains open and no page refresh will run during this wait")
 
     _state["ip_block_until"] = time.time() + wait_seconds
-    waited = 0
-    while waited < wait_seconds:
-        if await check_and_handle_quit(config_dict):
-            debug.log("[EPS BLOCK] Quit requested during soft-block wait; returning control to main loop")
-            return True
-        if await check_and_handle_pause(config_dict):
-            debug.log("[EPS BLOCK] Automation stopped/paused during soft-block wait; browser remains open")
-            return True
-        chunk = min(10, wait_seconds - waited)
-        await asyncio.sleep(chunk)
-        waited += chunk
-        remaining = wait_seconds - waited
-        if remaining > 0 and waited % 60 == 0:
-            debug.log(f"[EPS BLOCK] Waiting for soft-block to expire, {remaining}s remaining")
+    wait_result = await runtime_health.sleep_with_heartbeat(
+        wait_seconds,
+        config_dict,
+        reason="SOFT_BLOCK",
+        chunk_seconds=10,
+        stop_checker=check_and_handle_pause,
+        quit_checker=check_and_handle_quit,
+    )
+    if wait_result == "quit":
+        debug.log("[EPS BLOCK] Quit requested during soft-block wait; returning control to main loop")
+        return True
+    if wait_result == "stop":
+        debug.log("[EPS BLOCK] Automation stopped/paused during soft-block wait; browser remains open")
+        return True
 
     _state["ip_block_until"] = 0
     recovery_url = _get_tixcraft_soft_block_recovery_url(config_dict, current_url, original_url)
     if recovery_url:
         debug.log(f"[EPS BLOCK] Soft-block wait finished, navigating back to: {recovery_url}")
         try:
-            await tab.get(recovery_url)
+            await runtime_health.guarded_get(
+                tab,
+                recovery_url,
+                config_dict,
+                reason="SOFT_BLOCK_RECOVERY",
+            )
         except Exception as exc:
             debug.log(f"[EPS BLOCK] Soft-block recovery navigation failed: {exc}")
     else:
@@ -430,6 +437,13 @@ def _ensure_runtime_helpers():
         _state["action_ledger"] = ActionLedger()
     if "submit_guard" not in _state:
         _state["submit_guard"] = SubmitGuard()
+    if "leak_scheduler" not in _state:
+        _state["leak_scheduler"] = LeakWatchScheduler()
+
+
+def _get_leak_scheduler():
+    _ensure_runtime_helpers()
+    return _state["leak_scheduler"]
 
 
 def _record_action(name, value=""):
@@ -452,6 +466,9 @@ def _reset_tixcraft_submit_state():
     _state["manual_intervention_required"] = False
     if "submit_guard" in _state:
         _state["submit_guard"].reset()
+    if "leak_scheduler" in _state:
+        _state["leak_scheduler"].submit_pending = False
+        _state["leak_scheduler"].ticket_form_pending = False
     for key in list(_state.keys()):
         if str(key).startswith("ticket_assigned_"):
             _state[key] = False
@@ -472,6 +489,8 @@ def _reset_tixcraft_area_retry_state():
         "tixcraft_date_reload_url",
     ):
         _state[key] = ""
+    if "leak_scheduler" in _state:
+        _state["leak_scheduler"].reset_for_recovery()
 
 
 def _clean_tixcraft_area_name(value):
@@ -614,7 +633,12 @@ async def _recover_to_last_valid_area(tab, config_dict, reason):
     _state["tixcraft_area_reload_next_at"] = 0
     debug.log(f"[TIXCRAFT RECOVERY] {reason}; navigating back to area: {last_area_url}")
     try:
-        await tab.get(last_area_url)
+        await runtime_health.guarded_get(
+            tab,
+            last_area_url,
+            config_dict,
+            reason="RECOVERY_TO_AREA",
+        )
         _record_action("rejected_recover_to_area" if reason != "manual_cancel" else "manual_cancel_recover_to_area")
         return True
     except Exception as exc:
@@ -626,11 +650,11 @@ async def _classify_recovery_page(tab, url, initial_page_class):
     if initial_page_class in {PageClass.AREA, PageClass.CHECKOUT, PageClass.PAYMENT}:
         return initial_page_class
     try:
-        page_text = await tab.evaluate('''
+        page_text = await runtime_health.evaluate_with_timeout(tab, '''
             (function() {
                 return (document.body && document.body.innerText || '').slice(0, 5000);
             })()
-        ''')
+        ''', reason="RECOVERY_PAGE_TEXT")
     except Exception:
         page_text = ""
 
@@ -661,12 +685,49 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
     if interval <= 0:
         return False
 
+    if should_use_leak_watch(config_dict, current_url):
+        scheduler = _get_leak_scheduler()
+        can_reload, reason = scheduler.can_reload(config_dict, current_url, now)
+        if not can_reload:
+            runtime_health.runtime_log(
+                "[LEAK] reload_skipped",
+                config_dict,
+                reason=reason,
+                current_url=current_url,
+            )
+            if reason == "interval_wait" and now - _state.get(log_key, 0) >= 1:
+                _state[log_key] = now
+                debug.log(f"{log_prefix} Waiting {scheduler.next_cycle_at - now:.1f}s until next leak reload")
+            return False
+
+        scheduler.begin_reload_cycle(current_url)
+        runtime_health.runtime_log("[LEAK] cycle_start", config_dict, current_url=current_url)
+        debug.log(f"{log_prefix} Leak-watch reload starting")
+        reload_success = False
+        try:
+            reload_success = await guarded_reload(
+                tab,
+                reason=state_key,
+                timeout_seconds=runtime_health.DEFAULT_RELOAD_TIMEOUT_SECONDS,
+                config_dict=config_dict,
+            )
+            if reload_success:
+                await runtime_health.wait_for_interactive_ready(tab, config_dict)
+            return reload_success
+        except Exception as exc:
+            debug.log(f"{log_prefix} Leak-watch reload failed: {exc}")
+            runtime_health.runtime_log("[LEAK] reload_error", config_dict, error=str(exc))
+            return False
+        finally:
+            scheduler.finish_reload_cycle(config_dict, reload_success)
+            runtime_health.runtime_log("[LEAK] cycle_end", config_dict, current_url=current_url)
+
     next_at = _state.get(next_key, 0)
     if now >= next_at:
         _state[next_key] = now + interval
         debug.log(f"{log_prefix} Reloading page now")
         try:
-            return await guarded_reload(tab, reason=state_key)
+            return await guarded_reload(tab, reason=state_key, config_dict=config_dict)
         except Exception as exc:
             debug.log(f"{log_prefix} Reload failed: {exc}")
             return False
@@ -771,7 +832,7 @@ async def nodriver_tixcraft_redirect(tab, url):
             entry_url = url.replace("/activity/detail/","/activity/game/").split("#")[0].split("?")[0]
             print("redirec to new url:", entry_url)
             try:
-                await tab.get(entry_url)
+                await runtime_health.guarded_get(tab, entry_url, reason="TIXCRAFT_DETAIL_REDIRECT")
                 # 等待日期列表出現，確保頁面載入完成
                 try:
                     await tab.wait_for('#gameList > table > tbody > tr', timeout=5)
@@ -2321,7 +2382,7 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
 
                 if data_href:
                     debug.log("[DATE SELECT] Navigating via button[data-href]...")
-                    await tab.get(data_href)
+                    await runtime_health.guarded_get(tab, data_href, config_dict, reason="DATE_DATA_HREF")
                     is_date_clicked = True
                     click_method_used = "button[data-href]"
                     debug.log("[DATE SELECT] Successfully navigated via button[data-href]")
@@ -2397,6 +2458,17 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         debug.log("[AREA SELECT] Main switch is disabled, skipping area selection")
         return False
 
+    leak_dom_guard = should_use_leak_watch(config_dict, url)
+    leak_scheduler = _get_leak_scheduler() if leak_dom_guard else None
+    if leak_dom_guard:
+        if not await runtime_health.wait_for_interactive_ready(tab, config_dict):
+            runtime_health.runtime_log("[AREA] dom_read_skipped", config_dict, reason="page_loading", current_url=url)
+            return False
+        if not leak_scheduler.mark_dom_scan_start():
+            runtime_health.runtime_log("[AREA] dom_read_skipped", config_dict, reason="dom_scan_pending", current_url=url)
+            return False
+        runtime_health.runtime_log("[AREA] dom_read_start", config_dict, current_url=url)
+
     import json
 
     area_keyword = config_dict["area_auto_select"]["area_keyword"].strip()
@@ -2404,19 +2476,50 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
     area_auto_fallback = config_dict.get('area_auto_fallback', False)  # T021: Safe access for new field
 
     try:
-        el = await tab.query_selector('.zone')
+        if leak_dom_guard:
+            el = await runtime_health.query_selector_with_timeout(
+                tab,
+                ".zone",
+                config_dict,
+                reason="AREA_QUERY_ZONE",
+            )
+        else:
+            el = await tab.query_selector('.zone')
     except Exception:
+        if leak_dom_guard:
+            leak_scheduler.mark_dom_scan_end()
         return
 
     if not el:
+        if leak_dom_guard:
+            leak_scheduler.mark_dom_scan_end()
         return
 
     # Batch pre-fetch: one JS call to get all area text and font data
     area_list_cache = None
     area_text_cache = None
     try:
-        area_list_cache = await el.query_selector_all('a')
-        area_text_cache_raw = await tab.evaluate("""
+        if leak_dom_guard:
+            area_list_cache = await runtime_health.query_selector_all_with_timeout(
+                el,
+                "a",
+                config_dict,
+                reason="AREA_QUERY_LINKS",
+            )
+            area_text_cache_raw = await runtime_health.evaluate_with_timeout(
+                tab,
+                """
+            JSON.stringify(Array.from(document.querySelectorAll('.zone a')).map(a => ({
+                text: a.innerText.trim(),
+                fontText: a.querySelector('font')?.textContent?.trim() ?? ''
+            })))
+        """,
+                config_dict,
+                reason="AREA_DOM_READ",
+            )
+        else:
+            area_list_cache = await el.query_selector_all('a')
+            area_text_cache_raw = await tab.evaluate("""
             JSON.stringify(Array.from(document.querySelectorAll('.zone a')).map(a => ({
                 text: a.innerText.trim(),
                 fontText: a.querySelector('font')?.textContent?.trim() ?? ''
@@ -2428,9 +2531,18 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         if area_text_cache:
             debug.log(f"[AREA KEYWORD] Batch pre-fetch: {len(area_text_cache)} areas cached")
             _record_action("area_dom_read", str(len(area_text_cache)))
+            runtime_health.runtime_log(
+                "[AREA] dom_read_done",
+                config_dict,
+                area_count=len(area_text_cache),
+                current_url=url,
+            )
     except Exception:
         area_list_cache = None
         area_text_cache = None
+    finally:
+        if leak_dom_guard:
+            leak_scheduler.mark_dom_scan_end()
 
     is_need_refresh = False
     matched_blocks = None
@@ -2504,27 +2616,44 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
     else:
         target_area = util.get_target_item_from_matched_list(matched_blocks, auto_select_mode)
     if target_area:
-        # T013: Log selected area with selection type
-        if debug.enabled:
-            try:
-                area_text = await target_area.text
-                if not area_text:
-                    area_text = await target_area.inner_text
-                area_text = _clean_tixcraft_area_name(area_text.strip()[:120] if area_text else "Unknown")
-                _state["last_selected_area"] = area_text
-                _record_action("area_candidate_selected", area_text)
-                selection_type = "fallback" if is_fallback_selection else "keyword match"
-                debug.log(f"[AREA SELECT] Selected area: {area_text} ({selection_type})")
-            except Exception:
-                pass  # If text extraction fails, skip logging
+        # Always save selected area metadata before clicking; notification
+        # correctness must not depend on verbose debug mode.
+        try:
+            area_text = await target_area.text
+            if not area_text:
+                area_text = await target_area.inner_text
+            area_text = _clean_tixcraft_area_name(area_text.strip()[:120] if area_text else "Unknown")
+            _state["last_selected_area"] = area_text
+            _record_action("area_candidate_selected", area_text)
+            selection_type = "fallback" if is_fallback_selection else "keyword match"
+            debug.log(f"[AREA SELECT] Selected area: {area_text} ({selection_type})")
+            runtime_health.runtime_log("[AREA] candidate_selected", config_dict, seat_area=area_text, current_url=url)
+        except Exception:
+            pass  # If text extraction fails, skip metadata only.
 
         try:
             await target_area.click()
+            if leak_dom_guard:
+                leak_scheduler.mark_area_click_pending(url)
             _record_action("area_clicked", _state.get("last_selected_area", ""))
+            runtime_health.runtime_log(
+                "[AREA] clicked",
+                config_dict,
+                seat_area=_state.get("last_selected_area", ""),
+                current_url=url,
+            )
         except Exception:
             try:
                 await target_area.evaluate('el => el.click()')
+                if leak_dom_guard:
+                    leak_scheduler.mark_area_click_pending(url)
                 _record_action("area_clicked", _state.get("last_selected_area", ""))
+                runtime_health.runtime_log(
+                    "[AREA] clicked",
+                    config_dict,
+                    seat_area=_state.get("last_selected_area", ""),
+                    current_url=url,
+                )
             except Exception:
                 pass
 
@@ -3754,6 +3883,9 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             return False
 
     page_class = classify_page(url)
+    runtime_health.runtime_log("[TIXCRAFT] dispatch", config_dict, page_class=page_class.value, current_url=url)
+    if page_class != PageClass.AREA and "leak_scheduler" in _state:
+        _state["leak_scheduler"].clear_area_click_pending()
     if page_class in {PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA, PageClass.TICKET}:
         await _remember_tixcraft_event_name(tab, url)
     if _state.get("last_valid_area_url"):
@@ -3790,7 +3922,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             if current_time - last_redirect_time > redirect_interval:
                 try:
                     _state["last_homepage_redirect_time"] = current_time
-                    await tab.get(homepage)
+                    await runtime_health.guarded_get(tab, homepage, config_dict, reason="HOMEPAGE_RECOVERY")
                 except Exception:
                     pass
 
