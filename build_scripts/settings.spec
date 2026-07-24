@@ -8,7 +8,7 @@
 
 import os
 import importlib.util
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 block_cipher = None
 
@@ -17,6 +17,14 @@ project_root = os.path.abspath(os.path.join(SPECPATH, '..'))
 
 # Collect ddddocr data files (including .onnx models)
 ddddocr_datas = collect_data_files('ddddocr')
+
+# ddddocr imports onnxruntime through its compiled capi extension. Some
+# PyInstaller environments collect onnxruntime.dll but miss the .pyd module,
+# which disables OCR in the packaged executable.
+onnxruntime_binaries = collect_dynamic_libs('onnxruntime')
+onnxruntime_pybind_spec = importlib.util.find_spec('onnxruntime.capi.onnxruntime_pybind11_state')
+if onnxruntime_pybind_spec and onnxruntime_pybind_spec.origin:
+    onnxruntime_binaries.append((onnxruntime_pybind_spec.origin, 'onnxruntime/capi'))
 
 # playsound is imported lazily by util.py. Include the single-file module
 # explicitly so folder builds from --target installs do not miss it.
@@ -30,7 +38,7 @@ if playsound_spec and playsound_spec.origin and playsound_spec.origin.endswith('
 a = Analysis(
     [os.path.join(project_root, 'src', 'settings.py')],
     pathex=playsound_pathex,
-    binaries=[],
+    binaries=onnxruntime_binaries,
     datas=[
         (os.path.join(project_root, 'src', 'www'), 'www'),
         (os.path.join(project_root, 'src', 'assets'), 'assets'),
@@ -49,6 +57,7 @@ a = Analysis(
         # Optional: ddddocr (if settings.py uses it)
         'ddddocr',
         'onnxruntime',
+        'onnxruntime.capi.onnxruntime_pybind11_state',
         # Image processing (if needed)
         'PIL',
         'PIL.Image',
