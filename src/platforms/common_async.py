@@ -142,4 +142,4 @@ def get_auto_reload_interval(config_dict: dict[str, Any] | None, default: float 
     from safe selection pages; protected ticket/order/checkout/payment reloads
     remain blocked by ReloadGuard.
     """
-    return get_effective_reload_interval(config_dict, default)
+    return float(get_effective_reload_interval(config_dict, default))
