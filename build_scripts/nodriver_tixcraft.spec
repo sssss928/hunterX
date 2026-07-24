@@ -26,19 +26,19 @@ onnxruntime_pybind_spec = importlib.util.find_spec('onnxruntime.capi.onnxruntime
 if onnxruntime_pybind_spec and onnxruntime_pybind_spec.origin:
     onnxruntime_binaries.append((onnxruntime_pybind_spec.origin, 'onnxruntime/capi'))
 
-# playsound is distributed as a single playsound.py module. Some PyInstaller
-# environments miss single-file modules from --target installs unless the module
-# directory is explicitly present in pathex and the file is copied as data.
+# playsound is distributed as a single playsound.py module. Copy the module as
+# data and list it as a hidden import. Do not add the active environment's
+# site-packages directory to pathex: PyInstaller already searches its own
+# environment, and foreign-environment pathex entries are rejected in
+# PyInstaller 7.
 playsound_spec = importlib.util.find_spec('playsound')
 playsound_datas = []
-playsound_pathex = []
 if playsound_spec and playsound_spec.origin and playsound_spec.origin.endswith('.py'):
     playsound_datas.append((playsound_spec.origin, '.'))
-    playsound_pathex.append(os.path.dirname(playsound_spec.origin))
 
 a = Analysis(
     [os.path.join(project_root, 'src', 'nodriver_tixcraft.py')],
-    pathex=[os.path.join(project_root, 'src')] + playsound_pathex,
+    pathex=[os.path.join(project_root, 'src')],
     binaries=onnxruntime_binaries,
     datas=[
         (os.path.join(project_root, 'src', 'assets'), 'assets'),

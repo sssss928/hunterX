@@ -26,18 +26,17 @@ onnxruntime_pybind_spec = importlib.util.find_spec('onnxruntime.capi.onnxruntime
 if onnxruntime_pybind_spec and onnxruntime_pybind_spec.origin:
     onnxruntime_binaries.append((onnxruntime_pybind_spec.origin, 'onnxruntime/capi'))
 
-# playsound is imported lazily by util.py. Include the single-file module
-# explicitly so folder builds from --target installs do not miss it.
+# playsound is imported lazily by util.py. Copy the single-file module and list
+# it as a hidden import without adding site-packages to pathex; PyInstaller
+# already searches its own environment and PyInstaller 7 rejects such entries.
 playsound_spec = importlib.util.find_spec('playsound')
 playsound_datas = []
-playsound_pathex = []
 if playsound_spec and playsound_spec.origin and playsound_spec.origin.endswith('.py'):
     playsound_datas.append((playsound_spec.origin, '.'))
-    playsound_pathex.append(os.path.dirname(playsound_spec.origin))
 
 a = Analysis(
     [os.path.join(project_root, 'src', 'settings.py')],
-    pathex=playsound_pathex,
+    pathex=[os.path.join(project_root, 'src')],
     binaries=onnxruntime_binaries,
     datas=[
         (os.path.join(project_root, 'src', 'www'), 'www'),
