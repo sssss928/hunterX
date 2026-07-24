@@ -334,8 +334,8 @@ def test_notification_default_template_and_redaction() -> None:
         "票數：2\n"
         "區域： 特A區 (VIP PACKAGE)\n"
         "排數：\n"
-        "1️⃣7排17號\n"
-        "2️⃣7排18號\n"
+        "1️⃣ 7排17號\n"
+        "2️⃣ 7排18號\n"
         "狀態：已進入結帳畫面，請立即付款！"
     )
     assert "搶票成功" not in message

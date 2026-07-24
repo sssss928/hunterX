@@ -7,6 +7,7 @@
 
 import asyncio
 import base64
+import inspect
 import json
 import os
 import random
@@ -496,47 +497,243 @@ def _reset_tixcraft_area_retry_state():
 def _clean_tixcraft_area_name(value):
     from notification_context import clean_seat_area
 
-    return clean_seat_area(value)
+    return clean_seat_area(value, "")
 
 
-async def _read_tixcraft_event_name(tab, fallback_url=""):
+async def _read_selected_area_name(target_area, area_list_cache=None, area_text_cache=None):
+    for attribute_name in ("text", "inner_text", "text_content"):
+        try:
+            value = getattr(target_area, attribute_name, "")
+            if callable(value):
+                value = value()
+            if inspect.isawaitable(value):
+                value = await value
+            cleaned = _clean_tixcraft_area_name(str(value or "")[:240])
+            if cleaned:
+                return cleaned
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
+
+    try:
+        attributes = getattr(target_area, "attrs", {}) or {}
+        if inspect.isawaitable(attributes):
+            attributes = await attributes
+        if isinstance(attributes, dict):
+            for key in ("data-area-name", "aria-label", "title"):
+                cleaned = _clean_tixcraft_area_name(attributes.get(key, ""))
+                if cleaned:
+                    return cleaned
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+    if area_list_cache and area_text_cache:
+        for index, item in enumerate(area_list_cache):
+            try:
+                is_target = item is target_area or item == target_area
+            except Exception:
+                is_target = item is target_area
+            if not is_target or index >= len(area_text_cache):
+                continue
+            cached = area_text_cache[index] or {}
+            cleaned = _clean_tixcraft_area_name(cached.get("text") or cached.get("fontText") or "")
+            if cleaned:
+                return cleaned
+    return ""
+
+
+_TIXCRAFT_EVENT_SOURCE_QUALITY = {
+    "heading": 100,
+    "structured_data": 95,
+    "og:title": 90,
+    "document_title": 70,
+}
+
+
+def _extract_tixcraft_event_id(url):
+    match = re.search(
+        r"/(?:activity/(?:detail|game)|ticket/(?:area|ticket|verify|check-captcha))/([^/?#]+)",
+        url or "",
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
+
+
+def _extract_tixcraft_game_id(url):
+    match = re.search(
+        r"/ticket/(?:area|ticket|verify|check-captcha)/[^/?#]+/([^/?#]+)",
+        url or "",
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
+
+
+def _normalize_tixcraft_event_name(value):
+    text = clean_event_name(value, "")
+    text = re.sub(r"\s+@\s*多個表演場地\s*$", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _is_valid_tixcraft_event_name(value, event_id=""):
+    text = _normalize_tixcraft_event_name(value)
+    if not text:
+        return False
+    if event_id and text.casefold() == str(event_id).strip().casefold():
+        return False
+    if re.fullmatch(r"\d{2,4}_[A-Za-z0-9_-]+", text):
+        return False
+    return text.casefold() not in {
+        "unknown event",
+        "tixcraft",
+        "tixcraft拓元售票",
+        "選擇區域",
+        "選擇票券",
+        "日期",
+        "場次",
+        "區域",
+        "訂單",
+        "結帳",
+    }
+
+
+def _reset_tixcraft_notification_flow(event_id="", game_id=""):
+    _state["current_event_id"] = event_id
+    _state["current_game_id"] = game_id
+    cached = (_state.get("event_metadata_cache") or {}).get(event_id, {})
+    _state["event_name"] = cached.get("name", "")
+    _state["event_name_quality"] = int(cached.get("quality", 0) or 0)
+    _state["last_selected_area"] = ""
+    _state["selected_area_candidate"] = ""
+    _state["selected_area_metadata"] = {}
+    _state["last_ticket_count"] = ""
+    _state["notified_order_pending"] = False
+    _state["notified_checkout_reached"] = False
+    _state["last_notification_metadata_warning"] = None
+    _state["notification_flow_generation"] = int(_state.get("notification_flow_generation", 0)) + 1
+
+
+def _sync_tixcraft_notification_flow(url):
+    if url == _state.get("notification_flow_url", ""):
+        return
+    _state["notification_flow_url"] = url
+    event_id = _extract_tixcraft_event_id(url)
+    game_id = _extract_tixcraft_game_id(url)
+    current_event_id = _state.get("current_event_id", "")
+    current_game_id = _state.get("current_game_id", "")
+    if event_id and event_id != current_event_id:
+        _reset_tixcraft_notification_flow(event_id, game_id)
+        return
+    if game_id and current_game_id and game_id != current_game_id:
+        _reset_tixcraft_notification_flow(event_id or current_event_id, game_id)
+        return
+    if event_id and not current_event_id:
+        _state["current_event_id"] = event_id
+    if game_id and not current_game_id:
+        _state["current_game_id"] = game_id
+
+
+async def _read_tixcraft_event_name(tab, event_id=""):
     js = """
         (function() {
+            const results = [];
             const candidates = [
+                '.activity-info h1',
+                '.activity-info h2',
                 '.game-title h2',
                 '.game-title',
-                'h1',
-                'h2',
+                '.event-info h1',
                 '.event-info h2',
-                '.activity-title'
+                '.activity-title',
+                'h1',
+                'h2'
             ];
             for (const selector of candidates) {
                 const el = document.querySelector(selector);
                 const text = el && el.innerText ? el.innerText.trim() : '';
-                if (text) return text;
+                if (text) results.push({name: text, source: 'heading'});
             }
-            return document.title || '';
+            for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+                try {
+                    const data = JSON.parse(script.textContent || '{}');
+                    const items = Array.isArray(data) ? data : [data];
+                    for (const item of items) {
+                        if (item && typeof item.name === 'string' && item.name.trim()) {
+                            results.push({name: item.name.trim(), source: 'structured_data'});
+                        }
+                    }
+                } catch (_) {
+                    // Ignore unrelated or malformed JSON-LD blocks.
+                }
+            }
+            const ogTitle = document.querySelector('meta[property="og:title"]');
+            const ogText = ogTitle && ogTitle.content ? ogTitle.content.trim() : '';
+            if (ogText) results.push({name: ogText, source: 'og:title'});
+            if (document.title) results.push({name: document.title, source: 'document_title'});
+            return JSON.stringify(results);
         })();
     """
     try:
-        event_name = await tab.evaluate(js)
-        event_name = util.parse_nodriver_result(event_name)
-    except Exception:
-        event_name = ""
-    if not event_name and fallback_url:
-        event_name = fallback_url.rstrip("/").split("/")[-1]
-    return event_name or "Unknown Event"
+        raw_value = await tab.evaluate(js)
+        raw_value = util.parse_nodriver_result(raw_value)
+        if isinstance(raw_value, str):
+            try:
+                raw_value = json.loads(raw_value)
+            except Exception:
+                raw_value = [{"name": raw_value, "source": "document_title"}]
+        if isinstance(raw_value, dict):
+            raw_value = [raw_value]
+        if isinstance(raw_value, list):
+            metadata_candidates = []
+            for item in raw_value:
+                if not isinstance(item, dict):
+                    continue
+                source = str(item.get("source", "document_title"))
+                metadata_candidates.append(
+                    {
+                        "name": _normalize_tixcraft_event_name(item.get("name", "")),
+                        "source": source,
+                        "quality": _TIXCRAFT_EVENT_SOURCE_QUALITY.get(source, 0),
+                    }
+                )
+            metadata_candidates.sort(key=lambda item: item["quality"], reverse=True)
+            for metadata in metadata_candidates:
+                if _is_valid_tixcraft_event_name(metadata["name"], event_id):
+                    return metadata
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        runtime_health.runtime_log(
+            "[TIXCRAFT] event_metadata_read_failed",
+            error_type=type(exc).__name__,
+        )
+    return {"name": "", "source": "", "quality": 0}
 
 
 async def _remember_tixcraft_event_name(tab, url):
-    current = clean_event_name(_state.get("event_name", ""), "")
-    if current:
+    _sync_tixcraft_notification_flow(url)
+    event_id = _state.get("current_event_id", "") or _extract_tixcraft_event_id(url)
+    current = _normalize_tixcraft_event_name(_state.get("event_name", ""))
+    current_quality = int(_state.get("event_name_quality", 0) or 0)
+    if _is_valid_tixcraft_event_name(current, event_id) and current_quality >= 90:
         return current
-    event_name = clean_event_name(await _read_tixcraft_event_name(tab, fallback_url=url), "")
-    if event_name:
+    metadata = await _read_tixcraft_event_name(tab, event_id)
+    event_name = metadata["name"]
+    quality = int(metadata["quality"])
+    if _is_valid_tixcraft_event_name(event_name, event_id) and quality >= current_quality:
         _state["event_name"] = event_name
+        _state["event_name_quality"] = quality
+        if event_id:
+            cache = _state.setdefault("event_metadata_cache", {})
+            cache[event_id] = {
+                "name": event_name,
+                "source": metadata["source"],
+                "quality": quality,
+            }
         return event_name
-    return ""
+    return current if _is_valid_tixcraft_event_name(current, event_id) else ""
 
 
 async def _read_tixcraft_ticket_count(tab, config_dict):
@@ -559,27 +756,42 @@ async def _read_tixcraft_ticket_count(tab, config_dict):
     return str(_state.get("last_ticket_count") or config_dict.get("ticket_number", "-"))
 
 
+def _extract_tixcraft_seat_rows(text_values):
+    found = []
+    seen = set()
+    for text in text_values or []:
+        for row_number, seat_number in re.findall(r"(?<!\d)(\d{1,4})\s*排\s*(\d{1,4})\s*號", str(text)):
+            seat = f"{int(row_number)}排{int(seat_number)}號"
+            if seat not in seen:
+                seen.add(seat)
+                found.append(seat)
+    return found
+
+
 async def _read_tixcraft_seat_rows(tab):
     try:
         result = await tab.evaluate("""
             (function() {
-                const found = [];
-                const pushSeat = (text) => {
-                    if (!text) return;
-                    const normalized = text.replace(/\\s+/g, '');
-                    const matches = normalized.match(/[A-Za-z0-9\\u4e00-\\u9fff-]*\\d+排\\d+號/g) || [];
-                    for (const item of matches) {
-                        if (!found.includes(item)) found.push(item);
-                    }
-                };
-                const selectors = ['table tr', '.order-info', '.ticket-info', '.checkout', '.content', 'li', 'div'];
+                const values = [];
+                const seenElements = new Set();
+                const selectors = [
+                    'table.ticket-list tbody tr',
+                    'table.order-list tbody tr',
+                    '.ticket-info',
+                    '.seat-info',
+                    '[class*="seat"]',
+                    '.order-info li'
+                ];
                 for (const selector of selectors) {
                     for (const el of Array.from(document.querySelectorAll(selector))) {
-                        pushSeat(el.innerText || el.textContent || '');
+                        if (seenElements.has(el)) continue;
+                        seenElements.add(el);
+                        const text = (el.innerText || el.textContent || '').trim();
+                        if (text) values.push(text);
                     }
                 }
-                if (!found.length) pushSeat(document.body && document.body.innerText || '');
-                return JSON.stringify(found.slice(0, 20));
+                if (!values.length && document.body) values.push(document.body.innerText || '');
+                return JSON.stringify(values.slice(0, 100));
             })();
         """)
         result = util.parse_nodriver_result(result)
@@ -589,28 +801,93 @@ async def _read_tixcraft_seat_rows(tab):
             except Exception:
                 result = []
         if isinstance(result, list):
-            return [str(item).strip() for item in result if str(item).strip()]
-    except Exception:
-        pass
+            return _extract_tixcraft_seat_rows(result)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        runtime_health.runtime_log(
+            "[TIXCRAFT] seat_rows_read_failed",
+            error_type=type(exc).__name__,
+        )
     return []
 
 
+async def _read_tixcraft_seat_area(tab):
+    try:
+        raw_value = await tab.evaluate("""
+            (function() {
+                const selectors = [
+                    '[data-area-name]',
+                    '.area-name',
+                    '.zone-name',
+                    '.ticket-area',
+                    '.order-info .area',
+                    '.ticket-info .area'
+                ];
+                for (const selector of selectors) {
+                    const el = document.querySelector(selector);
+                    if (!el) continue;
+                    const value = el.getAttribute('data-area-name') ||
+                        el.innerText || el.textContent || '';
+                    if (value.trim()) return value.trim();
+                }
+                return '';
+            })();
+        """)
+        raw_value = util.parse_nodriver_result(raw_value)
+        return _clean_tixcraft_area_name(raw_value)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        runtime_health.runtime_log(
+            "[TIXCRAFT] seat_area_read_failed",
+            error_type=type(exc).__name__,
+        )
+        return ""
+
+
 async def _build_tixcraft_notification_context(tab, config_dict, stage, url):
-    event_name = clean_event_name(_state.get("event_name", ""), "")
-    if not event_name:
-        event_name = await _remember_tixcraft_event_name(tab, url)
+    event_name = await _remember_tixcraft_event_name(tab, url)
     ticket_count = await _read_tixcraft_ticket_count(tab, config_dict)
-    seat_area = _state.get("last_selected_area", "") or "Unknown Area"
+    event_id = _state.get("current_event_id", "")
+    game_id = _state.get("current_game_id", "")
+    area_metadata = _state.get("selected_area_metadata") or {}
+    seat_area = ""
+    if (
+        area_metadata.get("confirmed")
+        and area_metadata.get("event_id", "") == event_id
+        and area_metadata.get("game_id", "") == game_id
+    ):
+        seat_area = _clean_tixcraft_area_name(area_metadata.get("name", ""))
+    if not seat_area:
+        seat_area = await _read_tixcraft_seat_area(tab)
+    if not seat_area:
+        missing_fields = ["seat_area"]
+    else:
+        missing_fields = []
+    if not _is_valid_tixcraft_event_name(event_name, event_id):
+        missing_fields.insert(0, "event_name")
+    if missing_fields:
+        warning_key = (event_id, game_id, tuple(missing_fields))
+        if _state.get("last_notification_metadata_warning") != warning_key:
+            runtime_health.runtime_log(
+                "[TIXCRAFT] notification_metadata_incomplete",
+                config_dict,
+                fields=",".join(missing_fields),
+                current_url=url,
+            )
+            _state["last_notification_metadata_warning"] = warning_key
+        return None
+    _state["last_notification_metadata_warning"] = None
     seat_rows = "訂單建立中﹍" if stage == "order_pending" else "-"
     if stage in {"checkout_reached", "payment_reached"}:
         rows = await _read_tixcraft_seat_rows(tab)
         if rows:
             seat_rows = rows
-            ticket_count = str(len(rows))
     return make_notification_context(
         platform="TixCraft",
         stage=stage,
-        event_name=event_name or "Unknown Event",
+        event_name=event_name,
         ticket_count=ticket_count,
         seat_area=seat_area,
         seat_rows=seat_rows,
@@ -2616,46 +2893,66 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
     else:
         target_area = util.get_target_item_from_matched_list(matched_blocks, auto_select_mode)
     if target_area:
-        # Always save selected area metadata before clicking; notification
-        # correctness must not depend on verbose debug mode.
-        try:
-            area_text = await target_area.text
-            if not area_text:
-                area_text = await target_area.inner_text
-            area_text = _clean_tixcraft_area_name(area_text.strip()[:120] if area_text else "Unknown")
-            _state["last_selected_area"] = area_text
+        area_text = await _read_selected_area_name(target_area, area_list_cache, area_text_cache)
+        _state["selected_area_candidate"] = area_text
+        if area_text:
             _record_action("area_candidate_selected", area_text)
             selection_type = "fallback" if is_fallback_selection else "keyword match"
             debug.log(f"[AREA SELECT] Selected area: {area_text} ({selection_type})")
             runtime_health.runtime_log("[AREA] candidate_selected", config_dict, seat_area=area_text, current_url=url)
-        except Exception:
-            pass  # If text extraction fails, skip metadata only.
+        else:
+            runtime_health.runtime_log(
+                "[AREA] candidate_metadata_missing",
+                config_dict,
+                current_url=url,
+            )
 
+        click_succeeded = False
         try:
             await target_area.click()
+            click_succeeded = True
+        except asyncio.CancelledError:
+            raise
+        except Exception as click_exc:
+            runtime_health.runtime_log(
+                "[AREA] native_click_failed",
+                config_dict,
+                error_type=type(click_exc).__name__,
+                current_url=url,
+            )
+            try:
+                await target_area.evaluate('el => el.click()')
+                click_succeeded = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as js_click_exc:
+                runtime_health.runtime_log(
+                    "[AREA] click_failed",
+                    config_dict,
+                    error_type=type(js_click_exc).__name__,
+                    current_url=url,
+                )
+
+        if click_succeeded:
             if leak_dom_guard:
                 leak_scheduler.mark_area_click_pending(url)
-            _record_action("area_clicked", _state.get("last_selected_area", ""))
+            _state["last_selected_area"] = area_text
+            _state["selected_area_metadata"] = {
+                "name": area_text,
+                "confirmed": bool(area_text),
+                "event_id": _state.get("current_event_id", ""),
+                "game_id": _state.get("current_game_id", ""),
+                "area_url": url,
+            }
+            _record_action("area_clicked", area_text)
             runtime_health.runtime_log(
                 "[AREA] clicked",
                 config_dict,
-                seat_area=_state.get("last_selected_area", ""),
+                seat_area=area_text,
                 current_url=url,
             )
-        except Exception:
-            try:
-                await target_area.evaluate('el => el.click()')
-                if leak_dom_guard:
-                    leak_scheduler.mark_area_click_pending(url)
-                _record_action("area_clicked", _state.get("last_selected_area", ""))
-                runtime_health.runtime_log(
-                    "[AREA] clicked",
-                    config_dict,
-                    seat_area=_state.get("last_selected_area", ""),
-                    current_url=url,
-                )
-            except Exception:
-                pass
+        else:
+            is_need_refresh = True
 
     # Auto refresh if needed (simple wait mode, consistent with TicketPlus/iBon/FamiTicket)
     if is_need_refresh:
@@ -3837,6 +4134,17 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             "ocr_completed_url": "",
             "last_valid_area_url": "",
             "last_selected_area": "",
+            "selected_area_candidate": "",
+            "selected_area_metadata": {},
+            "current_event_id": "",
+            "current_game_id": "",
+            "event_name": "",
+            "event_name_quality": 0,
+            "event_metadata_cache": {},
+            "last_ticket_count": "",
+            "notification_flow_generation": 0,
+            "notification_flow_url": "",
+            "last_notification_metadata_warning": None,
             "manual_intervention_required": False,
             "last_homepage_redirect_time": 0,
             "sold_out_cooldown_until": 0,
@@ -3847,6 +4155,8 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             "ip_block_count": 0,
             "queue_it_enter_time": None,
         })
+
+    _sync_tixcraft_notification_flow(url)
 
     # Register global alert handler (remains active throughout session)
     # Only register once to prevent infinite loop
@@ -4050,9 +4360,10 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         _record_action("order_pending", url)
         if not _state.get("notified_order_pending", False):
             notify_context = await _build_tixcraft_notification_context(tab, config_dict, "order_pending", url)
-            send_discord_notification(config_dict, "order_pending", "TixCraft", context=notify_context)
-            send_telegram_notification(config_dict, "order_pending", "TixCraft", context=notify_context)
-            _state["notified_order_pending"] = True
+            if notify_context is not None:
+                send_discord_notification(config_dict, "order_pending", "TixCraft", context=notify_context)
+                send_telegram_notification(config_dict, "order_pending", "TixCraft", context=notify_context)
+                _state["notified_order_pending"] = True
 
     is_quit_bot = False
     if '/ticket/checkout' in url:
@@ -4075,13 +4386,14 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
                 print("Checkout reached, please check order at: %s" % (checkout_url))
                 webbrowser.open_new(checkout_url)
 
-        if not _state["played_sound_order"]:
-            if config_dict["advanced"]["play_sound"]["order"]:
-                play_sound_while_ordering(config_dict)
+        if not _state["played_sound_order"] and config_dict["advanced"]["play_sound"]["order"]:
+            play_sound_while_ordering(config_dict)
+        if not _state.get("notified_checkout_reached", False):
             notify_context = await _build_tixcraft_notification_context(tab, config_dict, "checkout_reached", url)
-            send_discord_notification(config_dict, "checkout_reached", "TixCraft", context=notify_context)
-            send_telegram_notification(config_dict, "checkout_reached", "TixCraft", context=notify_context)
-            _state["notified_checkout_reached"] = True
+            if notify_context is not None:
+                send_discord_notification(config_dict, "checkout_reached", "TixCraft", context=notify_context)
+                send_telegram_notification(config_dict, "checkout_reached", "TixCraft", context=notify_context)
+                _state["notified_checkout_reached"] = True
         _state["played_sound_order"] = True
     else:
         _state["is_popup_checkout"] = False

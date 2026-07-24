@@ -1,14 +1,23 @@
 # Changelog
 
-## v0.4.2
+## v0.4.2-fixed
 
-- Add runtime log and heartbeat helpers for long waits, soft-block waits, and leak-watch diagnostics.
-- Harden TixCraft leak-watch reloads with scheduler pending guards, reload timeouts, ready-state checks, and fresh area DOM reads.
-- Keep the onsale ticket hot path intact while blocking non-recovery reloads on ticket/order/checkout/payment pages.
-- Preserve selected TixCraft area metadata regardless of verbose mode and update Discord formatting for separate area and row fields.
-- Add navigation timeouts for TixCraft recovery and safe-page redirects.
-- Fix split Windows package launch so the default profile passes the settings app's concrete `settings.json` path to `nodriver_tixcraft.exe`.
-- Fix the frozen launcher regression test so GitHub release tests pass on Ubuntu while still verifying Windows `.exe` layout behavior.
+- Prevent timed-out Zendriver protocol operations from being cancelled while
+  they are still registered with the CDP listener, and drain them during
+  idempotent browser shutdown.
+- Treat closed WebSocket/CDP transports as a normal lifecycle stop instead of
+  leaking listener, executor-shutdown, or frozen-entry-point errors.
+- Resolve TixCraft event titles from validated page metadata, reject activity
+  slugs, and remove the trailing `@ 多個表演場地` presentation suffix.
+- Preserve only confirmed TixCraft area selections, recover checkout seat
+  details with ordered de-duplication, and suppress incomplete notifications
+  instead of emitting `Unknown Event` or `Unknown Area`.
+- Number every returned seat line consistently through 1️⃣–9️⃣, 🔟, and a
+  deterministic numeric fallback for larger orders.
+- Keep order-pending and checkout notification flags independent so each stage
+  is delivered once per event flow.
+- Make the Windows PyInstaller specs compatible with the stricter import-path
+  handling announced for PyInstaller 7.
 
 ## v0.2.1
 

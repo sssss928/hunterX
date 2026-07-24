@@ -632,12 +632,9 @@ def launch_maxbot(profile_name="", instance_override=""):
 
     script_name = "nodriver_tixcraft"
 
-    # Always pass the concrete settings path. In split PyInstaller layouts the
-    # settings editor and bot live in sibling directories, so the bot cannot
-    # infer the editor's settings.json from its own app root.
-    input_filepath = config_filepath
-    if not os.path.isfile(config_filepath):
-        util.save_json(config_dict, config_filepath)
+    input_filepath = ""
+    if profile_name and profile_name != CONST_DEFAULT_PROFILE:
+        input_filepath = config_filepath
 
     window_size = config_dict["advanced"]["window_size"]
     if len(window_size) > 0:

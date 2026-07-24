@@ -88,6 +88,7 @@ def clean_seat_area(value: str | None, fallback: str = "Unknown Area") -> str:
         line = raw_line.strip()
         line = re.sub(r"\s*(剩餘|剩余)\s*\d+\s*$", "", line)
         line = re.sub(r"\s*(已售完|熱賣中|热卖中|sold out|unavailable)\s*$", "", line, flags=re.IGNORECASE)
+        line = re.sub(r"\s*(?:票價\s*)?(?:NT\$|TWD|\$)\s*[\d,]+\s*$", "", line, flags=re.IGNORECASE)
         line = re.sub(r"\s+", " ", line).strip()
         if line:
             lines.append(line)
@@ -107,6 +108,8 @@ _NUMBER_EMOJI = {
     10: "🔟",
 }
 
+_NUMBERED_ROW_PREFIX = re.compile(r"^(?:(?:[1-9]\ufe0f?\u20e3)|🔟|\d+[.)、])\s*")
+
 
 def format_seat_rows(value: str | list[str] | tuple[str, ...] | None, fallback: str = "-") -> str:
     if value is None:
@@ -116,6 +119,7 @@ def format_seat_rows(value: str | list[str] | tuple[str, ...] | None, fallback: 
     else:
         raw_lines = str(value).splitlines()
     lines = []
+    seat_index = 0
     for raw_line in raw_lines:
         line = redact_sensitive_text(raw_line).strip()
         if not line:
@@ -123,12 +127,15 @@ def format_seat_rows(value: str | list[str] | tuple[str, ...] | None, fallback: 
         if line in {"-", "訂單建立中﹍", "訂單建立中"}:
             lines.append(line)
             continue
-        if re.match(r"^(?:[1-9]️⃣|🔟|\d+[.)、])", line):
-            lines.append(line)
+        seat_index += 1
+        numbered_prefix = _NUMBERED_ROW_PREFIX.match(line)
+        if numbered_prefix:
+            prefix = numbered_prefix.group(0).strip()
+            content = line[numbered_prefix.end():].strip()
+            lines.append(f"{prefix} {content}".strip())
             continue
-        index = len(lines) + 1
-        prefix = _NUMBER_EMOJI.get(index, f"{index}.")
-        lines.append(f"{prefix}{line}")
+        prefix = _NUMBER_EMOJI.get(seat_index, f"{seat_index}.")
+        lines.append(f"{prefix} {line}")
     return "\n".join(lines) if lines else fallback
 
 

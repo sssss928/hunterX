@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import chrome_downloader
+import runtime_health
 import util
 from hunter_metadata import APP_NAME
 
@@ -76,6 +78,8 @@ class BrowserSessionManager:
         self.config_dict = config_dict
         self.args = args
         self.driver = None
+        self._stop_lock = asyncio.Lock()
+        self._stopped = False
 
     def profile_parent_dir(self) -> Path:
         return Path(util.get_app_root()) / "browser_profiles" / self.launch.browser_type.capitalize()
@@ -126,9 +130,41 @@ class BrowserSessionManager:
 
     def attach(self, driver) -> None:
         self.driver = driver
+        self._stopped = False
 
     async def stop_browser(self) -> None:
-        if self.driver is None:
-            return
-        await self.driver.stop()
-        self.driver = None
+        async with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            driver = self.driver
+            self.driver = None
+            if driver is None:
+                return
+            try:
+                await driver.stop()
+                runtime_health.runtime_log("[BROWSER] stopped", self.config_dict)
+            except asyncio.CancelledError:
+                self._stopped = False
+                self.driver = driver
+                raise
+            except BaseException as exc:
+                if not runtime_health.is_connection_closed_error(exc):
+                    self._stopped = False
+                    self.driver = driver
+                    raise
+                runtime_health.mark_connection_closed(driver)
+                runtime_health.runtime_log(
+                    "[BROWSER] already_closed",
+                    self.config_dict,
+                    error_type=type(exc).__name__,
+                )
+            finally:
+                remaining = await runtime_health.drain_pending_operations()
+                if remaining:
+                    cancelled = await runtime_health.cancel_pending_operations()
+                    runtime_health.runtime_log(
+                        "[BROWSER] protocol_operations_cancelled_after_stop",
+                        self.config_dict,
+                        count=cancelled,
+                    )

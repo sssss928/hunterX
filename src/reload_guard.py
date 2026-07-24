@@ -45,15 +45,18 @@ class ReloadGuard:
                 current_url=url,
             )
             return False
+        failed = object()
         try:
-            await wait_for_operation(
+            result = await wait_for_operation(
                 tab.reload(),
                 timeout_seconds,
                 "RELOAD",
                 config_dict,
+                default=failed,
                 raise_on_timeout=True,
+                operation_owner=tab,
             )
-            return True
+            return result is not failed
         except TimeoutError:
             return False
 

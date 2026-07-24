@@ -1,0 +1,22 @@
+Project: HunterX
+Repository: https://github.com/sssss928/hunterX
+Artifact version: v0.4.2-fixed
+Base version: v0.4.2
+Git branch: fix/v0.4.2-runtime-discord-metadata
+Git commit SHA: 54f670a4b4c69035f9b68b2a1474e87d904b7a67
+Base commit SHA: 08d7bb3518da92b926ffcec5e9e10b18690752c5
+Build date/time: 2026-07-24T19:13:47+08:00
+Timezone: Asia/Taipei (UTC+08:00)
+Python: 3.11.9
+pip: 26.1.2
+PyInstaller: 6.21.0
+Zendriver: 0.15.3
+websockets: 16.1.1
+requirement.txt SHA-256: 5538B2210831C0602FBE1866157FE1C71D072E9E243ACA6AD3F8CBCBFC8CD7B9
+Operating system: Microsoft Windows 11 Home 10.0.26100 (64-bit)
+Build command: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1 -Version 0.4.2
+Source ZIP SHA-256: recorded in the external BUILD_INFO.txt and SHA256SUMS.txt
+Windows ZIP SHA-256: recorded in the external BUILD_INFO.txt and SHA256SUMS.txt
+
+The ZIP hashes are external because embedding an archive's own final digest
+inside that archive would change the digest.

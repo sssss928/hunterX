@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import time
+import weakref
 from contextlib import suppress
 from typing import Any, Awaitable
 
@@ -15,6 +17,119 @@ DEFAULT_NAVIGATION_TIMEOUT_SECONDS = 10.0
 DEFAULT_EVALUATE_TIMEOUT_SECONDS = 4.0
 DEFAULT_READY_STATE_TIMEOUT_SECONDS = 6.0
 HEARTBEAT_FILE = "heartbeat.txt"
+
+_PENDING_OPERATIONS: set[asyncio.Task[Any]] = set()
+_OWNER_OPERATIONS: dict[int, asyncio.Task[Any]] = {}
+_CLOSED_OWNER_IDS: set[int] = set()
+_CLOSED_OWNERS: weakref.WeakSet[Any] = weakref.WeakSet()
+
+
+def is_connection_closed_error(exc: BaseException) -> bool:
+    """Return True for transport/browser shutdown errors from supported drivers."""
+
+    class_name = type(exc).__name__.lower()
+    module_name = type(exc).__module__.lower()
+    message = str(exc).lower()
+    if class_name in {
+        "connectionclosed",
+        "connectionclosederror",
+        "connectionclosedok",
+        "invalidstateerror",
+    }:
+        return True
+    if "websocket" in module_name and "closed" in class_name:
+        return True
+    markers = (
+        "no close frame received or sent",
+        "connection is closed",
+        "connection closed",
+        "websocket is closed",
+        "no websocket connection",
+        "browser has been closed",
+        "target closed",
+        "session closed",
+        "executor shutdown has been called",
+        "cannot schedule new futures after shutdown",
+    )
+    return any(marker in message for marker in markers)
+
+
+def mark_connection_closed(owner: Any | None) -> None:
+    if owner is None:
+        return
+    try:
+        _CLOSED_OWNERS.add(owner)
+    except TypeError:
+        _CLOSED_OWNER_IDS.add(id(owner))
+
+
+def is_connection_available(owner: Any | None) -> bool:
+    if owner is None:
+        return True
+    try:
+        if owner in _CLOSED_OWNERS:
+            return False
+    except TypeError:
+        if id(owner) in _CLOSED_OWNER_IDS:
+            return False
+    if id(owner) in _CLOSED_OWNER_IDS:
+        return False
+    websocket = getattr(owner, "websocket", ...)
+    if websocket is None:
+        return False
+    connection = getattr(owner, "connection", None)
+    if connection is not None and bool(getattr(connection, "closed", False)):
+        return False
+    browser = getattr(owner, "browser", None)
+    if browser is not None and bool(getattr(browser, "stopped", False)):
+        return False
+    return True
+
+
+def _dispose_unstarted_awaitable(awaitable: Awaitable[Any]) -> None:
+    """Close a coroutine that cannot be scheduled without emitting a warning."""
+
+    if inspect.iscoroutine(awaitable):
+        awaitable.close()
+
+
+def _consume_operation_result(task: asyncio.Task[Any], owner_id: int | None) -> None:
+    _PENDING_OPERATIONS.discard(task)
+    if owner_id is not None and _OWNER_OPERATIONS.get(owner_id) is task:
+        _OWNER_OPERATIONS.pop(owner_id, None)
+    if task.cancelled():
+        return
+    with suppress(BaseException):
+        task.result()
+
+
+def pending_operation_count() -> int:
+    return sum(1 for task in _PENDING_OPERATIONS if not task.done())
+
+
+async def drain_pending_operations(timeout_seconds: float = 1.0) -> int:
+    """Give protocol operations a bounded opportunity to finish during shutdown."""
+
+    pending = {task for task in _PENDING_OPERATIONS if not task.done()}
+    if not pending:
+        return 0
+    _done, still_pending = await asyncio.wait(
+        pending,
+        timeout=max(0.0, float(timeout_seconds)),
+        return_when=asyncio.ALL_COMPLETED,
+    )
+    return len(still_pending)
+
+
+async def cancel_pending_operations() -> int:
+    """Cancel and retrieve operations only after their transport is stopped."""
+
+    pending = [task for task in _PENDING_OPERATIONS if not task.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    return len(pending)
 
 
 def _instance_log_path() -> str:
@@ -105,18 +220,66 @@ async def wait_for_operation(
     *,
     default: Any = None,
     raise_on_timeout: bool = False,
+    operation_owner: Any | None = None,
 ) -> Any:
+    """Wait without cancelling the driver's protocol Future on timeout.
+
+    Zendriver Transaction objects are Futures. Cancelling one with
+    ``asyncio.wait_for`` leaves it in the connection mapper; the listener later
+    calls ``set_result`` and raises ``InvalidStateError``. A timed-out operation
+    therefore remains tracked until the driver completes it or the transport
+    closes. Only one outstanding operation is allowed per owner.
+    """
+
     started = time.perf_counter()
+    owner_id = id(operation_owner) if operation_owner is not None else None
+    if operation_owner is not None and not is_connection_available(operation_owner):
+        _dispose_unstarted_awaitable(awaitable)
+        runtime_log(f"[{action}] connection_closed", config_dict, elapsed_ms=0)
+        return default
+    if owner_id is not None:
+        existing = _OWNER_OPERATIONS.get(owner_id)
+        if existing is not None and not existing.done():
+            _dispose_unstarted_awaitable(awaitable)
+            runtime_log(f"[{action}] operation_pending", config_dict)
+            return default
+
+    task = asyncio.ensure_future(awaitable)
+    _PENDING_OPERATIONS.add(task)
+    if owner_id is not None:
+        _OWNER_OPERATIONS[owner_id] = task
+    task.add_done_callback(lambda done: _consume_operation_result(done, owner_id))
+
     try:
-        result = await asyncio.wait_for(awaitable, timeout=max(0.1, float(timeout_seconds)))
+        done, _pending = await asyncio.wait(
+            {task},
+            timeout=max(0.1, float(timeout_seconds)),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
         elapsed_ms = int((time.perf_counter() - started) * 1000)
+        if not done:
+            runtime_log(f"[{action}] timeout", config_dict, elapsed_ms=elapsed_ms)
+            if raise_on_timeout:
+                raise TimeoutError(f"{action} timed out after {timeout_seconds} seconds")
+            return default
+        result = task.result()
         runtime_log(f"[{action}] done", config_dict, elapsed_ms=elapsed_ms)
         return result
-    except asyncio.TimeoutError:
+    except asyncio.CancelledError:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        runtime_log(f"[{action}] timeout", config_dict, elapsed_ms=elapsed_ms)
-        if raise_on_timeout:
+        runtime_log(f"[{action}] cancelled", config_dict, elapsed_ms=elapsed_ms)
+        raise
+    except BaseException as exc:
+        if not is_connection_closed_error(exc):
             raise
+        mark_connection_closed(operation_owner)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        runtime_log(
+            f"[{action}] connection_closed",
+            config_dict,
+            elapsed_ms=elapsed_ms,
+            error_type=type(exc).__name__,
+        )
         return default
 
 
@@ -135,9 +298,10 @@ async def guarded_get(
             reason,
             config_dict,
             raise_on_timeout=True,
+            operation_owner=tab,
         )
         return True
-    except TimeoutError:
+    except (TimeoutError, asyncio.TimeoutError):
         return False
 
 
@@ -156,6 +320,7 @@ async def evaluate_with_timeout(
         reason,
         config_dict,
         default=default,
+        operation_owner=tab,
     )
 
 
@@ -173,6 +338,7 @@ async def query_selector_with_timeout(
         reason,
         config_dict,
         default=None,
+        operation_owner=obj,
     )
 
 
@@ -190,10 +356,13 @@ async def query_selector_all_with_timeout(
         reason,
         config_dict,
         default=None,
+        operation_owner=obj,
     )
 
 
 async def read_document_ready_state(tab: Any, config_dict: dict[str, Any] | None = None) -> str:
+    if not is_connection_available(tab):
+        return "connection_closed"
     result = await evaluate_with_timeout(
         tab,
         "document.readyState",
@@ -220,6 +389,9 @@ async def wait_for_interactive_ready(
         touch_heartbeat()
         state = await read_document_ready_state(tab, config_dict)
         last_state = state
+        if state == "connection_closed":
+            runtime_log("[LEAK] ready_state_connection_closed", config_dict)
+            return False
         if state in {"interactive", "complete"}:
             runtime_log("[LEAK] ready_state", config_dict, state=state)
             return True

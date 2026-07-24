@@ -95,35 +95,6 @@ def test_settings_frontend_static_version_matches_release() -> None:
     assert "HunterX (0.2.1)" not in js
 
 
-def test_default_profile_launch_passes_concrete_config_path(tmp_path: Path, monkeypatch) -> None:
-    config_path = tmp_path / settings.CONST_MAXBOT_CONFIG_FILE
-    config = settings.get_default_config()
-    captured = {}
-
-    monkeypatch.setattr(settings, "load_json", lambda profile_name="": (str(config_path), config))
-
-    def fake_launch(*args, **kwargs):  # noqa: ANN001
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-
-    class ImmediateThread:
-        def __init__(self, target=None, args=(), kwargs=None):  # noqa: ANN001
-            self.target = target
-            self.args = args
-            self.kwargs = kwargs or {}
-
-        def start(self):
-            self.target(*self.args, **self.kwargs)
-
-    monkeypatch.setattr(settings.util, "launch_maxbot", fake_launch)
-    monkeypatch.setattr(settings.threading, "Thread", ImmediateThread)
-
-    settings.launch_maxbot(settings.CONST_DEFAULT_PROFILE)
-
-    assert config_path.is_file()
-    assert captured["args"][1] == str(config_path)
-
-
 def test_migrate_config_fills_missing_sections() -> None:
     config = {"advanced": {"server_port": 16889}, "accounts": {"discount_code": "ABC"}}
 

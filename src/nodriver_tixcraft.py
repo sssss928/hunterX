@@ -2,6 +2,7 @@
 #encoding=utf-8
 import argparse
 import base64
+import contextlib
 import json
 import logging
 import asyncio
@@ -80,6 +81,7 @@ logging.basicConfig()
 logger = logging.getLogger('logger')
 
 CONFIG_RELOAD_CHECK_INTERVAL_SEC = 0.5
+_ACTIVE_SESSION_MANAGER = None
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -764,6 +766,8 @@ async def reload_config(config_dict, last_mtime, config_filepath):
     return config_dict, last_mtime
 
 async def main(args):
+    global _ACTIVE_SESSION_MANAGER
+
     instance_id = ""
     if args and getattr(args, "instance", None):
         instance_id = args.instance
@@ -799,6 +803,7 @@ async def main(args):
     if not config_dict is None:
         sandbox = False
         session_manager = create_browser_session_manager(config_dict, args)
+        _ACTIVE_SESSION_MANAGER = session_manager
         conf = get_extension_config(config_dict, args, session_manager=session_manager)
         nodriver_overwrite_prefs(conf)
         # PS: nodrirver run twice always cause error:
@@ -924,8 +929,14 @@ async def main(args):
                 if session_manager is not None:
                     await session_manager.stop_browser()
                 driver = None
-            except Exception as e:
-                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                runtime_health.runtime_log(
+                    "[LOOP] browser_stop_failed",
+                    config_dict,
+                    error_type=type(exc).__name__,
+                )
             util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_INT28_QUIT_FILE))
             util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_AUTOMATION_STOP_FILE))
             util.force_remove_file(util.get_instance_state_path(heartbeat_filename))
@@ -1085,6 +1096,40 @@ async def main(args):
         if url[:len(facebook_login_url)]==facebook_login_url:
             await nodriver_facebook_main(tab, config_dict)
 
+async def _main_with_cleanup(args):
+    global _ACTIVE_SESSION_MANAGER
+
+    try:
+        await main(args)
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:
+        if not runtime_health.is_connection_closed_error(exc):
+            raise
+        runtime_health.runtime_log(
+            "[RUNTIME] browser_connection_closed",
+            error_type=type(exc).__name__,
+        )
+        print(f"[RUNTIME] Browser connection closed; stopping safely ({type(exc).__name__}).")
+    finally:
+        manager = _ACTIVE_SESSION_MANAGER
+        _ACTIVE_SESSION_MANAGER = None
+        if manager is not None:
+            try:
+                await manager.stop_browser()
+            except asyncio.CancelledError:
+                # Finish the idempotent browser cleanup before propagating Ctrl+C.
+                cleanup_task = asyncio.create_task(manager.stop_browser())
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(cleanup_task)
+                raise
+            except BaseException as exc:
+                runtime_health.runtime_log(
+                    "[RUNTIME] browser_cleanup_failed",
+                    error_type=type(exc).__name__,
+                )
+
+
 def cli():
     parser = argparse.ArgumentParser(
             description="MaxBot Aggument Parser")
@@ -1170,7 +1215,10 @@ def cli():
         metavar="PORT")
 
     args = parser.parse_args()
-    asyncio.run(main(args))
+    try:
+        asyncio.run(_main_with_cleanup(args))
+    except KeyboardInterrupt:
+        print("Interrupted by user.")
 
 if __name__ == "__main__":
     cli()
