@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 import browser_session
+import runtime_health
 import util
 import platforms.tixcraft as tixcraft_platform
 from browser_session import BrowserSessionManager
 from flow_state import FlowState, FlowStateMachine
-from leak_watch import LEAK_WATCH_POLICIES, is_protected_url, is_safe_page
+from leak_watch import LEAK_WATCH_POLICIES, LeakWatchScheduler, is_protected_url, is_safe_page
 from nodriver_common import build_shared_notification_context
 from notification_context import clean_event_name, clean_seat_area, format_seat_rows, make_notification_context
 from page_classifier import PageClass, classify_page
@@ -36,9 +38,8 @@ class _Target:
 
 
 class _Tab:
-    target = _Target()
-
     def __init__(self) -> None:
+        self.target = _Target()
         self.reload_count = 0
 
     async def reload(self) -> None:
@@ -69,6 +70,12 @@ class _SoftBlockTab:
         self.reload_count += 1
 
 
+class _SlowReloadTab(_Tab):
+    async def reload(self) -> None:
+        await asyncio.sleep(10)
+        self.reload_count += 1
+
+
 def test_runtime_controller_only_user_quit_closes_browser() -> None:
     controller = RuntimeController()
     assert controller.decide(RuntimeEvent.USER_QUIT) == RuntimeCommand.QUIT_BROWSER
@@ -94,6 +101,37 @@ async def test_reload_guard_blocks_ticket_page_reload() -> None:
     assert tab.reload_count == 0
     assert await guard.reload(tab, reason="recovery", recovery=True) is True
     assert tab.reload_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reload_guard_times_out_stalled_reload(monkeypatch) -> None:
+    monkeypatch.setattr(runtime_health, "runtime_log", lambda *_args, **_kwargs: None)
+    tab = _SlowReloadTab()
+    tab.target.url = "https://tixcraft.com/ticket/area/abc/1"
+    guard = ReloadGuard()
+
+    assert await guard.reload(tab, reason="leak", timeout_seconds=0.01) is False
+    assert tab.reload_count == 0
+
+
+def test_leak_watch_scheduler_pending_and_interval_guards() -> None:
+    config = {"advanced": {"run_mode": RunMode.LEAK_WATCH.value, "leak_refresh_interval_seconds": 6.5}}
+    url = "https://tixcraft.com/ticket/area/abc/1"
+    scheduler = LeakWatchScheduler()
+
+    assert scheduler.can_reload(config, url, now=100) == (True, "ready")
+    scheduler.mark_dom_scan_start()
+    assert scheduler.can_reload(config, url, now=101) == (False, "dom_scan_pending")
+    scheduler.mark_dom_scan_end()
+    scheduler.mark_area_click_pending(url)
+    assert scheduler.can_reload(config, url, now=scheduler.last_area_click_at + 1) == (False, "area_click_pending")
+    assert scheduler.can_reload(config, url, now=scheduler.last_area_click_at + 7) == (True, "ready")
+    scheduler.begin_reload_cycle(url)
+    assert scheduler.can_reload(config, url, now=110) == (False, "reload_pending")
+    scheduler.finish_reload_cycle(config, success=True)
+    assert scheduler.can_reload(config, url, now=scheduler.next_cycle_at - 1) == (False, "interval_wait")
+    scheduler.reset_for_recovery()
+    assert scheduler.can_reload(config, url, now=120) == (True, "ready")
 
 
 def test_page_classifier_core_tixcraft_pages() -> None:
@@ -212,15 +250,18 @@ async def test_tixcraft_soft_block_handler_waits_without_reload_and_resets_state
     async def false_check(_config=None):  # noqa: ANN001
         return False
 
-    async def fake_sleep(seconds: int) -> None:
+    async def fake_sleep_with_heartbeat(seconds: int, *_args, **_kwargs) -> str:  # noqa: ANN002, ANN003
         sleeps.append(seconds)
+        return "done"
 
     async def forbidden_reload(*_args, **_kwargs):  # noqa: ANN002, ANN003
         raise AssertionError("soft-block handler must not reload")
 
     monkeypatch.setattr(tixcraft_platform, "check_and_handle_pause", false_check)
     monkeypatch.setattr(tixcraft_platform, "check_and_handle_quit", false_check)
-    monkeypatch.setattr(tixcraft_platform.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(runtime_health, "sleep_with_heartbeat", fake_sleep_with_heartbeat)
+    monkeypatch.setattr(runtime_health, "touch_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_health, "runtime_log", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(tixcraft_platform, "guarded_reload", forbidden_reload)
     monkeypatch.setattr(tixcraft_platform, "_resolve_soft_block_wait_seconds", lambda *_args, **_kwargs: (1, True))
 
@@ -292,7 +333,8 @@ def test_notification_default_template_and_redaction() -> None:
         "活動：My Event\n"
         "票數：2\n"
         "區域： 特A區 (VIP PACKAGE)\n"
-        "排數：1️⃣7排17號\n"
+        "排數：\n"
+        "1️⃣7排17號\n"
         "2️⃣7排18號\n"
         "狀態：已進入結帳畫面，請立即付款！"
     )
@@ -312,6 +354,24 @@ def test_notification_custom_placeholders_and_fallbacks() -> None:
     assert format_seat_rows("訂單建立中﹍") == "訂單建立中﹍"
 
 
+def test_runtime_log_redacts_sensitive_values(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runtime_health.util, "get_app_root", lambda: str(tmp_path))
+    monkeypatch.setattr(runtime_health.util, "get_instance_id", lambda: "default")
+
+    runtime_health.runtime_log(
+        "[TEST] sensitive",
+        {"advanced": {"run_mode": "leak_watch"}},
+        current_url="https://tixcraft.com/ticket/area/x?TIXUISID=secret",
+        webhook="https://discord.com/api/webhooks/123/abc",
+    )
+
+    log_text = (tmp_path / "logs" / "runtime_default.log").read_text(encoding="utf-8")
+    assert "secret" not in log_text
+    assert "123/abc" not in log_text
+    assert "TIXUISID=***" in log_text
+    assert "https://discord.com/api/webhooks/***" in log_text
+
+
 def test_notification_order_pending_area_and_rows_are_separate() -> None:
     ctx = make_notification_context(
         platform="TixCraft",
@@ -327,7 +387,8 @@ def test_notification_order_pending_area_and_rows_are_separate() -> None:
         "活動：WESTLIFE 25：THE ANNIVERSARY WORLD TOUR\n"
         "票數：4\n"
         "區域： 特A區 (VIP PACKAGE)\n"
-        "排數：訂單建立中﹍\n"
+        "排數：\n"
+        "訂單建立中﹍\n"
         "狀態：訂單建立中﹍"
     )
 
@@ -423,7 +484,9 @@ def test_browser_args_for_chrome_edge_and_private_mode(tmp_path, monkeypatch) ->
     assert not any(item.startswith("--user-data-dir=") for item in private_args)
 
 
-def test_frozen_launcher_resolves_flat_and_split_layouts(tmp_path) -> None:
+def test_frozen_launcher_resolves_flat_and_split_layouts(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(util.platform, "system", lambda: "Windows")
+
     flat_root = tmp_path / "hunterX"
     flat_root.mkdir()
     flat_exe = flat_root / "nodriver_tixcraft.exe"

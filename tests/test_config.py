@@ -89,8 +89,8 @@ def test_settings_frontend_static_version_matches_release() -> None:
     html = Path("src/www/settings.html").read_text(encoding="utf-8")
     js = Path("src/www/settings.js").read_text(encoding="utf-8")
 
-    assert "HunterX (0.4.1)" in html
-    assert "HunterX (0.4.1)" in js
+    assert "HunterX (0.4.2)" in html
+    assert "HunterX (0.4.2)" in js
     assert "HunterX (0.2.1)" not in html
     assert "HunterX (0.2.1)" not in js
 
