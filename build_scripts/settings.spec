@@ -26,9 +26,9 @@ onnxruntime_pybind_spec = importlib.util.find_spec('onnxruntime.capi.onnxruntime
 if onnxruntime_pybind_spec and onnxruntime_pybind_spec.origin:
     onnxruntime_binaries.append((onnxruntime_pybind_spec.origin, 'onnxruntime/capi'))
 
-# playsound is imported lazily by util.py. Copy the single-file module and list
-# it as a hidden import without adding site-packages to pathex; PyInstaller
-# already searches its own environment and PyInstaller 7 rejects such entries.
+# playsound is imported lazily by util.py. Include the single-file module
+# without adding site-packages to pathex; PyInstaller 7 rejects foreign
+# environment paths there.
 playsound_spec = importlib.util.find_spec('playsound')
 playsound_datas = []
 if playsound_spec and playsound_spec.origin and playsound_spec.origin.endswith('.py'):
@@ -36,7 +36,7 @@ if playsound_spec and playsound_spec.origin and playsound_spec.origin.endswith('
 
 a = Analysis(
     [os.path.join(project_root, 'src', 'settings.py')],
-    pathex=[os.path.join(project_root, 'src')],
+    pathex=[],
     binaries=onnxruntime_binaries,
     datas=[
         (os.path.join(project_root, 'src', 'www'), 'www'),
@@ -84,6 +84,7 @@ exe = EXE(
     [],
     exclude_binaries=True,  # This enables folder mode
     name='settings',  # Output: settings.exe
+    contents_directory='_settings_internal',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

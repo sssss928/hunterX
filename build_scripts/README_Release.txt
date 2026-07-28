@@ -1,8 +1,8 @@
 ================================================================================
-                    Hunter - 使用說明
+                   HunterX 0.4.4 - 使用說明
 ================================================================================
 
-感謝您下載 Hunter 多平台搶票自動化系統！
+感謝您下載 HunterX 0.4.4 多平台搶票自動化系統！
 
 本系統支援以下票務平台：
   - TixCraft 拓元
@@ -19,7 +19,7 @@
 ================================================================================
 
 1. 解壓縮 ZIP 檔案
-    將 hunterX_windows_0.2.1.zip 解壓縮到任意目錄。
+    將 hunterX_windows_0.4.4.zip 解壓縮到任意目錄。
 
 2. 執行 settings.exe
    雙擊 settings.exe，會自動開啟瀏覽器顯示設定介面。
@@ -62,7 +62,8 @@ hunter/
 ├── nodriver_tixcraft.exe       搶票程式（ZenDriver）
 ├── settings.exe                 設定編輯器（Tornado Web）
 │
-├── _internal/                   依賴函式庫目錄（請勿刪除！）
+├── _nodriver_internal/          搶票程式專用依賴（請勿刪除！）
+├── _settings_internal/          設定程式專用依賴（請勿刪除！）
 │
 ├── assets/                      資源檔案
 │   ├── icons/                   圖示檔案
@@ -73,13 +74,13 @@ hunter/
 │   ├── settings.js              設定邏輯
 │   └── dist/                    Bootstrap, jQuery
 │
-├── settings.json                設定檔範本
+├── settings.json                首次執行後產生（不包含於發行 ZIP）
 ├── README_Release.txt           本說明文件
 └── CHANGELOG.md                 版本更新記錄
 
 【重要提醒】
-  _internal/ 資料夾包含所有執行檔共用的依賴函式庫。
-  請勿刪除或移動此資料夾，否則執行檔將無法運作！
+  _nodriver_internal/ 與 _settings_internal/ 分別包含兩個執行檔的依賴函式庫。
+  請勿刪除、合併或移動這兩個資料夾，否則對應的執行檔將無法運作！
 
 ================================================================================
                           首次執行步驟
@@ -112,7 +113,7 @@ Step 4: 監控執行
   👉 安裝與首次執行指南
      https://github.com/sssss928/hunterX/blob/main/guide/installation.md
   👉 基本設定教學
-     https://github.com/sssss928/hunterX/blob/main/guide/basic-settings.md
+     https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md
 
 ================================================================================
                           常見問題 FAQ
@@ -120,12 +121,13 @@ Step 4: 監控執行
 
 Q1: 執行檔點擊後沒有反應？
 A1: 請確認：
-    - _internal/ 資料夾與執行檔在同一目錄
+    - _nodriver_internal/ 與 _settings_internal/ 資料夾都和執行檔在同一目錄
     - 防毒軟體沒有阻擋執行檔
     - 使用「以系統管理員身分執行」
 
-Q2: 出現「找不到 python310.dll」錯誤？
-A2: _internal/ 資料夾被刪除或移動，請重新解壓縮 ZIP 檔案。
+Q2: 出現「找不到 python311.dll」錯誤？
+A2: 對應的 _nodriver_internal/ 或 _settings_internal/ 資料夾被刪除或移動，
+    請重新解壓縮 ZIP 檔案，且不要合併兩個資料夾。
 
 Q3: 首次執行很慢？
 A3: 正常現象，ZenDriver 首次執行會自動下載 Chrome 瀏覽器（約 100-200MB）。
@@ -186,7 +188,7 @@ Issue Tracker:
     https://github.com/sssss928/hunterX/blob/main/guide/installation.md
 
   - 基本設定教學（網址、票數、關鍵字設定）
-    https://github.com/sssss928/hunterX/blob/main/guide/basic-settings.md
+    https://github.com/sssss928/hunterX/blob/main/guide/settings-guide.md
 
   - 關鍵字與回退機制（理解搶票邏輯）
     https://github.com/sssss928/hunterX/blob/main/guide/keyword-mechanism.md

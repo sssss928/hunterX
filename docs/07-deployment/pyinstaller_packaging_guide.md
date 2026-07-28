@@ -49,7 +49,7 @@ git tag v2026.03.09
 git push private v2026.03.09
 
 # 4. GitHub Actions 自動執行（15-25 分鐘）
-# 前往 GitHub → Actions → Build and Release 查看進度
+# 前往 GitHub → Actions → Release 查看進度
 
 # 5. 驗證 Release
 # 前往 GitHub → Releases → 下載並測試 ZIP
@@ -174,7 +174,7 @@ jobs:
 **查看打包進度**：
 1. 前往 GitHub 倉庫
 2. 點擊 **Actions** 標籤
-3. 選擇 **Build and Release** workflow
+3. 選擇 **Release** workflow
 4. 查看執行狀態（約 15-25 分鐘）
 
 **驗證 Release**：

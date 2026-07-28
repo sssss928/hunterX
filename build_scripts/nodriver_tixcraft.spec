@@ -27,10 +27,8 @@ if onnxruntime_pybind_spec and onnxruntime_pybind_spec.origin:
     onnxruntime_binaries.append((onnxruntime_pybind_spec.origin, 'onnxruntime/capi'))
 
 # playsound is distributed as a single playsound.py module. Copy the module as
-# data and list it as a hidden import. Do not add the active environment's
-# site-packages directory to pathex: PyInstaller already searches its own
-# environment, and foreign-environment pathex entries are rejected in
-# PyInstaller 7.
+# data and keep it as a hidden import without adding site-packages to pathex;
+# PyInstaller 7 rejects foreign environment paths there.
 playsound_spec = importlib.util.find_spec('playsound')
 playsound_datas = []
 if playsound_spec and playsound_spec.origin and playsound_spec.origin.endswith('.py'):
@@ -108,6 +106,7 @@ exe = EXE(
     [],
     exclude_binaries=True,  # This enables folder mode
     name='nodriver_tixcraft',
+    contents_directory='_nodriver_internal',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
