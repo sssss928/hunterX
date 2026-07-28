@@ -179,13 +179,13 @@ jobs:
 
     steps:
       - name: Download Windows package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ needs.validate.outputs.artifact_name }}
           path: dist/release
 
       - name: Download source package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ needs.validate.outputs.source_artifact_name }}
           path: dist/release
