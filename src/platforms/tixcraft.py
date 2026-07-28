@@ -14,7 +14,12 @@ import random
 import re
 import time
 import traceback
+import unicodedata
+import uuid
 import webbrowser
+from dataclasses import dataclass, field
+from enum import Enum
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 try:
     import ddddocr
@@ -32,6 +37,7 @@ from action_ledger import ActionLedger
 from notification_context import clean_event_name, make_notification_context
 from page_classifier import PageClass, classify_page
 from reload_guard import guarded_reload
+from run_modes import get_effective_reload_interval, is_leak_watch_mode
 from submit_guard import SubmitGuard
 from nodriver_common import (
     check_and_handle_pause,
@@ -42,6 +48,7 @@ from nodriver_common import (
     nodriver_check_checkbox_enhanced,
     nodriver_current_url,
     nodriver_get_text_by_selector,
+    is_discord_notification_enabled,
     play_sound_while_ordering,
     send_discord_notification,
     send_telegram_notification,
@@ -85,6 +92,115 @@ __all__ = [
 
 # Module-level state (replaces global tixcraft_dict)
 _state = {}
+
+
+class TixCraftAttemptPhase(str, Enum):
+    AREA_READY = "area_ready"
+    AREA_SELECTED = "area_selected"
+    TICKET_FORM_ACTIVE = "ticket_form_active"
+    ORDER_PENDING = "order_pending"
+    CHECKOUT_REACHED = "checkout_reached"
+    RECOVERING_TO_AREA = "recovering_to_area"
+    CLOSED = "closed"
+
+
+class TixCraftAreaOutcome(str, Enum):
+    PAGE_NOT_READY = "page_not_ready"
+    DOM_SCAN_BUSY = "dom_scan_busy"
+    ZONE_MISSING = "zone_missing"
+    DOM_QUERY_FAILED = "dom_query_failed"
+    NO_AVAILABLE_AREA = "no_available_area"
+    CLICK_DISPATCHED = "click_dispatched"
+    CLICK_WAITING_NAVIGATION = "click_waiting_navigation"
+    CLICK_NOT_NAVIGATED = "click_not_navigated"
+    NAVIGATION_CONFIRMED = "navigation_confirmed"
+
+
+@dataclass(frozen=True)
+class TixCraftEventSnapshot:
+    """Canonical event identity captured before the protected purchase pages."""
+
+    origin: str
+    event_id: str
+    event_name: str
+    source: str
+    quality: int
+    captured_url: str
+    captured_page_class: PageClass
+    flow_generation: int
+    validated_at_monotonic: float = field(default_factory=time.monotonic)
+
+
+@dataclass(slots=True)
+class TixCraftPurchaseAttempt:
+    session_id: str
+    attempt_id: int
+    event_id: str = ""
+    game_id: str = ""
+    seat_area: str = ""
+    ticket_count: str = ""
+    area_url: str = ""
+    event_snapshot: TixCraftEventSnapshot | None = None
+    phase: TixCraftAttemptPhase = TixCraftAttemptPhase.AREA_READY
+    started_at: float = field(default_factory=time.time)
+    started_at_monotonic: float = field(default_factory=time.monotonic)
+    discord_stages: set[str] = field(default_factory=set)
+    auxiliary_stages: set[str] = field(default_factory=set)
+    checkout_fallback_sent: bool = False
+    checkout_seat_poll_started_at: float = 0.0
+    checkout_seat_poll_next_at: float = 0.0
+    checkout_seat_poll_exhausted: bool = False
+    metadata_retry_counts: dict[str, int] = field(default_factory=dict)
+    metadata_failure_stages: set[str] = field(default_factory=set)
+    delivery_retry_counts: dict[str, int] = field(default_factory=dict)
+    delivery_failure_stages: set[str] = field(default_factory=set)
+    ticket_count_confirmed: bool = False
+
+    def notification_id(self, stage: str) -> str:
+        return f"{self.session_id}:{self.attempt_id}:TixCraft:{stage}"
+
+
+@dataclass(frozen=True)
+class TixCraftPendingNavigation:
+    kind: str
+    source_url: str
+    target_url: str = ""
+    seat_area: str = ""
+    event_id: str = ""
+    game_id: str = ""
+    flow_generation: int = 0
+    token: int = 0
+    tab_identity: int = 0
+    started_at: float = 0.0
+    deadline: float = 0.0
+
+
+_TIXCRAFT_CHECKOUT_SEAT_FALLBACK = "未能讀取座位資料，請立即查看結帳頁"
+_TIXCRAFT_SEAT_READ_ATTEMPTS = 6
+_TIXCRAFT_SEAT_READ_INTERVAL_SECONDS = 0.12
+_TIXCRAFT_NOTIFICATION_METADATA_MAX_ATTEMPTS = 8
+_TIXCRAFT_NOTIFICATION_DELIVERY_REARM_ATTEMPTS = 2
+_TIXCRAFT_NOTIFICATION_DELIVERY_RETRY_SECONDS = 0.75
+_TIXCRAFT_DISCORD_STAGES = frozenset({"order_pending", "checkout_reached"})
+_TIXCRAFT_EVENT_METADATA_PAGES = frozenset(
+    {PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA}
+)
+_TIXCRAFT_EVENT_METADATA_RETRY_SECONDS = 0.5
+_TIXCRAFT_EVENT_CANONICAL_QUALITY = 90
+_TIXCRAFT_EVENT_METADATA_CACHE_CAPACITY = 64
+_TIXCRAFT_BLANK_PAGE_GRACE_SECONDS = 1.5
+_TIXCRAFT_RECOVERY_MIN_RELOAD_GUARD_SECONDS = 1.0
+_TIXCRAFT_EVALUATE_TIMEOUT_SECONDS = 0.75
+_TIXCRAFT_SOFT_BLOCK_NORMAL_PROBE_INTERVAL_SECONDS = 0.25
+_TIXCRAFT_CLICK_DISPATCH_TIMEOUT_SECONDS = 1.0
+_TIXCRAFT_SEAT_EVALUATE_TIMEOUT_SECONDS = 0.4
+_TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS = 20.0
+_TIXCRAFT_NAVIGATION_CONFIRMATION_DEFAULT_SECONDS = 3.0
+_TIXCRAFT_NAVIGATION_CONFIRMATION_MIN_SECONDS = 1.0
+_TIXCRAFT_NAVIGATION_CONFIRMATION_MAX_SECONDS = 10.0
+_TIXCRAFT_DIAGNOSTIC_LOG_INTERVAL_SECONDS = 1.0
+_TIXCRAFT_OPERATION_TIMEOUT = object()
+_TIXCRAFT_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def _parse_tixcraft_row_htmls(raw_value):
@@ -170,6 +286,8 @@ _TIXCRAFT_SOFT_BLOCK_SCOPE_HOSTS = (
     "tixcraft.com",
     "teamear.com",
     "indievox.com",
+    "ticketmaster.sg",
+    "ticketmaster.com",
 )
 
 _TIXCRAFT_SOFT_BLOCK_TEXT_MARKERS = (
@@ -196,13 +314,383 @@ def _is_serial_code_question(question_text):
 
 
 def _is_tixcraft_soft_block_scope(url):
-    url_lower = (url or "").lower()
-    return any(host in url_lower for host in _TIXCRAFT_SOFT_BLOCK_SCOPE_HOSTS)
+    try:
+        return _is_tixcraft_family_host(urlsplit(str(url or "")).hostname)
+    except ValueError:
+        return False
 
 
 def _is_tixcraft_soft_block_text(text):
     text_lower = re.sub(r"\s+", " ", str(text or "").lower())
     return any(marker in text_lower for marker in _TIXCRAFT_SOFT_BLOCK_TEXT_MARKERS)
+
+
+def _is_tixcraft_family_host(hostname):
+    host = str(hostname or "").lower().split(":", 1)[0].rstrip(".")
+    return any(host == root or host.endswith(f".{root}") for root in _TIXCRAFT_SOFT_BLOCK_SCOPE_HOSTS)
+
+
+def _normalize_tixcraft_area_url(value):
+    """Return a same-family, absolute /ticket/area/ URL or an empty string."""
+    text = unquote(str(value or "").strip())
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return ""
+    if parts.scheme.lower() not in {"http", "https"} or not _is_tixcraft_family_host(parts.hostname):
+        return ""
+    if not re.fullmatch(r"/ticket/area/[^/?#]+/[^/?#]+/?", parts.path, flags=re.IGNORECASE):
+        return ""
+    canonical_path = parts.path.rstrip("/")
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), canonical_path, "", "")
+    )
+
+
+def _normalize_tixcraft_entry_url(value):
+    """Return a safe, observed TixCraft activity route for controlled routing."""
+    text = unquote(str(value or "").strip())
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return ""
+    if parts.scheme.lower() not in {"http", "https"} or not _is_tixcraft_family_host(parts.hostname):
+        return ""
+    if not re.fullmatch(
+        r"/activity/(?:detail|game)/[^/?#]+/?",
+        parts.path,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+    return urlunsplit((parts.scheme.lower(), parts.netloc, parts.path, "", ""))
+
+
+def _tixcraft_route_key(value):
+    """Return a route identity that ignores query strings and fragments."""
+    try:
+        parts = urlsplit(str(value or ""))
+    except ValueError:
+        return ""
+    if not parts.scheme or not parts.netloc:
+        return ""
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc.lower(),
+            parts.path.rstrip("/") or "/",
+            "",
+            "",
+        )
+    )
+
+
+def _get_tixcraft_navigation_confirmation_seconds(config_dict):
+    interval = float(
+        get_effective_reload_interval(
+            config_dict,
+            _TIXCRAFT_NAVIGATION_CONFIRMATION_DEFAULT_SECONDS,
+        )
+    )
+    if interval <= 0:
+        interval = _TIXCRAFT_NAVIGATION_CONFIRMATION_DEFAULT_SECONDS
+    return min(
+        _TIXCRAFT_NAVIGATION_CONFIRMATION_MAX_SECONDS,
+        max(_TIXCRAFT_NAVIGATION_CONFIRMATION_MIN_SECONDS, interval),
+    )
+
+
+def _get_cached_tab_url(tab):
+    try:
+        value = getattr(getattr(tab, "target", None), "url", "") or ""
+    except Exception:
+        return ""
+    return value if isinstance(value, str) else ""
+
+
+def _runtime_log_rate_limited(
+    state_key,
+    event,
+    config_dict,
+    *,
+    now=None,
+    interval_seconds=_TIXCRAFT_DIAGNOSTIC_LOG_INTERVAL_SECONDS,
+    identity="",
+    **fields,
+):
+    """Emit repetitive hot-loop diagnostics at most once per interval."""
+    current = time.monotonic() if now is None else float(now)
+    previous = _state.get(state_key)
+    if isinstance(previous, tuple) and len(previous) == 2:
+        previous_identity, previous_at = previous
+    else:
+        previous_identity, previous_at = "", 0.0
+    if previous_identity == identity and current - float(previous_at or 0.0) < interval_seconds:
+        return False
+    _state[state_key] = (identity, current)
+    runtime_health.runtime_log(event, config_dict, **fields)
+    return True
+
+
+def _clear_tixcraft_recovery_scan_guard():
+    _state["soft_block_recovery_scan_pending"] = False
+    _state["soft_block_recovery_landing_url"] = ""
+    _state["soft_block_recovery_scan_deadline"] = 0.0
+
+
+def _is_tixcraft_blank_page_snapshot(snapshot):
+    if not isinstance(snapshot, dict):
+        return False
+    ready_state = str(snapshot.get("readyState", "")).lower()
+    if ready_state not in {"interactive", "complete"} or not snapshot.get("hasBody", False):
+        return False
+    if snapshot.get("hasKnownContent", False):
+        return False
+    body_text = _TIXCRAFT_WHITESPACE_RE.sub(
+        "",
+        str(snapshot.get("bodyText", "")),
+    )
+    try:
+        element_count = int(snapshot.get("elementCount", 0) or 0)
+    except (TypeError, ValueError):
+        element_count = 999
+    return len(body_text) <= 8 and element_count <= 25
+
+
+def _update_tixcraft_blank_page_state(url, snapshot, now=None, grace_seconds=None):
+    """Require a stable blank DOM before classifying a white screen as blocked."""
+    now = time.monotonic() if now is None else float(now)
+    grace_seconds = (
+        _TIXCRAFT_BLANK_PAGE_GRACE_SECONDS
+        if grace_seconds is None
+        else max(0.0, float(grace_seconds))
+    )
+    if not _is_tixcraft_soft_block_scope(url) or not _is_tixcraft_blank_page_snapshot(snapshot):
+        _state["soft_block_blank_since"] = 0.0
+        _state["soft_block_blank_url"] = ""
+        return False
+
+    normalized_url = _normalize_tixcraft_area_url(url) or str(url or "")
+    if _state.get("soft_block_blank_url") != normalized_url:
+        _state["soft_block_blank_url"] = normalized_url
+        _state["soft_block_blank_since"] = now
+        return grace_seconds <= 0
+    blank_since = float(_state.get("soft_block_blank_since", now) or now)
+    return now - blank_since >= grace_seconds
+
+
+def _update_tixcraft_probe_failure_state(
+    url,
+    probe_failed,
+    now=None,
+    grace_seconds=None,
+    minimum_failures=2,
+):
+    """Classify consecutive health-probe timeouts on a known family URL."""
+    now = time.monotonic() if now is None else float(now)
+    grace_seconds = (
+        _TIXCRAFT_BLANK_PAGE_GRACE_SECONDS
+        if grace_seconds is None
+        else max(0.0, float(grace_seconds))
+    )
+    normalized_url = _normalize_tixcraft_area_url(url) or str(url or "")
+    if (
+        not probe_failed
+        or not _is_tixcraft_soft_block_scope(url)
+        or not normalized_url
+    ):
+        _state["soft_block_probe_failure_since"] = 0.0
+        _state["soft_block_probe_failure_url"] = ""
+        _state["soft_block_probe_failure_count"] = 0
+        return False
+
+    if _state.get("soft_block_probe_failure_url") != normalized_url:
+        _state["soft_block_probe_failure_url"] = normalized_url
+        _state["soft_block_probe_failure_since"] = now
+        _state["soft_block_probe_failure_count"] = 1
+        return False
+
+    failure_count = int(_state.get("soft_block_probe_failure_count", 0) or 0) + 1
+    _state["soft_block_probe_failure_count"] = failure_count
+    failure_since = float(_state.get("soft_block_probe_failure_since", now) or now)
+    return (
+        failure_count >= max(2, int(minimum_failures))
+        and now - failure_since >= grace_seconds
+    )
+
+
+async def _read_tixcraft_page_health(tab, config_dict=None):
+    try:
+        result = await runtime_health.evaluate_with_timeout(
+            tab,
+            r"""
+                (function() {
+                    try {
+                        if (
+                            typeof action !== "undefined" &&
+                            action === "block" &&
+                            typeof rr !== "undefined"
+                        ) {
+                            return JSON.stringify({
+                                blocked: true,
+                                kind: "eps_js",
+                                rr: rr || "",
+                                client_ip: typeof client_ip !== "undefined" ? client_ip : ""
+                            });
+                        }
+                    } catch(e) {}
+                    const body = document.body;
+                    const orderProcessingSelectors = [
+                        '#loadingmap',
+                        '#loading.order-processing',
+                        '.order-processing .spinner-border',
+                        '.order-processing .spinner-grow',
+                        '.loading-overlay.order-processing',
+                        '[data-order-processing][aria-busy="true"]'
+                    ];
+                    const knownOrderProcessing = Boolean(
+                        body && orderProcessingSelectors.some(selector =>
+                            Array.from(body.querySelectorAll(selector)).some(el => {
+                                const style = window.getComputedStyle(el);
+                                const rect = el.getBoundingClientRect();
+                                return style.display !== 'none' &&
+                                    style.visibility !== 'hidden' &&
+                                    rect.width > 0 &&
+                                    rect.height > 0;
+                            })
+                        )
+                    );
+                    const viewportWidth = Math.max(
+                        document.documentElement ? document.documentElement.clientWidth : 0,
+                        window.innerWidth || 0
+                    );
+                    const viewportHeight = Math.max(
+                        document.documentElement ? document.documentElement.clientHeight : 0,
+                        window.innerHeight || 0
+                    );
+                    let whiteOverlay = false;
+                    if (body && viewportWidth > 0 && viewportHeight > 0) {
+                        const candidate = document.elementFromPoint(
+                            Math.floor(viewportWidth / 2),
+                            Math.floor(viewportHeight / 2)
+                        );
+                        if (
+                            candidate &&
+                            candidate !== body &&
+                            candidate !== document.documentElement
+                        ) {
+                            const style = window.getComputedStyle(candidate);
+                            const rect = candidate.getBoundingClientRect();
+                            const color = (style.backgroundColor || '').match(
+                                /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?/
+                            );
+                            const nearlyWhite = color &&
+                                Number(color[1]) >= 245 &&
+                                Number(color[2]) >= 245 &&
+                                Number(color[3]) >= 245 &&
+                                Number(color[4] === undefined ? 1 : color[4]) >= 0.9;
+                            const coversViewport =
+                                rect.width >= viewportWidth * 0.95 &&
+                                rect.height >= viewportHeight * 0.95 &&
+                                rect.left <= viewportWidth * 0.025 &&
+                                rect.top <= viewportHeight * 0.025;
+                            const fixedLayer = ['fixed', 'absolute', 'sticky'].includes(
+                                style.position
+                            );
+                            const overlayText = (candidate.innerText || '')
+                                .replace(/\s+/g, '');
+                            whiteOverlay = Boolean(
+                                nearlyWhite &&
+                                coversViewport &&
+                                fixedLayer &&
+                                overlayText.length <= 8 &&
+                                style.display !== 'none' &&
+                                style.visibility !== 'hidden'
+                            );
+                        }
+                    }
+                    const knownAreaContent = Boolean(
+                        body && body.querySelector('.zone, [data-area-name]')
+                    );
+                    const knownActivityContent = Boolean(
+                        body && body.querySelector('.activity-info, .game-title')
+                    );
+                    const knownTicketContent = Boolean(
+                        body && body.querySelector('#TicketForm, .ticket-info')
+                    );
+                    const knownOrderContent = Boolean(
+                        body && body.querySelector(
+                            '.order-info, table.ticket-list, table.order-list'
+                        )
+                    );
+                    const hasKnownContent = Boolean(
+                        knownAreaContent ||
+                        knownActivityContent ||
+                        knownTicketContent ||
+                        knownOrderContent
+                    );
+                    if (hasKnownContent) {
+                        return JSON.stringify({
+                            blocked: false,
+                            readyState: document.readyState || '',
+                            hasBody: true,
+                            bodyText: '',
+                            title: document.title || '',
+                            elementCount: 1,
+                            hasKnownContent: true,
+                            knownAreaContent,
+                            knownActivityContent,
+                            knownTicketContent,
+                            knownOrderContent,
+                            whiteOverlay,
+                            knownOrderProcessing
+                        });
+                    }
+                    return JSON.stringify({
+                        blocked: false,
+                        readyState: document.readyState || '',
+                        hasBody: !!body,
+                        bodyText: body ? (body.innerText || '').slice(0, 5000) : '',
+                        title: document.title || '',
+                        elementCount: body ? body.querySelectorAll('*').length : 0,
+                        hasKnownContent,
+                        knownAreaContent,
+                        knownActivityContent,
+                        knownTicketContent,
+                        knownOrderContent,
+                        whiteOverlay,
+                        knownOrderProcessing
+                    });
+                })()
+            """,
+            config_dict,
+            timeout_seconds=_TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+            reason="SOFT_BLOCK_PAGE_HEALTH",
+            default={"probeFailed": True},
+            log_success=False,
+        )
+        result = util.parse_nodriver_result(result)
+        if isinstance(result, str):
+            try:
+                parsed = json.loads(result)
+            except Exception:
+                return {
+                    "readyState": "complete",
+                    "hasBody": True,
+                    "bodyText": result,
+                    "title": "",
+                    "elementCount": 1,
+                    "hasKnownContent": False,
+                }
+            return parsed if isinstance(parsed, dict) else {}
+        return result if isinstance(result, dict) else {}
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return {"probeFailed": True}
 
 
 def _parse_tixcraft_soft_block_delay(config_dict):
@@ -238,134 +726,322 @@ def _resolve_soft_block_wait_seconds(config_dict, scope_url, default_wait_second
     return default_wait_seconds, False
 
 
-async def _read_page_text_for_soft_block(tab):
-    try:
-        result = await runtime_health.evaluate_with_timeout(tab, '''
-            (function() {
-                const title = document.title || '';
-                const body = document.body && document.body.innerText || '';
-                return JSON.stringify({
-                    title: title,
-                    bodyText: body.slice(0, 5000)
-                });
-            })()
-        ''', reason="SOFT_BLOCK_TEXT_READ")
-        result = util.parse_nodriver_result(result)
-        if isinstance(result, str):
-            try:
-                result = json.loads(result)
-            except Exception:
-                return result
-        if isinstance(result, dict):
-            return f"{result.get('title', '')}\n{result.get('bodyText', '')}"
-    except Exception:
-        pass
-    return ""
-
-
 async def _detect_tixcraft_soft_block(tab, url, config_dict=None):
     """Detect TixCraft-family soft-block pages without taking recovery action."""
-    try:
-        result_json = await runtime_health.evaluate_with_timeout(tab, '''
-            (function() {
-                try {
-                    if (typeof action !== "undefined" && action === "block" && typeof rr !== "undefined") {
-                        return JSON.stringify({
-                            blocked: true,
-                            kind: "eps_js",
-                            rr: rr || "",
-                            client_ip: typeof client_ip !== "undefined" ? client_ip : ""
-                        });
-                    }
-                } catch(e) {}
-                return JSON.stringify({blocked: false, kind: "", rr: "", client_ip: ""});
-            })()
-        ''', config_dict, reason="SOFT_BLOCK_JS_READ")
-        result_json = util.parse_nodriver_result(result_json)
-        result = json.loads(result_json) if isinstance(result_json, str) else result_json
-        if isinstance(result, dict) and result.get("blocked", False):
+    if not _is_tixcraft_soft_block_scope(url):
+        _update_tixcraft_blank_page_state(url, {})
+        _update_tixcraft_probe_failure_state(url, False)
+        _state["soft_block_known_good_url"] = ""
+        _state["soft_block_known_good_at"] = 0.0
+        return {"blocked": False, "health_confirmed": True}
+
+    route_key = _tixcraft_route_key(url)
+    now = time.monotonic()
+    if (
+        route_key
+        and _state.get("soft_block_known_good_url") == route_key
+        and now - float(_state.get("soft_block_known_good_at", 0.0) or 0.0)
+        < _TIXCRAFT_SOFT_BLOCK_NORMAL_PROBE_INTERVAL_SECONDS
+    ):
+        return {"blocked": False, "health_confirmed": True}
+
+    snapshot = await _read_tixcraft_page_health(tab, config_dict)
+    if snapshot.get("blocked", False):
+        _state["soft_block_known_good_url"] = ""
+        _state["soft_block_known_good_at"] = 0.0
+        return {
+            "blocked": True,
+            "kind": snapshot.get("kind") or "eps_js",
+            "original_url": snapshot.get("rr", "") or "",
+            "client_ip": snapshot.get("client_ip", "") or "unknown",
+        }
+    if snapshot.get("probeFailed", False):
+        _state["soft_block_known_good_url"] = ""
+        _state["soft_block_known_good_at"] = 0.0
+        if _update_tixcraft_probe_failure_state(url, True):
             return {
                 "blocked": True,
-                "kind": result.get("kind") or "eps_js",
-                "original_url": result.get("rr", "") or "",
-                "client_ip": result.get("client_ip", "") or "unknown",
+                "kind": "health_probe_timeout",
+                "original_url": "",
+                "client_ip": "unknown",
             }
-    except Exception:
-        pass
-
-    if not _is_tixcraft_soft_block_scope(url):
-        return {"blocked": False}
-
-    page_text = await _read_page_text_for_soft_block(tab)
+        return {
+            "blocked": False,
+            "health_confirmed": False,
+            "inconclusive": True,
+        }
+    _update_tixcraft_probe_failure_state(url, False)
+    if snapshot.get("whiteOverlay") and not snapshot.get("knownOrderProcessing"):
+        # A viewport-covering white overlay can hide an otherwise healthy DOM.
+        # Normalize this rare case once here so the normal-page blank classifier
+        # keeps its v0.4.3 fast path and both subsequent blank checks agree.
+        snapshot = dict(snapshot)
+        snapshot["bodyText"] = ""
+        snapshot["elementCount"] = 0
+        snapshot["hasKnownContent"] = False
+    page_text = f"{snapshot.get('title', '')}\n{snapshot.get('bodyText', '')}"
     if _is_tixcraft_soft_block_text(page_text):
+        _state["soft_block_known_good_url"] = ""
+        _state["soft_block_known_good_at"] = 0.0
+        _state["soft_block_blank_since"] = 0.0
+        _state["soft_block_blank_url"] = ""
         return {
             "blocked": True,
             "kind": "text_marker",
             "original_url": "",
             "client_ip": "unknown",
         }
+    blank_candidate = _is_tixcraft_blank_page_snapshot(snapshot)
+    if _update_tixcraft_blank_page_state(url, snapshot):
+        _state["soft_block_known_good_url"] = ""
+        _state["soft_block_known_good_at"] = 0.0
+        return {
+            "blocked": True,
+            "kind": "stable_blank",
+            "original_url": "",
+            "client_ip": "unknown",
+        }
+    if blank_candidate:
+        return {
+            "blocked": False,
+            "health_confirmed": False,
+            "inconclusive": True,
+        }
 
-    return {"blocked": False}
+    if snapshot.get("hasKnownContent", False) and route_key:
+        _state["soft_block_known_good_url"] = route_key
+        _state["soft_block_known_good_at"] = now
+    else:
+        _state["soft_block_known_good_url"] = ""
+        _state["soft_block_known_good_at"] = 0.0
+    health_confirmed = _is_tixcraft_recovery_health_confirmed(snapshot)
+    return {
+        "blocked": False,
+        "health_confirmed": health_confirmed,
+        "inconclusive": not health_confirmed,
+    }
 
 
 def _get_tixcraft_soft_block_recovery_url(config_dict, current_url="", original_url=""):
     candidates = (
         _state.get("last_valid_area_url", ""),
         original_url,
+        _state.get("recent_area_route_url", ""),
         current_url,
         (config_dict or {}).get("homepage", ""),
     )
     for candidate in candidates:
-        candidate = str(candidate or "").strip()
-        if candidate:
-            return candidate
+        area_url = _normalize_tixcraft_area_url(candidate)
+        if area_url:
+            return area_url
     return ""
 
 
+def _get_tixcraft_controlled_routing_url(config_dict):
+    """Return the configured activity route when no real area URL was observed."""
+    return _normalize_tixcraft_entry_url((config_dict or {}).get("homepage", ""))
+
+
+def _mark_tixcraft_recovery_landed(config_dict, recovery_url, now=None):
+    landed_at = time.monotonic() if now is None else float(now)
+    interval = max(
+        _TIXCRAFT_RECOVERY_MIN_RELOAD_GUARD_SECONDS,
+        float(get_effective_reload_interval(config_dict, 0.0)),
+    )
+    _state["soft_block_recovery_landing_url"] = recovery_url
+    _state["soft_block_recovery_landed_at"] = landed_at
+    _state["soft_block_recovery_scan_pending"] = True
+    _state["soft_block_recovery_scan_deadline"] = landed_at + interval
+    _state["soft_block_blank_since"] = 0.0
+    _state["soft_block_blank_url"] = ""
+    _state["soft_block_probe_failure_since"] = 0.0
+    _state["soft_block_probe_failure_url"] = ""
+    _state["soft_block_probe_failure_count"] = 0
+    _state["soft_block_known_good_url"] = ""
+    _state["soft_block_known_good_at"] = 0.0
+    _state["tixcraft_area_reload_url"] = recovery_url
+    _state["tixcraft_area_reload_next_at"] = landed_at + interval
+    if "leak_scheduler" in _state:
+        _state["leak_scheduler"].mark_recovery_landed(config_dict, now=landed_at)
+
+
+def _clear_tixcraft_soft_block_backoff():
+    _state["soft_block_phase"] = ""
+    _state["soft_block_backoff_until"] = 0.0
+    _state["soft_block_recovery_retry_at"] = 0.0
+    _state["ip_block_until"] = 0.0
+
+
+def _defer_tixcraft_soft_block_recovery(now=None):
+    current = time.monotonic() if now is None else float(now)
+    _state["soft_block_phase"] = "recovering"
+    _state["soft_block_recovery_retry_at"] = current + 1.0
+
+
+def _is_tixcraft_recovery_health_confirmed(snapshot, expected_page=None):
+    if not isinstance(snapshot, dict):
+        return False
+    if snapshot.get("probeFailed") or snapshot.get("blocked"):
+        return False
+    if snapshot.get("whiteOverlay") and not snapshot.get("knownOrderProcessing"):
+        return False
+    ready_state = str(snapshot.get("readyState", "")).lower()
+    if ready_state not in {"interactive", "complete"} or not snapshot.get("hasBody"):
+        return False
+    page_text = f"{snapshot.get('title', '')}\n{snapshot.get('bodyText', '')}"
+    if _is_tixcraft_soft_block_text(page_text):
+        return False
+    if _is_tixcraft_blank_page_snapshot(snapshot):
+        return False
+    # Recovery must prove a route-specific TixCraft DOM marker. A cached target
+    # URL can update before the renderer replaces the previous document, so a
+    # ticket-form marker cannot confirm an /area/ recovery (and vice versa).
+    if expected_page is not None:
+        try:
+            page_class = PageClass(expected_page)
+        except (TypeError, ValueError):
+            return False
+        marker_by_page = {
+            PageClass.AREA: "knownAreaContent",
+            PageClass.ACTIVITY: "knownActivityContent",
+            PageClass.DATE: "knownActivityContent",
+            PageClass.TICKET: "knownTicketContent",
+            PageClass.ORDER: "knownOrderContent",
+            PageClass.CHECKOUT: "knownOrderContent",
+            PageClass.PAYMENT: "knownOrderContent",
+        }
+        marker = marker_by_page.get(page_class)
+        if marker is None:
+            return False
+        return bool(snapshot.get(marker))
+    # Generic soft-block detection only needs proof of any known TixCraft
+    # document. Arbitrary non-empty 403/WAF/error HTML is never sufficient.
+    return bool(snapshot.get("hasKnownContent"))
+
+
 async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detection=None):
+    if _state.get("soft_block_recovery_in_progress", False):
+        return True
+
     debug = util.create_debug_logger(config_dict)
     detection = detection or {"kind": "unknown", "original_url": "", "client_ip": "unknown"}
     original_url = detection.get("original_url", "") or ""
-    scope_url = original_url or current_url
+    scope_url = current_url if _is_tixcraft_soft_block_scope(current_url) else original_url
     wait_seconds, is_custom_delay = _resolve_soft_block_wait_seconds(config_dict, scope_url)
     kind = detection.get("kind", "unknown")
-    client_ip = detection.get("client_ip", "unknown")
+    _state["soft_block_recovery_in_progress"] = True
+    try:
+        _set_tixcraft_attempt_phase(TixCraftAttemptPhase.RECOVERING_TO_AREA)
+        _reset_tixcraft_submit_state()
+        _reset_tixcraft_area_retry_state()
 
-    _reset_tixcraft_submit_state()
-    _reset_tixcraft_area_retry_state()
-
-    if kind == "text_marker":
-        debug.log(f"[EPS BLOCK] Soft-block page detected by text marker; waiting {wait_seconds}s")
-    elif is_custom_delay:
+        if kind == "text_marker":
+            debug.log(f"[EPS BLOCK] Soft-block page detected by text marker; waiting {wait_seconds}s")
+        elif kind == "stable_blank":
+            debug.log(f"[EPS BLOCK] Stable blank/white page detected; waiting {wait_seconds}s")
+        elif kind == "health_probe_timeout":
+            debug.log(
+                f"[EPS BLOCK] Page health probe repeatedly timed out; waiting {wait_seconds}s"
+            )
+        elif is_custom_delay:
+            debug.log(f"[EPS BLOCK] Soft block detected; using configured delay: {wait_seconds}s")
+        else:
+            debug.log(f"[EPS BLOCK] Soft block detected; using default delay: {wait_seconds}s before retry")
         debug.log(
-            f"[EPS BLOCK] IP blocked (IP: {client_ip}), using custom TixCraft soft-block delay: {wait_seconds}s"
+            "[EPS BLOCK] Automation is backing off; browser remains open and no page request will run during this wait"
         )
-    else:
-        debug.log(f"[EPS BLOCK] IP blocked (IP: {client_ip}), using default delay: {wait_seconds}s before retry")
-    debug.log("[EPS BLOCK] Automation is backing off; browser remains open and no page refresh will run during this wait")
 
-    _state["ip_block_until"] = time.time() + wait_seconds
-    wait_result = await runtime_health.sleep_with_heartbeat(
-        wait_seconds,
-        config_dict,
-        reason="SOFT_BLOCK",
-        chunk_seconds=10,
-        stop_checker=check_and_handle_pause,
-        quit_checker=check_and_handle_quit,
-    )
-    if wait_result == "quit":
-        debug.log("[EPS BLOCK] Quit requested during soft-block wait; returning control to main loop")
-        return True
-    if wait_result == "stop":
-        debug.log("[EPS BLOCK] Automation stopped/paused during soft-block wait; browser remains open")
-        return True
+        now = time.monotonic()
+        backoff_until = float(
+            _state.get("soft_block_backoff_until", 0.0) or 0.0
+        )
+        if backoff_until <= 0:
+            backoff_until = now + wait_seconds
+            _state["soft_block_backoff_until"] = backoff_until
+        _state["soft_block_phase"] = "backoff"
+        _state["ip_block_until"] = backoff_until
+        remaining_wait = max(0.0, backoff_until - now)
+        if remaining_wait > 0:
+            wait_result = await runtime_health.sleep_with_heartbeat(
+                remaining_wait,
+                config_dict,
+                reason="SOFT_BLOCK",
+                chunk_seconds=10,
+                stop_checker=check_and_handle_pause,
+                quit_checker=check_and_handle_quit,
+            )
+            if wait_result == "quit":
+                debug.log("[EPS BLOCK] Quit requested during soft-block wait; returning control to main loop")
+                return True
+            if wait_result == "stop":
+                debug.log("[EPS BLOCK] Automation stopped/paused during soft-block wait; browser remains open")
+                return True
 
-    _state["ip_block_until"] = 0
-    recovery_url = _get_tixcraft_soft_block_recovery_url(config_dict, current_url, original_url)
-    if recovery_url:
-        debug.log(f"[EPS BLOCK] Soft-block wait finished, navigating back to: {recovery_url}")
+        _state["ip_block_until"] = 0
+        _state["soft_block_phase"] = "recovering"
+        recovery_url = _get_tixcraft_soft_block_recovery_url(config_dict, current_url, original_url)
+        if not recovery_url:
+            routing_url = _get_tixcraft_controlled_routing_url(config_dict)
+            if not routing_url:
+                debug.log(
+                    "[EPS BLOCK] No observed /ticket/area/ URL or safe configured activity route is available; "
+                    "navigation skipped"
+                )
+                return True
+            debug.log(
+                "[EPS BLOCK] No area route was observed before the block; resuming once through the configured "
+                "activity route"
+            )
+            try:
+                routed = await runtime_health.guarded_get(
+                    tab,
+                    routing_url,
+                    config_dict,
+                    reason="SOFT_BLOCK_CONTROLLED_ROUTING",
+                )
+            except Exception as exc:
+                debug.log(
+                    f"[EPS BLOCK] Controlled activity-route recovery failed: {type(exc).__name__}"
+                )
+                _defer_tixcraft_soft_block_recovery()
+            else:
+                ready = await runtime_health.wait_for_interactive_ready(
+                    tab,
+                    config_dict,
+                )
+                landed_target_url = _get_cached_tab_url(tab)
+                route_matches = (
+                    _tixcraft_route_key(landed_target_url)
+                    == _tixcraft_route_key(routing_url)
+                )
+                recovery_snapshot = await _read_tixcraft_page_health(
+                    tab,
+                    config_dict,
+                )
+                if (
+                    not ready
+                    or not route_matches
+                    or not _is_tixcraft_recovery_health_confirmed(
+                        recovery_snapshot,
+                        classify_page(routing_url),
+                    )
+                ):
+                    runtime_health.runtime_log(
+                        "[EPS BLOCK] controlled_routing_not_confirmed",
+                        config_dict,
+                        expected_url=routing_url,
+                        current_url=landed_target_url,
+                        guarded_result=bool(routed),
+                        interactive=bool(ready),
+                    )
+                    _defer_tixcraft_soft_block_recovery()
+                else:
+                    _clear_tixcraft_soft_block_backoff()
+            return True
+
+        debug.log(f"[EPS BLOCK] Soft-block wait finished, navigating once to area: {recovery_url}")
         try:
-            await runtime_health.guarded_get(
+            navigated = await runtime_health.guarded_get(
                 tab,
                 recovery_url,
                 config_dict,
@@ -373,9 +1049,52 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
             )
         except Exception as exc:
             debug.log(f"[EPS BLOCK] Soft-block recovery navigation failed: {exc}")
-    else:
-        debug.log("[EPS BLOCK] Soft-block wait finished but no recovery URL was available")
-    return True
+            _defer_tixcraft_soft_block_recovery()
+            return True
+        ready = await runtime_health.wait_for_interactive_ready(tab, config_dict)
+        landed_target_url = _get_cached_tab_url(tab)
+        if _normalize_tixcraft_area_url(landed_target_url) != recovery_url:
+            runtime_health.runtime_log(
+                "[EPS BLOCK] recovery_redirected",
+                config_dict,
+                expected_url=recovery_url,
+                current_url=landed_target_url,
+                guarded_result=bool(navigated),
+            )
+            _defer_tixcraft_soft_block_recovery()
+            return True
+        if not ready:
+            runtime_health.runtime_log(
+                "[EPS BLOCK] recovery_not_interactive",
+                config_dict,
+                current_url=recovery_url,
+            )
+            _defer_tixcraft_soft_block_recovery()
+            return True
+        recovery_snapshot = await _read_tixcraft_page_health(tab, config_dict)
+        if not _is_tixcraft_recovery_health_confirmed(
+            recovery_snapshot,
+            PageClass.AREA,
+        ):
+            runtime_health.runtime_log(
+                "[EPS BLOCK] recovery_document_not_confirmed",
+                config_dict,
+                current_url=recovery_url,
+                guarded_result=bool(navigated),
+            )
+            _defer_tixcraft_soft_block_recovery()
+            return True
+        _mark_tixcraft_recovery_landed(config_dict, recovery_url)
+        _clear_tixcraft_soft_block_backoff()
+        runtime_health.runtime_log(
+            "[EPS BLOCK] recovery_landed",
+            config_dict,
+            current_url=recovery_url,
+            interactive_ready=bool(ready),
+        )
+        return True
+    finally:
+        _state["soft_block_recovery_in_progress"] = False
 
 
 def _process_queue_it_state(url, state, current_time):
@@ -455,6 +1174,685 @@ def _record_action(name, value=""):
         pass
 
 
+def _get_tixcraft_purchase_attempt():
+    attempt = _state.get("purchase_attempt")
+    return attempt if isinstance(attempt, TixCraftPurchaseAttempt) else None
+
+
+def _close_tixcraft_purchase_attempt(reason="closed"):
+    attempt = _get_tixcraft_purchase_attempt()
+    if attempt is None:
+        return
+    attempt.phase = TixCraftAttemptPhase.CLOSED
+    _record_action("attempt_closed", f"{attempt.attempt_id}:{reason}")
+    _state["purchase_attempt"] = None
+    _state["last_ticket_count"] = ""
+    _state["last_ticket_count_confirmed"] = False
+    _state["notification_submit_started_at"] = 0.0
+    _state["notification_order_probe_next_at"] = 0.0
+
+
+def _begin_tixcraft_purchase_attempt(trigger, url="", seat_area="", force_new=False):
+    event_id = _state.get("current_event_id", "") or _extract_tixcraft_event_id(url)
+    game_id = _state.get("current_game_id", "") or _extract_tixcraft_game_id(url)
+    event_snapshot = _get_current_tixcraft_event_snapshot(event_id=event_id)
+    if (
+        event_snapshot is not None
+        and event_snapshot.quality < _TIXCRAFT_EVENT_CANONICAL_QUALITY
+    ):
+        # A document title is useful as a fallback, but it remains upgradeable
+        # until the first notification for this purchase attempt is composed.
+        event_snapshot = None
+    current = _get_tixcraft_purchase_attempt()
+    if current is not None and force_new:
+        _close_tixcraft_purchase_attempt("forced_new_attempt")
+        current = None
+    if current is not None and not force_new and current.phase != TixCraftAttemptPhase.CLOSED:
+        same_identity = current.event_id == event_id and current.game_id == game_id
+        same_area_click = (
+            trigger == "area_click"
+            and current.area_url == url
+            and current.phase == TixCraftAttemptPhase.AREA_SELECTED
+        )
+        if same_identity and (trigger != "area_click" or same_area_click):
+            if seat_area and not current.seat_area:
+                current.seat_area = seat_area
+            if current.event_snapshot is None and event_snapshot is not None:
+                current.event_snapshot = event_snapshot
+            return current
+        _close_tixcraft_purchase_attempt("superseded")
+
+    sequence = int(_state.get("attempt_sequence", 0) or 0) + 1
+    _state["attempt_sequence"] = sequence
+    session_id = str(_state.get("notification_session_id", "") or uuid.uuid4().hex)
+    _state["notification_session_id"] = session_id
+    attempt = TixCraftPurchaseAttempt(
+        session_id=session_id,
+        attempt_id=sequence,
+        event_id=event_id,
+        game_id=game_id,
+        seat_area=_clean_tixcraft_area_name(seat_area),
+        area_url=_normalize_tixcraft_area_url(url),
+        event_snapshot=event_snapshot,
+        phase=(
+            TixCraftAttemptPhase.AREA_SELECTED
+            if trigger == "area_click"
+            else TixCraftAttemptPhase.TICKET_FORM_ACTIVE
+        ),
+    )
+    _state["purchase_attempt"] = attempt
+    _state["last_ticket_count"] = ""
+    _state["last_ticket_count_confirmed"] = False
+    _state["notified_order_pending"] = False
+    _state["notified_checkout_reached"] = False
+    _state["is_popup_checkout"] = False
+    _state["played_sound_order"] = False
+    _state["notification_retry_at"] = {}
+    _record_action("attempt_started", f"{sequence}:{trigger}")
+    return attempt
+
+
+def _set_tixcraft_attempt_phase(phase):
+    attempt = _get_tixcraft_purchase_attempt()
+    if attempt is not None:
+        attempt.phase = TixCraftAttemptPhase(phase)
+
+
+def _track_tixcraft_attempt_page(page_class, url):
+    previous = _state.get("attempt_last_page_class", "")
+    current = PageClass(page_class)
+    if current != PageClass.AREA:
+        _clear_tixcraft_recovery_scan_guard()
+    if current == PageClass.AREA and previous and previous != PageClass.AREA.value:
+        _close_tixcraft_purchase_attempt("returned_to_area")
+        _state["last_selected_area"] = ""
+        _state["selected_area_candidate"] = ""
+        _state["selected_area_metadata"] = {}
+    elif current == PageClass.TICKET:
+        attempt = _begin_tixcraft_purchase_attempt("ticket_page", url)
+        attempt.phase = TixCraftAttemptPhase.TICKET_FORM_ACTIVE
+    elif current == PageClass.ORDER:
+        attempt = _begin_tixcraft_purchase_attempt("order_page", url)
+        attempt.phase = TixCraftAttemptPhase.ORDER_PENDING
+    elif current == PageClass.CHECKOUT:
+        attempt = _get_tixcraft_purchase_attempt()
+        if attempt is not None:
+            attempt.phase = TixCraftAttemptPhase.CHECKOUT_REACHED
+    _state["attempt_last_page_class"] = current.value
+
+
+_TIXCRAFT_CONFIRMED_PURCHASE_PAGES = {
+    PageClass.TICKET,
+    PageClass.ORDER,
+    PageClass.CHECKOUT,
+    PageClass.PAYMENT,
+}
+_TIXCRAFT_CONFIRMED_DATE_TARGET_PAGES = {
+    PageClass.AREA,
+    *_TIXCRAFT_CONFIRMED_PURCHASE_PAGES,
+}
+
+
+def _pending_navigation_expired(pending, now=None):
+    if not isinstance(pending, TixCraftPendingNavigation):
+        return True
+    current = time.monotonic() if now is None else float(now)
+    return current >= pending.deadline
+
+
+def _clear_pending_area_navigation(reason="", config_dict=None):
+    pending = _state.pop("pending_area_navigation", None)
+    if "leak_scheduler" in _state:
+        _state["leak_scheduler"].clear_area_click_pending()
+    if pending is not None and reason:
+        _record_action("area_navigation_cleared", reason)
+        runtime_health.runtime_log(
+            "[AREA] navigation_cleared",
+            config_dict,
+            reason=reason,
+            source_url=getattr(pending, "source_url", ""),
+        )
+    return pending
+
+
+def _set_pending_area_navigation(tab, url, area_text, config_dict, now=None):
+    current = time.monotonic() if now is None else float(now)
+    token = int(_state.get("area_navigation_token", 0) or 0) + 1
+    _state["area_navigation_token"] = token
+    pending = TixCraftPendingNavigation(
+        kind="area",
+        source_url=_normalize_tixcraft_area_url(url) or _tixcraft_route_key(url),
+        seat_area=_clean_tixcraft_area_name(area_text),
+        event_id=_state.get("current_event_id", ""),
+        game_id=_state.get("current_game_id", ""),
+        flow_generation=int(_state.get("notification_flow_generation", 0) or 0),
+        token=token,
+        tab_identity=id(tab),
+        started_at=current,
+        deadline=current + _get_tixcraft_navigation_confirmation_seconds(config_dict),
+    )
+    _state["pending_area_navigation"] = pending
+    _state["selected_area_metadata"] = {
+        "name": pending.seat_area,
+        "confirmed": False,
+        "event_id": pending.event_id,
+        "game_id": pending.game_id,
+        "area_url": pending.source_url,
+        "attempt_id": None,
+        "flow_generation": pending.flow_generation,
+        "click_token": pending.token,
+    }
+    return pending
+
+
+def _set_pending_date_navigation(tab, url, target_url, config_dict, now=None):
+    current = time.monotonic() if now is None else float(now)
+    token = int(_state.get("date_navigation_token", 0) or 0) + 1
+    _state["date_navigation_token"] = token
+    pending = TixCraftPendingNavigation(
+        kind="date",
+        source_url=_tixcraft_route_key(url),
+        target_url=_tixcraft_route_key(target_url),
+        event_id=_state.get("current_event_id", ""),
+        game_id=_state.get("current_game_id", ""),
+        flow_generation=int(_state.get("notification_flow_generation", 0) or 0),
+        token=token,
+        tab_identity=id(tab),
+        started_at=current,
+        deadline=current + _get_tixcraft_navigation_confirmation_seconds(config_dict),
+    )
+    _state["pending_date_navigation"] = pending
+    return pending
+
+
+def _is_confirmed_navigation(
+    source_url,
+    current_url,
+    page_class,
+    allowed_pages=None,
+):
+    source_key = _tixcraft_route_key(source_url)
+    current_key = _tixcraft_route_key(current_url)
+    allowed = (
+        _TIXCRAFT_CONFIRMED_PURCHASE_PAGES
+        if allowed_pages is None
+        else allowed_pages
+    )
+    return (
+        bool(source_key)
+        and bool(current_key)
+        and source_key != current_key
+        and PageClass(page_class) in allowed
+    )
+
+
+def _reconcile_tixcraft_pending_navigation(tab, url, page_class, config_dict):
+    """Confirm dispatched clicks from cached URL state without extra CDP calls."""
+    current_page = PageClass(page_class)
+    current_route = _tixcraft_route_key(url)
+    now = time.monotonic()
+
+    date_pending = _state.get("pending_date_navigation")
+    if isinstance(date_pending, TixCraftPendingNavigation):
+        if date_pending.tab_identity and date_pending.tab_identity != id(tab):
+            _state.pop("pending_date_navigation", None)
+        elif current_route != _tixcraft_route_key(date_pending.source_url):
+            outcome = (
+                "navigation_confirmed"
+                if current_page in _TIXCRAFT_CONFIRMED_PURCHASE_PAGES
+                else "navigation_left_date"
+            )
+            _state.pop("pending_date_navigation", None)
+            _record_action("date_navigation_reconciled", outcome)
+        elif _pending_navigation_expired(date_pending, now):
+            _state.pop("pending_date_navigation", None)
+            _state["date_navigation_retry_due"] = True
+            runtime_health.runtime_log(
+                "[DATE] click_not_navigated",
+                config_dict,
+                source_url=date_pending.source_url,
+            )
+
+    area_pending = _state.get("pending_area_navigation")
+    if not isinstance(area_pending, TixCraftPendingNavigation):
+        if current_page != PageClass.AREA and "leak_scheduler" in _state:
+            _state["leak_scheduler"].clear_area_click_pending()
+        return False
+    if area_pending.tab_identity and area_pending.tab_identity != id(tab):
+        _clear_pending_area_navigation("tab_changed", config_dict)
+        return False
+
+    source_route = _tixcraft_route_key(area_pending.source_url)
+    if _is_confirmed_navigation(source_route, current_route, current_page):
+        _state["last_selected_area"] = area_pending.seat_area
+        attempt = _begin_tixcraft_purchase_attempt(
+            "area_click",
+            area_pending.source_url,
+            area_pending.seat_area,
+        )
+        _state["selected_area_metadata"] = {
+            "name": area_pending.seat_area,
+            "confirmed": bool(area_pending.seat_area),
+            "event_id": area_pending.event_id,
+            "game_id": area_pending.game_id,
+            "area_url": area_pending.source_url,
+            "attempt_id": attempt.attempt_id,
+            "flow_generation": area_pending.flow_generation,
+            "click_token": area_pending.token,
+        }
+        _state.pop("pending_area_navigation", None)
+        if "leak_scheduler" in _state:
+            _state["leak_scheduler"].clear_area_click_pending()
+        _record_action("area_navigation_confirmed", area_pending.seat_area)
+        runtime_health.runtime_log(
+            "[AREA] navigation_confirmed",
+            config_dict,
+            seat_area=area_pending.seat_area,
+            current_url=url,
+        )
+        return True
+
+    if current_page == PageClass.AREA and current_route == source_route:
+        if _pending_navigation_expired(area_pending, now):
+            _clear_pending_area_navigation("click_not_navigated", config_dict)
+            _state["area_navigation_retry_due"] = True
+        return False
+
+    _clear_pending_area_navigation("unexpected_route", config_dict)
+    return False
+
+
+def _mark_tixcraft_submit_started(url=""):
+    current = _get_tixcraft_purchase_attempt()
+    completed_attempt = bool(
+        current is not None
+        and (
+            current.phase
+            in {
+                TixCraftAttemptPhase.CHECKOUT_REACHED,
+                TixCraftAttemptPhase.CLOSED,
+            }
+            or _TIXCRAFT_DISCORD_STAGES.issubset(current.discord_stages)
+        )
+    )
+    previous_area = current.seat_area if completed_attempt and current else ""
+    previous_ticket_count = (
+        current.ticket_count
+        if completed_attempt
+        and current is not None
+        and current.ticket_count_confirmed
+        else ""
+    )
+    previous_event_id = current.event_id if completed_attempt and current else ""
+    previous_game_id = current.game_id if completed_attempt and current else ""
+    attempt = _begin_tixcraft_purchase_attempt(
+        "ticket_submit",
+        url,
+        seat_area=previous_area,
+        force_new=completed_attempt,
+    )
+    if (
+        previous_ticket_count
+        and attempt.event_id == previous_event_id
+        and attempt.game_id == previous_game_id
+        and attempt.seat_area == _clean_tixcraft_area_name(previous_area)
+    ):
+        attempt.ticket_count = previous_ticket_count
+        attempt.ticket_count_confirmed = True
+        _state["last_ticket_count"] = previous_ticket_count
+        _state["last_ticket_count_confirmed"] = True
+    attempt.phase = TixCraftAttemptPhase.TICKET_FORM_ACTIVE
+    _state["notification_submit_started_at"] = time.monotonic()
+    _state["notification_order_probe_next_at"] = 0.0
+
+
+def _has_confirmed_tixcraft_submit_context(now=None):
+    """Return True only while a real, recent form submission can backfill order."""
+    attempt = _get_tixcraft_purchase_attempt()
+    started_at = float(_state.get("notification_submit_started_at", 0.0) or 0.0)
+    if attempt is None or started_at <= 0:
+        return False
+    now = time.monotonic() if now is None else float(now)
+    elapsed = now - started_at
+    return 0.0 <= elapsed <= _TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS
+
+
+async def _detect_tixcraft_order_pending(tab, url, now=None, force=False):
+    if "/ticket/order" in str(url or "").lower():
+        return True
+    now = time.monotonic() if now is None else float(now)
+    if not _has_confirmed_tixcraft_submit_context(now):
+        return False
+    next_probe_at = float(_state.get("notification_order_probe_next_at", 0.0) or 0.0)
+    if not force and now < next_probe_at:
+        return False
+    _state["notification_order_probe_next_at"] = now + 0.2
+    try:
+        raw_value = await runtime_health.evaluate_with_timeout(
+            tab,
+            """
+                (function() {
+                    const visible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' &&
+                            rect.width > 0 && rect.height > 0;
+                    };
+                    const text = (document.body && document.body.innerText || '').slice(0, 3000);
+                    const markers = [
+                        '訂單建立中', '請稍後，並避免進行任何操作',
+                        '即將前往結帳', '即將轉跳，請稍後',
+                        'creating order', 'processing your order'
+                    ];
+                    const marker = markers.find(item => text.toLowerCase().includes(item.toLowerCase())) || '';
+                    const selectors = [
+                        '#loadingmap',
+                        '#loading.order-processing',
+                        '.order-processing .spinner-border',
+                        '.order-processing .spinner-grow',
+                        '.loading-overlay.order-processing',
+                        '[data-order-processing][aria-busy="true"]'
+                    ];
+                    const overlay = selectors.find(selector =>
+                        Array.from(document.querySelectorAll(selector)).some(visible)
+                    ) || '';
+                    return JSON.stringify({pending: !!(marker || overlay), marker, overlay});
+                })()
+            """,
+            reason="ORDER_PENDING_PROBE",
+        )
+        raw_value = util.parse_nodriver_result(raw_value)
+        if isinstance(raw_value, str):
+            raw_value = json.loads(raw_value)
+        return bool(isinstance(raw_value, dict) and raw_value.get("pending"))
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+
+
+async def _emit_tixcraft_attempt_notification(tab, config_dict, stage, url):
+    if stage not in _TIXCRAFT_DISCORD_STAGES:
+        runtime_health.runtime_log(
+            "[TIXCRAFT] notification_stage_rejected",
+            config_dict,
+            stage=stage,
+            current_url=url,
+        )
+        return False
+    attempt = _get_tixcraft_purchase_attempt()
+    if attempt is None:
+        if stage == "order_pending" and "/ticket/order" in str(url or "").lower():
+            attempt = _begin_tixcraft_purchase_attempt("order_page", url)
+        else:
+            runtime_health.runtime_log(
+                "[TIXCRAFT] notification_skipped_without_attempt",
+                config_dict,
+                stage=stage,
+                current_url=url,
+            )
+            return False
+    attempt_commit_token = (
+        attempt.session_id,
+        attempt.attempt_id,
+        int(_state.get("notification_flow_generation", 0) or 0),
+    )
+    if stage in attempt.delivery_failure_stages:
+        return False
+    if stage in attempt.discord_stages and stage in attempt.auxiliary_stages:
+        delivery_status = util.get_discord_delivery_status(
+            attempt.notification_id(stage)
+        )
+        if (
+            delivery_status is not None
+            and delivery_status.state == util.DiscordDeliveryState.FAILED.value
+        ):
+            if not util.DiscordNotificationDispatcher._is_retryable_terminal_failure(
+                delivery_status.error
+            ):
+                attempt.delivery_failure_stages.add(stage)
+                runtime_health.runtime_log(
+                    "[TIXCRAFT] notification_delivery_permanent_failure",
+                    config_dict,
+                    attempt_id=attempt.attempt_id,
+                    stage=stage,
+                    error=delivery_status.error,
+                )
+                return False
+            retry_count = attempt.delivery_retry_counts.get(stage, 0)
+            if retry_count >= _TIXCRAFT_NOTIFICATION_DELIVERY_REARM_ATTEMPTS:
+                attempt.delivery_failure_stages.add(stage)
+                runtime_health.runtime_log(
+                    "[TIXCRAFT] notification_delivery_retry_exhausted",
+                    config_dict,
+                    attempt_id=attempt.attempt_id,
+                    stage=stage,
+                    error=delivery_status.error,
+                )
+                return False
+            attempt.delivery_retry_counts[stage] = retry_count + 1
+            attempt.discord_stages.discard(stage)
+            _state.setdefault("notification_retry_at", {})[stage] = (
+                time.monotonic()
+                + _TIXCRAFT_NOTIFICATION_DELIVERY_RETRY_SECONDS
+            )
+            runtime_health.runtime_log(
+                "[TIXCRAFT] notification_delivery_rearmed",
+                config_dict,
+                attempt_id=attempt.attempt_id,
+                stage=stage,
+                retry=retry_count + 1,
+            )
+            return False
+        return True
+
+    retry_at = (_state.get("notification_retry_at") or {}).get(stage, 0.0)
+    if time.monotonic() < float(retry_at or 0.0):
+        return False
+    context = await _build_tixcraft_notification_context(tab, config_dict, stage, url)
+    active_attempt = _get_tixcraft_purchase_attempt()
+    if (
+        active_attempt is not attempt
+        or attempt.phase
+        in {
+            TixCraftAttemptPhase.CLOSED,
+            TixCraftAttemptPhase.RECOVERING_TO_AREA,
+        }
+    ):
+        runtime_health.runtime_log(
+            "[TIXCRAFT] notification_aborted_after_state_change",
+            config_dict,
+            attempt_id=attempt.attempt_id,
+            stage=stage,
+            current_url=_get_cached_tab_url(tab) or url,
+        )
+        return False
+    cached_url = _get_cached_tab_url(tab)
+    if cached_url:
+        cached_page = classify_page(cached_url)
+        allowed_pages = (
+            {PageClass.TICKET, PageClass.ORDER, PageClass.CHECKOUT}
+            if stage == "order_pending"
+            else {PageClass.CHECKOUT}
+        )
+        if cached_page not in allowed_pages:
+            runtime_health.runtime_log(
+                "[TIXCRAFT] notification_aborted_after_route_change",
+                config_dict,
+                attempt_id=attempt.attempt_id,
+                stage=stage,
+                current_url=cached_url,
+                page_class=cached_page.value,
+            )
+            return False
+        if (
+            stage == "order_pending"
+            and cached_page == PageClass.TICKET
+            and not await _detect_tixcraft_order_pending(
+                tab,
+                cached_url,
+                force=True,
+            )
+        ):
+            runtime_health.runtime_log(
+                "[TIXCRAFT] notification_aborted_after_pending_marker_disappeared",
+                config_dict,
+                attempt_id=attempt.attempt_id,
+                stage=stage,
+                current_url=cached_url,
+            )
+            return False
+        cached_event_id = _extract_tixcraft_event_id(cached_url)
+        cached_game_id = _extract_tixcraft_game_id(cached_url)
+        cached_origin = _extract_tixcraft_origin(cached_url)
+        attempt_origin = (
+            attempt.event_snapshot.origin
+            if attempt.event_snapshot is not None
+            else _state.get("current_event_origin", "")
+        )
+        identity_mismatch = bool(
+            (
+                cached_event_id
+                and attempt.event_id
+                and cached_event_id.casefold() != attempt.event_id.casefold()
+            )
+            or (
+                cached_game_id
+                and attempt.game_id
+                and cached_game_id.casefold() != attempt.game_id.casefold()
+            )
+            or (
+                cached_origin
+                and attempt_origin
+                and cached_origin != attempt_origin
+            )
+        )
+        if identity_mismatch:
+            runtime_health.runtime_log(
+                "[TIXCRAFT] notification_aborted_after_identity_change",
+                config_dict,
+                attempt_id=attempt.attempt_id,
+                stage=stage,
+                current_url=cached_url,
+            )
+            return False
+    if context is None:
+        retry_count = attempt.metadata_retry_counts.get(stage, 0) + 1
+        attempt.metadata_retry_counts[stage] = retry_count
+        if retry_count < _TIXCRAFT_NOTIFICATION_METADATA_MAX_ATTEMPTS:
+            _state.setdefault("notification_retry_at", {})[stage] = (
+                time.monotonic() + 0.35
+            )
+            return False
+        context = _build_tixcraft_metadata_failure_context(config_dict, stage, url)
+        attempt.metadata_failure_stages.add(stage)
+        runtime_health.runtime_log(
+            "[TIXCRAFT] notification_metadata_retry_exhausted",
+            config_dict,
+            attempt_id=attempt.attempt_id,
+            stage=stage,
+            current_url=url,
+        )
+
+    # The order-pending marker probe above awaits CDP. Recovery or a new flow
+    # may replace the active attempt/route during that await, so perform one
+    # final synchronous commit check immediately before either notifier sees
+    # the immutable payload.
+    commit_attempt = _get_tixcraft_purchase_attempt()
+    commit_url = _get_cached_tab_url(tab) or str(url or "")
+    commit_page = classify_page(commit_url)
+    commit_allowed_pages = (
+        {PageClass.TICKET, PageClass.ORDER, PageClass.CHECKOUT}
+        if stage == "order_pending"
+        else {PageClass.CHECKOUT}
+    )
+    commit_token = (
+        getattr(commit_attempt, "session_id", ""),
+        getattr(commit_attempt, "attempt_id", -1),
+        int(_state.get("notification_flow_generation", 0) or 0),
+    )
+    commit_event_id = _extract_tixcraft_event_id(commit_url)
+    commit_game_id = _extract_tixcraft_game_id(commit_url)
+    commit_origin = _extract_tixcraft_origin(commit_url)
+    attempt_origin = (
+        attempt.event_snapshot.origin
+        if attempt.event_snapshot is not None
+        else _state.get("current_event_origin", "")
+    )
+    commit_identity_mismatch = bool(
+        (
+            commit_event_id
+            and attempt.event_id
+            and commit_event_id.casefold() != attempt.event_id.casefold()
+        )
+        or (
+            commit_game_id
+            and attempt.game_id
+            and commit_game_id.casefold() != attempt.game_id.casefold()
+        )
+        or (
+            commit_origin
+            and attempt_origin
+            and commit_origin != attempt_origin
+        )
+    )
+    if (
+        commit_attempt is not attempt
+        or commit_token != attempt_commit_token
+        or attempt.phase
+        in {
+            TixCraftAttemptPhase.CLOSED,
+            TixCraftAttemptPhase.RECOVERING_TO_AREA,
+        }
+        or commit_page not in commit_allowed_pages
+        or commit_identity_mismatch
+    ):
+        runtime_health.runtime_log(
+            "[TIXCRAFT] notification_aborted_before_commit",
+            config_dict,
+            attempt_id=attempt.attempt_id,
+            stage=stage,
+            current_url=commit_url,
+            page_class=commit_page.value,
+        )
+        return False
+
+    discord_enabled = is_discord_notification_enabled(config_dict)
+    if stage not in attempt.discord_stages:
+        if discord_enabled:
+            queued_id = send_discord_notification(
+                config_dict,
+                stage,
+                "TixCraft",
+                context=context,
+                notification_id=attempt.notification_id(stage),
+            )
+            if queued_id:
+                attempt.discord_stages.add(stage)
+            else:
+                _state.setdefault("notification_retry_at", {})[stage] = (
+                    time.monotonic() + 0.35
+                )
+        else:
+            attempt.discord_stages.add(stage)
+
+    if stage not in attempt.auxiliary_stages:
+        send_telegram_notification(config_dict, stage, "TixCraft", context=context)
+        attempt.auxiliary_stages.add(stage)
+
+    delivered_to_dispatcher = stage in attempt.discord_stages
+    if delivered_to_dispatcher:
+        if stage == "order_pending":
+            attempt.phase = TixCraftAttemptPhase.ORDER_PENDING
+            _state["notified_order_pending"] = True
+        elif stage == "checkout_reached":
+            attempt.phase = TixCraftAttemptPhase.CHECKOUT_REACHED
+            _state["notified_checkout_reached"] = True
+        _record_action("notification_enqueued", f"{attempt.attempt_id}:{stage}")
+    return delivered_to_dispatcher
+
+
 def _is_retryable_alert(message):
     text = (message or "").lower()
     return any(keyword in text for keyword in _TIXCRAFT_RETRYABLE_ALERT_KEYWORDS)
@@ -472,7 +1870,7 @@ def _reset_tixcraft_submit_state():
         _state["leak_scheduler"].ticket_form_pending = False
     for key in list(_state.keys()):
         if str(key).startswith("ticket_assigned_"):
-            _state[key] = False
+            _state.pop(key, None)
 
 
 def _reset_tixcraft_area_retry_state():
@@ -490,6 +1888,10 @@ def _reset_tixcraft_area_retry_state():
         "tixcraft_date_reload_url",
     ):
         _state[key] = ""
+    _state.pop("pending_area_navigation", None)
+    _state.pop("pending_date_navigation", None)
+    _state["area_navigation_retry_due"] = False
+    _state["date_navigation_retry_due"] = False
     if "leak_scheduler" in _state:
         _state["leak_scheduler"].reset_for_recovery()
 
@@ -500,35 +1902,55 @@ def _clean_tixcraft_area_name(value):
     return clean_seat_area(value, "")
 
 
-async def _read_selected_area_name(target_area, area_list_cache=None, area_text_cache=None):
+async def _read_selected_area_name(
+    target_area,
+    area_list_cache=None,
+    area_text_cache=None,
+    config_dict=None,
+):
+    metadata_timed_out = False
     for attribute_name in ("text", "inner_text", "text_content"):
         try:
             value = getattr(target_area, attribute_name, "")
             if callable(value):
                 value = value()
             if inspect.isawaitable(value):
-                value = await value
+                value = await _run_bounded_tixcraft_operation(
+                    value,
+                    _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                    f"AREA_NAME_{attribute_name.upper()}",
+                    config_dict,
+                )
             cleaned = _clean_tixcraft_area_name(str(value or "")[:240])
             if cleaned:
                 return cleaned
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            metadata_timed_out = True
+            break
         except Exception:
             continue
 
-    try:
-        attributes = getattr(target_area, "attrs", {}) or {}
-        if inspect.isawaitable(attributes):
-            attributes = await attributes
-        if isinstance(attributes, dict):
-            for key in ("data-area-name", "aria-label", "title"):
-                cleaned = _clean_tixcraft_area_name(attributes.get(key, ""))
-                if cleaned:
-                    return cleaned
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        pass
+    if not metadata_timed_out:
+        try:
+            attributes = getattr(target_area, "attrs", {}) or {}
+            if inspect.isawaitable(attributes):
+                attributes = await _run_bounded_tixcraft_operation(
+                    attributes,
+                    _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                    "AREA_NAME_ATTRS",
+                    config_dict,
+                )
+            if isinstance(attributes, dict):
+                for key in ("data-area-name", "aria-label", "title"):
+                    cleaned = _clean_tixcraft_area_name(attributes.get(key, ""))
+                    if cleaned:
+                        return cleaned
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
 
     if area_list_cache and area_text_cache:
         for index, item in enumerate(area_list_cache):
@@ -571,48 +1993,309 @@ def _extract_tixcraft_game_id(url):
     return match.group(1) if match else ""
 
 
+def _extract_tixcraft_origin(url):
+    try:
+        parts = urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    if (
+        parts.scheme.lower() not in {"http", "https"}
+        or not parts.netloc
+        or not _is_tixcraft_family_host(parts.hostname)
+    ):
+        return ""
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
 def _normalize_tixcraft_event_name(value):
     text = clean_event_name(value, "")
+    text = re.sub(
+        r"^\s*(?:選擇區域|選擇票券)\s*[:：]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(r"\s+@\s*多個表演場地\s*$", "", text, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _tixcraft_event_name_comparison_key(value):
+    """Normalize presentation-only differences before generic-name checks."""
+    text = unicodedata.normalize(
+        "NFKC",
+        _normalize_tixcraft_event_name(value),
+    ).casefold()
+    return "".join(
+        character
+        for character in text
+        if not character.isspace()
+        and unicodedata.category(character)[0] not in {"P", "S"}
+    )
+
+
+_TIXCRAFT_GENERIC_EVENT_NAMES = (
+    "unknown event",
+    "tixcraft",
+    "tixcraft拓元售票",
+    "拓元售票",
+    "拓元售票系統",
+    "選擇區域",
+    "選擇票券",
+    "日期",
+    "場次",
+    "區域",
+    "訂單",
+    "訂單資訊",
+    "訂單信息",
+    "訂單明細",
+    "結帳",
+    "購票須知",
+    "注意事項",
+    "票券資訊",
+    "購票資訊",
+    "活動資訊",
+    "付款",
+    "付款資訊",
+    "會員登入",
+    "載入中",
+    "訂單建立中",
+    "處理中",
+    "select area",
+    "select tickets",
+    "date",
+    "session",
+    "area",
+    "order",
+    "order information",
+    "order details",
+    "checkout",
+    "ticket information",
+    "purchase information",
+    "event information",
+    "payment",
+    "payment information",
+    "member login",
+    "login",
+    "loading",
+    "processing",
+)
+_TIXCRAFT_GENERIC_EVENT_NAME_KEYS = frozenset(
+    _tixcraft_event_name_comparison_key(name)
+    for name in _TIXCRAFT_GENERIC_EVENT_NAMES
+)
+_TIXCRAFT_PLATFORM_EVENT_NAME_KEYS = frozenset(
+    {
+        _tixcraft_event_name_comparison_key("TixCraft"),
+        _tixcraft_event_name_comparison_key("拓元售票"),
+    }
+)
+_TIXCRAFT_GENERIC_EVENT_HINT_KEYS = frozenset(
+    {
+        _tixcraft_event_name_comparison_key(name)
+        for name in (
+            "loading",
+            "processing",
+            "event information",
+            "ticket information",
+            "purchase information",
+            "order information",
+            "order details",
+            "checkout",
+            "payment information",
+        )
+    }
+)
 
 
 def _is_valid_tixcraft_event_name(value, event_id=""):
     text = _normalize_tixcraft_event_name(value)
     if not text:
         return False
-    if event_id and text.casefold() == str(event_id).strip().casefold():
+    normalized_text = unicodedata.normalize("NFKC", text)
+    normalized_event_id = unicodedata.normalize(
+        "NFKC",
+        str(event_id or "").strip(),
+    )
+    if normalized_event_id and normalized_text.casefold() == normalized_event_id.casefold():
         return False
-    if re.fullmatch(r"\d{2,4}_[A-Za-z0-9_-]+", text):
+    if re.fullmatch(r"\d{2,4}_[A-Za-z0-9_-]+", normalized_text):
         return False
-    return text.casefold() not in {
-        "unknown event",
-        "tixcraft",
-        "tixcraft拓元售票",
-        "選擇區域",
-        "選擇票券",
-        "日期",
-        "場次",
-        "區域",
-        "訂單",
-        "結帳",
-    }
+    comparison_key = _tixcraft_event_name_comparison_key(normalized_text)
+    for platform_key in _TIXCRAFT_PLATFORM_EVENT_NAME_KEYS:
+        if not platform_key or platform_key not in comparison_key:
+            continue
+        without_platform = comparison_key.replace(platform_key, "")
+        if (
+            not without_platform
+            or without_platform in _TIXCRAFT_GENERIC_EVENT_NAME_KEYS
+            or without_platform in _TIXCRAFT_GENERIC_EVENT_HINT_KEYS
+        ):
+            return False
+    return bool(
+        comparison_key
+        and comparison_key not in _TIXCRAFT_GENERIC_EVENT_NAME_KEYS
+    )
 
 
-def _reset_tixcraft_notification_flow(event_id="", game_id=""):
+def _tixcraft_event_name_specificity(value):
+    comparison_key = _tixcraft_event_name_comparison_key(value)
+    score = len(comparison_key)
+    for hint in _TIXCRAFT_GENERIC_EVENT_HINT_KEYS:
+        if hint and hint in comparison_key:
+            score -= len(hint)
+    for platform_key in _TIXCRAFT_PLATFORM_EVENT_NAME_KEYS:
+        if platform_key and platform_key in comparison_key:
+            score -= len(platform_key)
+    return max(0, score)
+
+
+def _tixcraft_event_cache_key(origin, event_id):
+    normalized_origin = _extract_tixcraft_origin(origin) or str(origin or "").rstrip("/").lower()
+    return normalized_origin, str(event_id or "").strip().casefold()
+
+
+def _coerce_tixcraft_event_snapshot(value, origin, event_id, flow_generation):
+    if isinstance(value, TixCraftEventSnapshot):
+        snapshot = value
+    elif isinstance(value, dict):
+        try:
+            captured_page = PageClass(value.get("captured_page_class", PageClass.UNKNOWN))
+        except (TypeError, ValueError):
+            captured_page = PageClass.UNKNOWN
+        snapshot = TixCraftEventSnapshot(
+            origin=_extract_tixcraft_origin(value.get("origin", "")) or origin,
+            event_id=str(value.get("event_id", "") or event_id),
+            event_name=_normalize_tixcraft_event_name(value.get("name", "")),
+            source=str(value.get("source", "") or "legacy_cache"),
+            quality=int(value.get("quality", 0) or 0),
+            captured_url=str(value.get("captured_url", "") or ""),
+            captured_page_class=captured_page,
+            flow_generation=int(value.get("flow_generation", flow_generation) or 0),
+            validated_at_monotonic=float(
+                value.get("validated_at_monotonic", time.monotonic())
+                or time.monotonic()
+            ),
+        )
+    else:
+        return None
+    if (
+        snapshot.origin != origin
+        or snapshot.event_id.casefold() != str(event_id or "").casefold()
+        or not _is_valid_tixcraft_event_name(snapshot.event_name, event_id)
+    ):
+        return None
+    if snapshot.flow_generation == flow_generation:
+        return snapshot
+    return TixCraftEventSnapshot(
+        origin=snapshot.origin,
+        event_id=snapshot.event_id,
+        event_name=snapshot.event_name,
+        source=snapshot.source,
+        quality=snapshot.quality,
+        captured_url=snapshot.captured_url,
+        captured_page_class=snapshot.captured_page_class,
+        flow_generation=flow_generation,
+        validated_at_monotonic=snapshot.validated_at_monotonic,
+    )
+
+
+def _cache_tixcraft_event_snapshot(snapshot):
+    cache = _state.setdefault("event_metadata_cache", {})
+    cache_key = _tixcraft_event_cache_key(snapshot.origin, snapshot.event_id)
+    cache[cache_key] = snapshot
+    while len(cache) > _TIXCRAFT_EVENT_METADATA_CACHE_CAPACITY:
+        oldest_key = next(iter(cache))
+        if oldest_key == cache_key and len(cache) > 1:
+            oldest_key = next(key for key in cache if key != cache_key)
+        cache.pop(oldest_key, None)
+
+
+def _get_cached_tixcraft_event_snapshot(origin, event_id, flow_generation):
+    if not origin or not event_id:
+        return None
+    cache = _state.get("event_metadata_cache") or {}
+    cache_key = _tixcraft_event_cache_key(origin, event_id)
+    cached = cache.get(cache_key)
+    snapshot = _coerce_tixcraft_event_snapshot(
+        cached,
+        origin,
+        event_id,
+        flow_generation,
+    )
+    if snapshot is not None:
+        cache[cache_key] = snapshot
+    return snapshot
+
+
+def _set_current_tixcraft_event_snapshot(snapshot):
+    _state["event_snapshot"] = snapshot
+    _state["event_name"] = snapshot.event_name if snapshot is not None else ""
+    _state["event_name_quality"] = snapshot.quality if snapshot is not None else 0
+    if snapshot is not None:
+        _cache_tixcraft_event_snapshot(snapshot)
+
+
+def _get_current_tixcraft_event_snapshot(event_id=""):
+    event_id = str(event_id or _state.get("current_event_id", "") or "")
+    origin = (
+        _state.get("current_event_origin", "")
+        or _extract_tixcraft_origin(_state.get("last_valid_area_url", ""))
+        or _extract_tixcraft_origin(_state.get("notification_flow_url", ""))
+    )
+    flow_generation = int(_state.get("notification_flow_generation", 0) or 0)
+    snapshot = _coerce_tixcraft_event_snapshot(
+        _state.get("event_snapshot"),
+        origin,
+        event_id,
+        flow_generation,
+    )
+    if snapshot is None:
+        snapshot = _get_cached_tixcraft_event_snapshot(
+            origin,
+            event_id,
+            flow_generation,
+        )
+    if snapshot is not None:
+        _set_current_tixcraft_event_snapshot(snapshot)
+    return snapshot
+
+
+def _reset_tixcraft_notification_flow(event_id="", game_id="", origin=""):
+    previous_event_id = _state.get("current_event_id", "")
+    previous_game_id = _state.get("current_game_id", "")
+    previous_origin = _state.get("current_event_origin", "")
+    origin = _extract_tixcraft_origin(origin) or previous_origin
+    next_generation = int(_state.get("notification_flow_generation", 0) or 0) + 1
     _state["current_event_id"] = event_id
     _state["current_game_id"] = game_id
-    cached = (_state.get("event_metadata_cache") or {}).get(event_id, {})
-    _state["event_name"] = cached.get("name", "")
-    _state["event_name_quality"] = int(cached.get("quality", 0) or 0)
+    _state["current_event_origin"] = origin
+    _state["notification_flow_generation"] = next_generation
+    _set_current_tixcraft_event_snapshot(
+        _get_cached_tixcraft_event_snapshot(
+            origin,
+            event_id,
+            next_generation,
+        )
+    )
     _state["last_selected_area"] = ""
     _state["selected_area_candidate"] = ""
     _state["selected_area_metadata"] = {}
+    _state.pop("pending_area_navigation", None)
+    _state.pop("pending_date_navigation", None)
+    if "leak_scheduler" in _state:
+        _state["leak_scheduler"].clear_area_click_pending()
     _state["last_ticket_count"] = ""
-    _state["notified_order_pending"] = False
-    _state["notified_checkout_reached"] = False
+    _state["last_ticket_count_confirmed"] = False
     _state["last_notification_metadata_warning"] = None
-    _state["notification_flow_generation"] = int(_state.get("notification_flow_generation", 0)) + 1
+    _state["event_metadata_next_probe_at"] = 0.0
+    if (
+        event_id != previous_event_id
+        or origin != previous_origin
+        or (game_id and game_id != previous_game_id)
+    ):
+        _close_tixcraft_purchase_attempt("event_or_game_changed")
+        _state["last_valid_area_url"] = ""
+        _state["recent_area_route_url"] = ""
 
 
 def _sync_tixcraft_notification_flow(url):
@@ -621,18 +2304,32 @@ def _sync_tixcraft_notification_flow(url):
     _state["notification_flow_url"] = url
     event_id = _extract_tixcraft_event_id(url)
     game_id = _extract_tixcraft_game_id(url)
+    origin = _extract_tixcraft_origin(url)
     current_event_id = _state.get("current_event_id", "")
     current_game_id = _state.get("current_game_id", "")
-    if event_id and event_id != current_event_id:
-        _reset_tixcraft_notification_flow(event_id, game_id)
+    current_origin = _state.get("current_event_origin", "")
+    if origin and current_origin and origin != current_origin:
+        _reset_tixcraft_notification_flow(event_id, game_id, origin)
+        return
+    if event_id and (
+        event_id != current_event_id
+        or (origin and origin != current_origin)
+    ):
+        _reset_tixcraft_notification_flow(event_id, game_id, origin)
         return
     if game_id and current_game_id and game_id != current_game_id:
-        _reset_tixcraft_notification_flow(event_id or current_event_id, game_id)
+        _reset_tixcraft_notification_flow(
+            event_id or current_event_id,
+            game_id,
+            origin or current_origin,
+        )
         return
     if event_id and not current_event_id:
         _state["current_event_id"] = event_id
     if game_id and not current_game_id:
         _state["current_game_id"] = game_id
+    if origin and not current_origin:
+        _state["current_event_origin"] = origin
 
 
 async def _read_tixcraft_event_name(tab, event_id=""):
@@ -646,9 +2343,7 @@ async def _read_tixcraft_event_name(tab, event_id=""):
                 '.game-title',
                 '.event-info h1',
                 '.event-info h2',
-                '.activity-title',
-                'h1',
-                'h2'
+                '.activity-title'
             ];
             for (const selector of candidates) {
                 const el = document.querySelector(selector);
@@ -658,12 +2353,31 @@ async def _read_tixcraft_event_name(tab, event_id=""):
             for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
                 try {
                     const data = JSON.parse(script.textContent || '{}');
-                    const items = Array.isArray(data) ? data : [data];
-                    for (const item of items) {
-                        if (item && typeof item.name === 'string' && item.name.trim()) {
-                            results.push({name: item.name.trim(), source: 'structured_data'});
+                    const visit = (item) => {
+                        if (Array.isArray(item)) {
+                            item.forEach(visit);
+                            return;
                         }
-                    }
+                        if (!item || typeof item !== 'object') return;
+                        const rawTypes = Array.isArray(item['@type'])
+                            ? item['@type'] : [item['@type']];
+                        const types = rawTypes
+                            .filter(value => typeof value === 'string')
+                            .map(value => value.trim());
+                        if (
+                            types.some(value => value.toLowerCase() === 'event') &&
+                            typeof item.name === 'string' &&
+                            item.name.trim()
+                        ) {
+                            results.push({
+                                name: item.name.trim(),
+                                source: 'structured_data',
+                                types
+                            });
+                        }
+                        if (Array.isArray(item['@graph'])) visit(item['@graph']);
+                    };
+                    visit(data);
                 } catch (_) {
                     // Ignore unrelated or malformed JSON-LD blocks.
                 }
@@ -676,7 +2390,13 @@ async def _read_tixcraft_event_name(tab, event_id=""):
         })();
     """
     try:
-        raw_value = await tab.evaluate(js)
+        raw_value = await runtime_health.evaluate_with_timeout(
+            tab,
+            js,
+            timeout_seconds=_TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+            reason="TIXCRAFT_EVENT_METADATA",
+            default="",
+        )
         raw_value = util.parse_nodriver_result(raw_value)
         if isinstance(raw_value, str):
             try:
@@ -686,20 +2406,32 @@ async def _read_tixcraft_event_name(tab, event_id=""):
         if isinstance(raw_value, dict):
             raw_value = [raw_value]
         if isinstance(raw_value, list):
-            metadata_candidates = []
+            candidates = []
             for item in raw_value:
                 if not isinstance(item, dict):
                     continue
                 source = str(item.get("source", "document_title"))
-                metadata_candidates.append(
+                if source == "structured_data":
+                    raw_types = item.get("types", [])
+                    if isinstance(raw_types, str):
+                        raw_types = [raw_types]
+                    if not (
+                        isinstance(raw_types, list)
+                        and any(
+                            str(value).strip().casefold() == "event"
+                            for value in raw_types
+                        )
+                    ):
+                        continue
+                candidates.append(
                     {
                         "name": _normalize_tixcraft_event_name(item.get("name", "")),
                         "source": source,
                         "quality": _TIXCRAFT_EVENT_SOURCE_QUALITY.get(source, 0),
                     }
                 )
-            metadata_candidates.sort(key=lambda item: item["quality"], reverse=True)
-            for metadata in metadata_candidates:
+            candidates.sort(key=lambda item: item["quality"], reverse=True)
+            for metadata in candidates:
                 if _is_valid_tixcraft_event_name(metadata["name"], event_id):
                     return metadata
     except asyncio.CancelledError:
@@ -715,41 +2447,133 @@ async def _read_tixcraft_event_name(tab, event_id=""):
 async def _remember_tixcraft_event_name(tab, url):
     _sync_tixcraft_notification_flow(url)
     event_id = _state.get("current_event_id", "") or _extract_tixcraft_event_id(url)
-    current = _normalize_tixcraft_event_name(_state.get("event_name", ""))
-    current_quality = int(_state.get("event_name_quality", 0) or 0)
-    if _is_valid_tixcraft_event_name(current, event_id) and current_quality >= 90:
-        return current
+    origin = (
+        _state.get("current_event_origin", "")
+        or _extract_tixcraft_origin(url)
+    )
+    attempt = _get_tixcraft_purchase_attempt()
+    if attempt is not None and attempt.event_snapshot is not None:
+        return attempt.event_snapshot.event_name
+    current = _get_current_tixcraft_event_snapshot(event_id=event_id)
+    if (
+        current is not None
+        and current.quality >= _TIXCRAFT_EVENT_CANONICAL_QUALITY
+    ):
+        if attempt is not None and attempt.event_snapshot is None:
+            attempt.event_snapshot = current
+        return current.event_name
+    page_class = classify_page(url)
+    if page_class not in _TIXCRAFT_EVENT_METADATA_PAGES:
+        return current.event_name if current is not None else ""
+    now = time.monotonic()
+    next_probe_at = float(_state.get("event_metadata_next_probe_at", 0.0) or 0.0)
+    if now < next_probe_at:
+        return current.event_name if current is not None else ""
+    _state["event_metadata_next_probe_at"] = (
+        now + _TIXCRAFT_EVENT_METADATA_RETRY_SECONDS
+    )
     metadata = await _read_tixcraft_event_name(tab, event_id)
+    observed_url = _get_cached_tab_url(tab)
+    if observed_url:
+        observed_page = classify_page(observed_url)
+        observed_event_id = _extract_tixcraft_event_id(observed_url)
+        observed_origin = _extract_tixcraft_origin(observed_url)
+        if (
+            observed_page not in _TIXCRAFT_EVENT_METADATA_PAGES
+            or (
+                observed_event_id
+                and observed_event_id.casefold() != str(event_id).casefold()
+            )
+            or (observed_origin and observed_origin != origin)
+        ):
+            runtime_health.runtime_log(
+                "[TIXCRAFT] event_metadata_discarded_after_route_change",
+                event_id=event_id,
+                source_url=url,
+                current_url=observed_url,
+            )
+            return current.event_name if current is not None else ""
+    if (
+        str(_state.get("current_event_id", "")).casefold()
+        != str(event_id).casefold()
+        or (
+            origin
+            and _state.get("current_event_origin", "")
+            and _state.get("current_event_origin", "") != origin
+        )
+    ):
+        runtime_health.runtime_log(
+            "[TIXCRAFT] event_metadata_discarded_after_flow_change",
+            event_id=event_id,
+            source_url=url,
+        )
+        return current.event_name if current is not None else ""
     event_name = metadata["name"]
     quality = int(metadata["quality"])
-    if _is_valid_tixcraft_event_name(event_name, event_id) and quality >= current_quality:
-        _state["event_name"] = event_name
-        _state["event_name_quality"] = quality
-        if event_id:
-            cache = _state.setdefault("event_metadata_cache", {})
-            cache[event_id] = {
-                "name": event_name,
-                "source": metadata["source"],
-                "quality": quality,
-            }
-        return event_name
-    return current if _is_valid_tixcraft_event_name(current, event_id) else ""
+    same_quality_provisional_update = bool(
+        current is not None
+        and current.quality < _TIXCRAFT_EVENT_CANONICAL_QUALITY
+        and quality == current.quality
+        and event_name != current.event_name
+        and _tixcraft_event_name_specificity(event_name)
+        > _tixcraft_event_name_specificity(current.event_name)
+    )
+    if (
+        origin
+        and event_id
+        and _is_valid_tixcraft_event_name(event_name, event_id)
+        and quality > 0
+        and (
+            current is None
+            or quality > current.quality
+            or same_quality_provisional_update
+        )
+    ):
+        snapshot = TixCraftEventSnapshot(
+            origin=origin,
+            event_id=event_id,
+            event_name=event_name,
+            source=metadata["source"],
+            quality=quality,
+            captured_url=url,
+            captured_page_class=page_class,
+            flow_generation=int(
+                _state.get("notification_flow_generation", 0) or 0
+            ),
+        )
+        _set_current_tixcraft_event_snapshot(snapshot)
+        if (
+            attempt is not None
+            and attempt.event_snapshot is None
+            and snapshot.quality >= _TIXCRAFT_EVENT_CANONICAL_QUALITY
+        ):
+            attempt.event_snapshot = snapshot
+        return snapshot.event_name
+    return current.event_name if current is not None else ""
 
 
 async def _read_tixcraft_ticket_count(tab, config_dict):
     try:
-        result = await tab.evaluate("""
-            (function() {
-                const selects = Array.from(document.querySelectorAll(
-                    '.mobile-select, select[id*="TicketForm_ticketPrice_"]'
-                )).filter(s => s && !s.disabled && s.value && s.value !== "0");
-                const selected = selects.map(s => s.value).filter(Boolean);
-                return selected.length ? selected.join(',') : '';
-            })();
-        """)
+        result = await runtime_health.evaluate_with_timeout(
+            tab,
+            """
+                (function() {
+                    const selects = Array.from(document.querySelectorAll(
+                        '.mobile-select, select[id*="TicketForm_ticketPrice_"]'
+                    )).filter(s => s && !s.disabled && s.value && s.value !== "0");
+                    const selected = selects.map(s => s.value).filter(Boolean);
+                    return selected.length ? selected.join(',') : '';
+                })();
+            """,
+            config_dict,
+            timeout_seconds=_TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+            reason="TIXCRAFT_TICKET_COUNT",
+            default="",
+        )
         result = util.parse_nodriver_result(result)
         if result:
             _state["last_ticket_count"] = str(result)
+            _state["last_ticket_count_confirmed"] = True
             return str(result)
     except Exception:
         pass
@@ -759,41 +2583,72 @@ async def _read_tixcraft_ticket_count(tab, config_dict):
 def _extract_tixcraft_seat_rows(text_values):
     found = []
     seen = set()
+    pattern = re.compile(r"(?<!\d)(?:第\s*)?(\d{1,4})\s*排\s*(?:第\s*)?(\d{1,4})\s*號")
+    unreserved_markers = (
+        "自由入場",
+        "自由席",
+        "未劃位",
+        "未划位",
+        "general admission",
+        "unreserved seating",
+    )
     for text in text_values or []:
-        for row_number, seat_number in re.findall(r"(?<!\d)(\d{1,4})\s*排\s*(\d{1,4})\s*號", str(text)):
+        normalized_text = str(text)
+        for row_number, seat_number in pattern.findall(normalized_text):
             seat = f"{int(row_number)}排{int(seat_number)}號"
             if seat not in seen:
                 seen.add(seat)
                 found.append(seat)
+    if found:
+        return found
+    combined = " ".join(str(text or "").casefold() for text in text_values or [])
+    if any(marker in combined for marker in unreserved_markers):
+        return ["自由入場／未劃位"]
     return found
 
 
-async def _read_tixcraft_seat_rows(tab):
+async def _read_tixcraft_seat_rows_once(
+    tab,
+    config_dict=None,
+    timeout_seconds=_TIXCRAFT_SEAT_EVALUATE_TIMEOUT_SECONDS,
+):
     try:
-        result = await tab.evaluate("""
-            (function() {
-                const values = [];
-                const seenElements = new Set();
-                const selectors = [
-                    'table.ticket-list tbody tr',
-                    'table.order-list tbody tr',
-                    '.ticket-info',
-                    '.seat-info',
-                    '[class*="seat"]',
-                    '.order-info li'
-                ];
-                for (const selector of selectors) {
-                    for (const el of Array.from(document.querySelectorAll(selector))) {
-                        if (seenElements.has(el)) continue;
-                        seenElements.add(el);
-                        const text = (el.innerText || el.textContent || '').trim();
-                        if (text) values.push(text);
+        result = await runtime_health.evaluate_with_timeout(
+            tab,
+            """
+                (function() {
+                    const values = [];
+                    const seenElements = new Set();
+                    const selectors = [
+                        'table.ticket-list tbody tr',
+                        'table.order-list tbody tr',
+                        '.ticket-info',
+                        '.seat-info',
+                        '[data-seat]',
+                        '[data-seat-number]',
+                        '.checkout-ticket',
+                        '.ticket-unit',
+                        '.order-ticket',
+                        '.order-info li',
+                        '.order-info .seat',
+                        '.order-info .ticket'
+                    ];
+                    for (const selector of selectors) {
+                        for (const el of Array.from(document.querySelectorAll(selector))) {
+                            if (seenElements.has(el)) continue;
+                            seenElements.add(el);
+                            const text = (el.innerText || el.textContent || '').trim();
+                            if (text) values.push(text);
+                        }
                     }
-                }
-                if (!values.length && document.body) values.push(document.body.innerText || '');
-                return JSON.stringify(values.slice(0, 100));
-            })();
-        """)
+                    return JSON.stringify(values.slice(0, 100));
+                })();
+            """,
+            config_dict,
+            timeout_seconds=timeout_seconds,
+            reason="TIXCRAFT_CHECKOUT_SEATS",
+            default="[]",
+        )
         result = util.parse_nodriver_result(result)
         if isinstance(result, str):
             try:
@@ -812,28 +2667,56 @@ async def _read_tixcraft_seat_rows(tab):
     return []
 
 
-async def _read_tixcraft_seat_area(tab):
+async def _read_tixcraft_seat_rows(
+    tab,
+    attempts=_TIXCRAFT_SEAT_READ_ATTEMPTS,
+    interval_seconds=_TIXCRAFT_SEAT_READ_INTERVAL_SECONDS,
+    config_dict=None,
+    evaluate_timeout_seconds=_TIXCRAFT_SEAT_EVALUATE_TIMEOUT_SECONDS,
+):
+    attempts = max(1, int(attempts))
+    for attempt_index in range(attempts):
+        rows = await _read_tixcraft_seat_rows_once(
+            tab,
+            config_dict,
+            timeout_seconds=evaluate_timeout_seconds,
+        )
+        if rows:
+            return rows
+        if attempt_index + 1 < attempts and interval_seconds > 0:
+            await asyncio.sleep(interval_seconds)
+    return []
+
+
+async def _read_tixcraft_seat_area(tab, config_dict=None):
     try:
-        raw_value = await tab.evaluate("""
-            (function() {
-                const selectors = [
-                    '[data-area-name]',
-                    '.area-name',
-                    '.zone-name',
-                    '.ticket-area',
-                    '.order-info .area',
-                    '.ticket-info .area'
-                ];
-                for (const selector of selectors) {
-                    const el = document.querySelector(selector);
-                    if (!el) continue;
-                    const value = el.getAttribute('data-area-name') ||
-                        el.innerText || el.textContent || '';
-                    if (value.trim()) return value.trim();
-                }
-                return '';
-            })();
-        """)
+        raw_value = await runtime_health.evaluate_with_timeout(
+            tab,
+            """
+                (function() {
+                    const selectors = [
+                        '[data-area-name]',
+                        '.area-name',
+                        '.zone-name',
+                        '.ticket-area',
+                        '.order-info .area',
+                        '.ticket-info .area'
+                    ];
+                    for (const selector of selectors) {
+                        const el = document.querySelector(selector);
+                        if (!el) continue;
+                        const value = el.getAttribute('data-area-name') ||
+                            el.innerText || el.textContent || '';
+                        if (value.trim()) return value.trim();
+                    }
+                    return '';
+                })();
+            """,
+            config_dict,
+            timeout_seconds=_TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+            reason="TIXCRAFT_SEAT_AREA",
+            default="",
+        )
         raw_value = util.parse_nodriver_result(raw_value)
         return _clean_tixcraft_area_name(raw_value)
     except asyncio.CancelledError:
@@ -846,27 +2729,72 @@ async def _read_tixcraft_seat_area(tab):
         return ""
 
 
-async def _build_tixcraft_notification_context(tab, config_dict, stage, url):
-    event_name = await _remember_tixcraft_event_name(tab, url)
-    ticket_count = await _read_tixcraft_ticket_count(tab, config_dict)
-    event_id = _state.get("current_event_id", "")
-    game_id = _state.get("current_game_id", "")
+async def _build_tixcraft_notification_context(
+    tab,
+    config_dict,
+    stage,
+    url,
+    *,
+    seat_rows_override=None,
+):
+    attempt = _get_tixcraft_purchase_attempt()
+    event_snapshot = attempt.event_snapshot if attempt is not None else None
+    if event_snapshot is None:
+        await _remember_tixcraft_event_name(tab, url)
+        event_snapshot = _get_current_tixcraft_event_snapshot()
+        if (
+            attempt is not None
+            and event_snapshot is not None
+            and (not attempt.event_id or attempt.event_id == event_snapshot.event_id)
+        ):
+            # First notification is the freeze point for a still-provisional
+            # snapshot. All later stages in the same attempt reuse it.
+            attempt.event_snapshot = event_snapshot
+    event_name = event_snapshot.event_name if event_snapshot is not None else ""
+    ticket_count = attempt.ticket_count if attempt is not None else ""
+    if not ticket_count:
+        ticket_count = await _read_tixcraft_ticket_count(tab, config_dict)
+        if attempt is not None:
+            attempt.ticket_count = ticket_count
+            attempt.ticket_count_confirmed = bool(
+                _state.get("last_ticket_count_confirmed", False)
+            )
+    event_id = (
+        attempt.event_id
+        if attempt is not None and attempt.event_id
+        else _state.get("current_event_id", "")
+    )
+    game_id = (
+        attempt.game_id
+        if attempt is not None and attempt.game_id
+        else _state.get("current_game_id", "")
+    )
     area_metadata = _state.get("selected_area_metadata") or {}
-    seat_area = ""
+    metadata_attempt_id = area_metadata.get("attempt_id")
+    seat_area = attempt.seat_area if attempt is not None else ""
     if (
-        area_metadata.get("confirmed")
+        not seat_area
+        and area_metadata.get("confirmed")
         and area_metadata.get("event_id", "") == event_id
         and area_metadata.get("game_id", "") == game_id
+        and area_metadata.get("flow_generation", 0)
+        == _state.get("notification_flow_generation", 0)
+        and (
+            attempt is None
+            or metadata_attempt_id in {None, attempt.attempt_id}
+        )
     ):
         seat_area = _clean_tixcraft_area_name(area_metadata.get("name", ""))
     if not seat_area:
-        seat_area = await _read_tixcraft_seat_area(tab)
-    if not seat_area:
-        missing_fields = ["seat_area"]
-    else:
-        missing_fields = []
+        seat_area = await _read_tixcraft_seat_area(tab, config_dict)
+    if attempt is not None and seat_area and not attempt.seat_area:
+        attempt.seat_area = seat_area
+
+    missing_fields = []
     if not _is_valid_tixcraft_event_name(event_name, event_id):
-        missing_fields.insert(0, "event_name")
+        missing_fields.append("event_name")
+    if not seat_area:
+        missing_fields.append("seat_area")
     if missing_fields:
         warning_key = (event_id, game_id, tuple(missing_fields))
         if _state.get("last_notification_metadata_warning") != warning_key:
@@ -879,11 +2807,19 @@ async def _build_tixcraft_notification_context(tab, config_dict, stage, url):
             _state["last_notification_metadata_warning"] = warning_key
         return None
     _state["last_notification_metadata_warning"] = None
+
     seat_rows = "訂單建立中﹍" if stage == "order_pending" else "-"
-    if stage in {"checkout_reached", "payment_reached"}:
-        rows = await _read_tixcraft_seat_rows(tab)
-        if rows:
-            seat_rows = rows
+    if seat_rows_override is not None:
+        seat_rows = seat_rows_override
+    elif stage in {"checkout_reached", "payment_reached"}:
+        rows = await _read_tixcraft_seat_rows(tab, config_dict=config_dict)
+        seat_rows = rows or _TIXCRAFT_CHECKOUT_SEAT_FALLBACK
+        attempt = _get_tixcraft_purchase_attempt()
+        if attempt is not None:
+            attempt.checkout_fallback_sent = not bool(rows)
+            if attempt.checkout_fallback_sent and attempt.checkout_seat_poll_started_at <= 0:
+                attempt.checkout_seat_poll_started_at = time.monotonic()
+                attempt.checkout_seat_poll_next_at = attempt.checkout_seat_poll_started_at
     return make_notification_context(
         platform="TixCraft",
         stage=stage,
@@ -897,25 +2833,111 @@ async def _build_tixcraft_notification_context(tab, config_dict, stage, url):
     )
 
 
+def _build_tixcraft_metadata_failure_context(config_dict, original_stage, url):
+    """Build an explicit diagnostic notification without fake success metadata."""
+    attempt = _get_tixcraft_purchase_attempt()
+    event_id = (
+        attempt.event_id
+        if attempt is not None and attempt.event_id
+        else _state.get("current_event_id", "")
+    )
+    event_snapshot = attempt.event_snapshot if attempt is not None else None
+    if event_snapshot is None:
+        event_snapshot = _get_current_tixcraft_event_snapshot(event_id=event_id)
+    event_name = event_snapshot.event_name if event_snapshot is not None else ""
+    if not _is_valid_tixcraft_event_name(event_name, event_id):
+        event_name = "活動資料讀取失敗"
+    seat_area = attempt.seat_area if attempt is not None else ""
+    area_metadata = _state.get("selected_area_metadata") or {}
+    metadata_matches = (
+        area_metadata.get("confirmed")
+        and area_metadata.get("event_id", "") == event_id
+        and area_metadata.get("game_id", "") == _state.get("current_game_id", "")
+        and area_metadata.get("flow_generation", 0)
+        == _state.get("notification_flow_generation", 0)
+        and (
+            attempt is None
+            or area_metadata.get("attempt_id") == attempt.attempt_id
+        )
+    )
+    if not seat_area and metadata_matches:
+        seat_area = _clean_tixcraft_area_name(area_metadata.get("name", ""))
+    if not seat_area:
+        seat_area = "區域資料讀取失敗"
+    ticket_count = attempt.ticket_count if attempt is not None else ""
+    if not ticket_count and attempt is None:
+        ticket_count = str(_state.get("last_ticket_count") or "")
+    if not ticket_count:
+        ticket_count = str((config_dict or {}).get("ticket_number") or "-")
+    return make_notification_context(
+        platform="TixCraft",
+        stage=original_stage,
+        event_name=event_name,
+        ticket_count=ticket_count,
+        seat_area=seat_area,
+        seat_rows="資料擷取失敗，請立即查看目前頁面",
+        current_url=url,
+        page_class=classify_page(url).value,
+        last_valid_area_url=_state.get("last_valid_area_url", ""),
+    )
+
+
+async def _maybe_emit_tixcraft_seat_supplement(tab, config_dict, url):
+    """Compatibility no-op: TixCraft emits exactly two notification stages."""
+    return False
+
+
 async def _recover_to_last_valid_area(tab, config_dict, reason):
     debug = util.create_debug_logger(config_dict)
-    last_area_url = _state.get("last_valid_area_url", "")
+    last_area_url = _normalize_tixcraft_area_url(_state.get("last_valid_area_url", ""))
     if not last_area_url:
         debug.log(f"[TIXCRAFT RECOVERY] No last_valid_area_url for {reason}")
         _reset_tixcraft_submit_state()
         _reset_tixcraft_area_retry_state()
         return False
+    _set_tixcraft_attempt_phase(TixCraftAttemptPhase.RECOVERING_TO_AREA)
     _reset_tixcraft_submit_state()
     _reset_tixcraft_area_retry_state()
-    _state["tixcraft_area_reload_next_at"] = 0
     debug.log(f"[TIXCRAFT RECOVERY] {reason}; navigating back to area: {last_area_url}")
     try:
-        await runtime_health.guarded_get(
+        navigated = await runtime_health.guarded_get(
             tab,
             last_area_url,
             config_dict,
             reason="RECOVERY_TO_AREA",
         )
+        ready = await runtime_health.wait_for_interactive_ready(tab, config_dict)
+        if not ready:
+            runtime_health.runtime_log(
+                "[TIXCRAFT RECOVERY] landing_not_interactive",
+                config_dict,
+                current_url=last_area_url,
+            )
+            return False
+        landed_url = _get_cached_tab_url(tab)
+        if _normalize_tixcraft_area_url(landed_url) != last_area_url:
+            runtime_health.runtime_log(
+                "[TIXCRAFT RECOVERY] landing_not_confirmed",
+                config_dict,
+                expected_url=last_area_url,
+                current_url=landed_url,
+                guarded_result=bool(navigated),
+            )
+            return False
+        recovery_snapshot = await _read_tixcraft_page_health(tab, config_dict)
+        if not _is_tixcraft_recovery_health_confirmed(
+            recovery_snapshot,
+            PageClass.AREA,
+        ):
+            runtime_health.runtime_log(
+                "[TIXCRAFT RECOVERY] landing_document_not_confirmed",
+                config_dict,
+                expected_url=last_area_url,
+                current_url=landed_url,
+                guarded_result=bool(navigated),
+            )
+            return False
+        _mark_tixcraft_recovery_landed(config_dict, last_area_url)
         _record_action("rejected_recover_to_area" if reason != "manual_cancel" else "manual_cancel_recover_to_area")
         return True
     except Exception as exc:
@@ -949,26 +2971,44 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
     """Throttle reloads without blocking the ticket-purchase polling loop."""
     debug = util.create_debug_logger(config_dict)
     interval = _get_auto_reload_interval(config_dict)
-    now = time.time()
+    now = time.monotonic()
     current_url = getattr(getattr(tab, "target", None), "url", "") or ""
+    current_url_key = _normalize_tixcraft_area_url(current_url) or current_url
     url_key = f"{state_key}_url"
     next_key = f"{state_key}_next_at"
     log_key = f"{state_key}_last_wait_log"
 
-    if _state.get(url_key) != current_url:
-        _state[url_key] = current_url
+    if _state.get(url_key) != current_url_key:
+        _state[url_key] = current_url_key
         _state[next_key] = 0
 
     if interval <= 0:
         return False
 
-    if should_use_leak_watch(config_dict, current_url):
-        scheduler = _get_leak_scheduler()
-        can_reload, reason = scheduler.can_reload(config_dict, current_url, now)
-        if not can_reload:
-            runtime_health.runtime_log(
+    if is_leak_watch_mode(config_dict):
+        # An empty cached target URL is not proof that we are still on an
+        # eligible AREA page.  Treat it as unknown and wait for the URL
+        # reconciler instead of falling through to a blind reload.
+        if not current_url or not should_use_leak_watch(config_dict, current_url):
+            _runtime_log_rate_limited(
+                f"{state_key}_unsafe_runtime_log",
                 "[LEAK] reload_skipped",
                 config_dict,
+                now=now,
+                identity=f"not_leak_safe_page:{_tixcraft_route_key(current_url)}",
+                reason="not_leak_safe_page",
+                current_url=_tixcraft_route_key(current_url),
+            )
+            return False
+        scheduler = _get_leak_scheduler()
+        can_reload, reason = scheduler.can_reload(config_dict, current_url_key, now)
+        if not can_reload:
+            _runtime_log_rate_limited(
+                f"{state_key}_runtime_wait_log",
+                "[LEAK] reload_skipped",
+                config_dict,
+                now=now,
+                identity=f"{reason}:{current_url_key}",
                 reason=reason,
                 current_url=current_url,
             )
@@ -977,7 +3017,8 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
                 debug.log(f"{log_prefix} Waiting {scheduler.next_cycle_at - now:.1f}s until next leak reload")
             return False
 
-        scheduler.begin_reload_cycle(current_url)
+        if not scheduler.begin_reload_cycle(current_url_key, now=now):
+            return False
         runtime_health.runtime_log("[LEAK] cycle_start", config_dict, current_url=current_url)
         debug.log(f"{log_prefix} Leak-watch reload starting")
         reload_success = False
@@ -993,10 +3034,18 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
             return reload_success
         except Exception as exc:
             debug.log(f"{log_prefix} Leak-watch reload failed: {exc}")
-            runtime_health.runtime_log("[LEAK] reload_error", config_dict, error=str(exc))
+            runtime_health.runtime_log(
+                "[LEAK] reload_error",
+                config_dict,
+                error_type=type(exc).__name__,
+            )
             return False
         finally:
-            scheduler.finish_reload_cycle(config_dict, reload_success)
+            scheduler.finish_reload_cycle(
+                config_dict,
+                reload_success,
+                now=time.monotonic(),
+            )
             runtime_health.runtime_log("[LEAK] cycle_end", config_dict, current_url=current_url)
 
     next_at = _state.get(next_key, 0)
@@ -2398,6 +4447,48 @@ async def nodriver_tixcraft_input_check_code(tab, config_dict, fail_list, questi
 
 async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name):
     debug = util.create_debug_logger(config_dict)
+    now_monotonic = time.monotonic()
+    if _state.pop("date_navigation_retry_due", False):
+        await _reload_page_when_due(
+            tab,
+            config_dict,
+            "tixcraft_date_reload",
+            "[DATE SELECT]",
+        )
+        return False
+    pending_date = _state.get("pending_date_navigation")
+    if isinstance(pending_date, TixCraftPendingNavigation):
+        same_tab = not pending_date.tab_identity or pending_date.tab_identity == id(tab)
+        same_route = _tixcraft_route_key(url) == _tixcraft_route_key(
+            pending_date.source_url
+        )
+        if not same_tab or not same_route:
+            _state.pop("pending_date_navigation", None)
+        elif not _pending_navigation_expired(pending_date, now_monotonic):
+            _runtime_log_rate_limited(
+                "tixcraft_date_navigation_wait_log",
+                "[DATE] click_waiting_navigation",
+                config_dict,
+                now=now_monotonic,
+                identity=pending_date.source_url,
+                current_url=url,
+            )
+            return True
+        else:
+            _state.pop("pending_date_navigation", None)
+            _state["date_navigation_retry_due"] = False
+            runtime_health.runtime_log(
+                "[DATE] click_not_navigated",
+                config_dict,
+                current_url=url,
+            )
+            await _reload_page_when_due(
+                tab,
+                config_dict,
+                "tixcraft_date_reload",
+                "[DATE SELECT]",
+            )
+            return False
 
     # Issue #188: Check sold out cooldown before proceeding
     if _state and _state.get("sold_out_cooldown_until", 0) > time.time():
@@ -2445,7 +4536,19 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
             pass  # timeout 沒關係，繼續嘗試讀取
 
         try:
-            area_list = await tab.query_selector_all('#gameList > table > tbody > tr')
+            if is_leak_watch_mode(config_dict):
+                area_list = await runtime_health.query_selector_all_with_timeout(
+                    tab,
+                    "#gameList > table > tbody > tr",
+                    config_dict,
+                    timeout_seconds=_TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                    reason="DATE_QUERY_ROWS",
+                    log_success=False,
+                )
+            else:
+                area_list = await tab.query_selector_all(
+                    "#gameList > table > tbody > tr"
+                )
         except Exception:
             pass
 
@@ -2459,7 +4562,24 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
 
     if 'html_lang' not in _state:
         try:
-            _state['html_lang'] = await tab.evaluate('document.documentElement.lang') or 'en-US'
+            if is_leak_watch_mode(config_dict):
+                _state['html_lang'] = (
+                    await runtime_health.evaluate_with_timeout(
+                        tab,
+                        "document.documentElement.lang",
+                        config_dict,
+                        timeout_seconds=_TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                        reason="DATE_HTML_LANG",
+                        default="en-US",
+                        log_success=False,
+                    )
+                    or "en-US"
+                )
+            else:
+                _state['html_lang'] = (
+                    await tab.evaluate("document.documentElement.lang")
+                    or "en-US"
+                )
         except Exception:
             _state['html_lang'] = 'en-US'
     html_lang = _state['html_lang']
@@ -2475,9 +4595,21 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
         # Batch fetch all row HTML in one CDP round-trip (~9-16x faster than sequential get_html())
         all_row_htmls = None
         try:
-            all_row_htmls_raw = await tab.evaluate(
-                "JSON.stringify(Array.from(document.querySelectorAll('#gameList > table > tbody > tr')).map(r => r.outerHTML))"
+            row_cache_script = (
+                "JSON.stringify(Array.from(document.querySelectorAll("
+                "'#gameList > table > tbody > tr')).map(r => r.outerHTML))"
             )
+            if is_leak_watch_mode(config_dict):
+                all_row_htmls_raw = await runtime_health.evaluate_with_timeout(
+                    tab,
+                    row_cache_script,
+                    config_dict,
+                    timeout_seconds=_TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                    reason="DATE_ROW_CACHE",
+                    log_success=False,
+                )
+            else:
+                all_row_htmls_raw = await tab.evaluate(row_cache_script)
             all_row_htmls = _parse_tixcraft_row_htmls(all_row_htmls_raw)
         except Exception:
             pass
@@ -2486,7 +4618,15 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                 if all_row_htmls and i < len(all_row_htmls):
                     row_html = all_row_htmls[i]
                 else:
-                    row_html = await row.get_html()
+                    if is_leak_watch_mode(config_dict):
+                        row_html = await _run_bounded_tixcraft_operation(
+                            row.get_html(),
+                            _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                            "DATE_FALLBACK_ROW_HTML",
+                            config_dict,
+                        )
+                    else:
+                        row_html = await row.get_html()
                 row_text = util.remove_html_tags(row_html)
             except Exception:
                 break
@@ -2634,20 +4774,33 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
 
     # 移除：內部選擇細節過度詳細
 
+    navigation_observed = False
     if target_area:
         # Priority: button with data-href (tixcraft/indievox) > regular link > regular button
         # IMPORTANT: Search within target_area, not the whole page
         click_method_used = None
+        navigation_confirmed = False
+        data_href_attempted = False
         try:
             debug.log("[DATE SELECT] Trying button[data-href] method within target_area...")
 
             # Method 1: button[data-href] within target_area (tixcraft/indievox specific)
             # 使用 NoDriver Element API 取得 data-href
-            button_with_href = await target_area.query_selector('button[data-href]')
+            button_with_href = await _run_bounded_tixcraft_operation(
+                target_area.query_selector("button[data-href]"),
+                _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                "DATE_QUERY_DATA_HREF",
+                config_dict,
+            )
             data_href = None
             if button_with_href:
                 # 更新元素以確保屬性載入
-                await button_with_href.update()
+                await _run_bounded_tixcraft_operation(
+                    button_with_href.update(),
+                    _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                    "DATE_UPDATE_DATA_HREF",
+                    config_dict,
+                )
                 button_attrs = button_with_href.attrs or {}
                 data_href = button_attrs.get('data-href')
 
@@ -2658,44 +4811,152 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                         debug.log("[DATE SELECT] button[data-href] found but no href value")
 
                 if data_href:
+                    data_href_attempted = True
                     debug.log("[DATE SELECT] Navigating via button[data-href]...")
-                    await runtime_health.guarded_get(tab, data_href, config_dict, reason="DATE_DATA_HREF")
-                    is_date_clicked = True
-                    click_method_used = "button[data-href]"
-                    debug.log("[DATE SELECT] Successfully navigated via button[data-href]")
+                    try:
+                        navigated = await runtime_health.guarded_get(
+                            tab,
+                            data_href,
+                            config_dict,
+                            reason="DATE_DATA_HREF",
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as navigation_exc:
+                        navigated = False
+                        runtime_health.runtime_log(
+                            "[DATE] guarded_navigation_error",
+                            config_dict,
+                            error_type=type(navigation_exc).__name__,
+                            source_url=_tixcraft_route_key(url),
+                        )
+                    current_target_url = _get_cached_tab_url(tab)
+                    navigation_observed = _is_confirmed_navigation(
+                        url,
+                        current_target_url,
+                        classify_page(current_target_url),
+                        allowed_pages=_TIXCRAFT_CONFIRMED_DATE_TARGET_PAGES,
+                    )
+                    navigation_confirmed = bool(navigated) and navigation_observed
+                    if navigation_confirmed:
+                        is_date_clicked = True
+                        click_method_used = "button[data-href]"
+                        debug.log(
+                            "[DATE SELECT] Navigation confirmed via button[data-href]"
+                        )
+                    elif navigated or navigation_observed:
+                        _set_pending_date_navigation(
+                            tab,
+                            url,
+                            data_href,
+                            config_dict,
+                        )
+                        # A cached route transition after guarded_get=False is a
+                        # navigation race, not a confirmed success. Preserve a
+                        # pending token so this freshly landed page is never
+                        # reloaded in the same iteration.
+                        is_date_clicked = bool(navigated)
+                        click_method_used = (
+                            "button[data-href] pending"
+                            if navigated
+                            else "button[data-href] route observed"
+                        )
+                        debug.log(
+                            "[DATE SELECT] Navigation in flight; "
+                            "waiting for route confirmation"
+                        )
+                    else:
+                        runtime_health.runtime_log(
+                            "[DATE] guarded_navigation_not_confirmed",
+                            config_dict,
+                            guarded_result=bool(navigated),
+                            source_url=url,
+                        )
             else:
                 debug.log("[DATE SELECT] No button[data-href] in target_area, will try fallback methods")
         except Exception as e:
             debug.log(f"[DATE SELECT] button[data-href] method failed: {e}")
 
         # Method 2: regular link or button click
-        if not is_date_clicked:
+        if not is_date_clicked and not data_href_attempted:
             try:
                 debug.log("[DATE SELECT] Trying link <a[href]> method within target_area...")
 
                 # Try link first (ticketmaster, etc)
-                link = await target_area.query_selector('a[href]')
+                link = await _run_bounded_tixcraft_operation(
+                    target_area.query_selector("a[href]"),
+                    _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                    "DATE_QUERY_LINK",
+                    config_dict,
+                )
                 if link:
                     debug.log("[DATE SELECT] Link found in target_area, clicking...")
-                    await link.click()
+                    await _run_bounded_tixcraft_operation(
+                        link.click(),
+                        _TIXCRAFT_CLICK_DISPATCH_TIMEOUT_SECONDS,
+                        "DATE_LINK_CLICK",
+                        config_dict,
+                    )
+                    _set_pending_date_navigation(
+                        tab,
+                        url,
+                        "",
+                        config_dict,
+                    )
                     is_date_clicked = True
                     click_method_used = "link <a[href]>"
-                    debug.log("[DATE SELECT] Successfully clicked via link")
+                    debug.log("[DATE SELECT] Link click dispatched; waiting for navigation")
                 else:
                     debug.log("[DATE SELECT] No link found, trying regular button within target_area...")
 
                     # Try regular button
-                    button = await target_area.query_selector('button')
+                    button = await _run_bounded_tixcraft_operation(
+                        target_area.query_selector("button"),
+                        _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                        "DATE_QUERY_BUTTON",
+                        config_dict,
+                    )
                     if button:
                         debug.log("[DATE SELECT] Regular button found in target_area, clicking...")
-                        await button.click()
+                        await _run_bounded_tixcraft_operation(
+                            button.click(),
+                            _TIXCRAFT_CLICK_DISPATCH_TIMEOUT_SECONDS,
+                            "DATE_BUTTON_CLICK",
+                            config_dict,
+                        )
+                        _set_pending_date_navigation(
+                            tab,
+                            url,
+                            "",
+                            config_dict,
+                        )
                         is_date_clicked = True
                         click_method_used = "regular button"
-                        debug.log("[DATE SELECT] Successfully clicked via regular button")
+                        debug.log("[DATE SELECT] Button click dispatched; waiting for navigation")
                     else:
                         debug.log("[DATE SELECT] No clickable element found in target_area")
             except Exception as e:
-                debug.log(f"[DATE SELECT] Click error: {e}")
+                current_target_url = _get_cached_tab_url(tab)
+                navigation_observed = _is_confirmed_navigation(
+                    url,
+                    current_target_url,
+                    classify_page(current_target_url),
+                    allowed_pages=_TIXCRAFT_CONFIRMED_DATE_TARGET_PAGES,
+                )
+                if navigation_observed:
+                    _set_pending_date_navigation(
+                        tab,
+                        url,
+                        current_target_url,
+                        config_dict,
+                    )
+                    runtime_health.runtime_log(
+                        "[DATE] click_navigation_observed",
+                        config_dict,
+                        error_type=type(e).__name__,
+                        current_url=current_target_url,
+                    )
+                debug.log(f"[DATE SELECT] Click error: {type(e).__name__}")
 
         # Final summary
         if debug.enabled:
@@ -2710,20 +4971,231 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                 debug.log(f"[DATE SELECT] ========================================")
 
     # Auto refresh if no date was selected (for strict mode or sold out scenarios)
-    if not is_date_clicked:
+    if not is_date_clicked and not navigation_observed:
         await _reload_page_when_due(tab, config_dict, "tixcraft_date_reload", "[DATE SELECT]")
-    else:
+    elif is_date_clicked and "pending_date_navigation" not in _state:
         _state["tixcraft_date_reload_next_at"] = 0
 
     return is_date_clicked
 
+
+_TIXCRAFT_RECOVERY_SCAN_COMPLETED_OUTCOMES = {
+    TixCraftAreaOutcome.ZONE_MISSING,
+    TixCraftAreaOutcome.NO_AVAILABLE_AREA,
+    TixCraftAreaOutcome.CLICK_DISPATCHED,
+    TixCraftAreaOutcome.CLICK_NOT_NAVIGATED,
+}
+
+
+async def _finalize_tixcraft_area_iteration(
+    tab,
+    url,
+    config_dict,
+    outcome,
+):
+    """Apply recovery and reload policy for every area-loop outcome."""
+    normalized_outcome = TixCraftAreaOutcome(outcome)
+    now = time.monotonic()
+    recovery_pending = bool(
+        _state.get("soft_block_recovery_scan_pending", False)
+    )
+    if recovery_pending:
+        deadline = float(
+            _state.get("soft_block_recovery_scan_deadline", 0.0) or 0.0
+        )
+        if normalized_outcome in _TIXCRAFT_RECOVERY_SCAN_COMPLETED_OUTCOMES:
+            _clear_tixcraft_recovery_scan_guard()
+            runtime_health.runtime_log(
+                "[EPS BLOCK] recovery_scan_completed_without_reload",
+                config_dict,
+                outcome=normalized_outcome.value,
+                current_url=url,
+            )
+            return False
+        if deadline > now:
+            _runtime_log_rate_limited(
+                "tixcraft_recovery_scan_wait_log",
+                "[EPS BLOCK] recovery_scan_waiting",
+                config_dict,
+                now=now,
+                identity=f"{normalized_outcome.value}:{_tixcraft_route_key(url)}",
+                outcome=normalized_outcome.value,
+                current_url=url,
+            )
+            return False
+        _clear_tixcraft_recovery_scan_guard()
+        runtime_health.runtime_log(
+            "[EPS BLOCK] recovery_scan_deadline_expired",
+            config_dict,
+            outcome=normalized_outcome.value,
+            current_url=url,
+        )
+
+    if normalized_outcome in {
+        TixCraftAreaOutcome.CLICK_DISPATCHED,
+        TixCraftAreaOutcome.CLICK_WAITING_NAVIGATION,
+        TixCraftAreaOutcome.NAVIGATION_CONFIRMED,
+    }:
+        return False
+
+    return await _reload_page_when_due(
+        tab,
+        config_dict,
+        "tixcraft_area_reload",
+        "[AREA SELECT]",
+    )
+
+
+def _release_tixcraft_area_dom_scan():
+    scheduler = _state.get("leak_scheduler")
+    if scheduler is None or not getattr(scheduler, "dom_scan_pending", False):
+        return False
+    scheduler.mark_dom_scan_end(now=time.monotonic())
+    return True
+
+
+def _has_tixcraft_area_navigation_transitioned(tab, source_url):
+    current_url = _get_cached_tab_url(tab)
+    return _is_confirmed_navigation(
+        source_url,
+        current_url,
+        classify_page(current_url),
+    )
+
+
+async def _run_bounded_tixcraft_operation(
+    awaitable,
+    timeout_seconds,
+    action,
+    config_dict,
+):
+    # The bounded CDP policy belongs only to leak-watch liveness recovery.
+    # On-sale mode keeps the v0.4.2 direct-await click/query semantics.
+    if not is_leak_watch_mode(config_dict):
+        return await awaitable
+    result = await runtime_health.wait_for_operation(
+        awaitable,
+        timeout_seconds,
+        action,
+        config_dict,
+        default=_TIXCRAFT_OPERATION_TIMEOUT,
+        log_success=False,
+    )
+    if result is _TIXCRAFT_OPERATION_TIMEOUT:
+        raise TimeoutError(f"{action} timed out")
+    return result
+
+
+async def _dispatch_tixcraft_area_click(
+    target_area,
+    tab,
+    source_url,
+    config_dict,
+):
+    """Dispatch a click, bounded only for leak-watch liveness recovery."""
+    timeout_seconds = _TIXCRAFT_CLICK_DISPATCH_TIMEOUT_SECONDS
+    try:
+        await _run_bounded_tixcraft_operation(
+            target_area.click(),
+            timeout_seconds,
+            "AREA_NATIVE_CLICK",
+            config_dict,
+        )
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as click_exc:
+        if _has_tixcraft_area_navigation_transitioned(tab, source_url):
+            runtime_health.runtime_log(
+                "[AREA] native_click_navigation_observed",
+                config_dict,
+                error_type=type(click_exc).__name__,
+                current_url=_get_cached_tab_url(tab),
+            )
+            return True
+        runtime_health.runtime_log(
+            "[AREA] native_click_failed",
+            config_dict,
+            error_type=type(click_exc).__name__,
+            current_url=source_url,
+        )
+
+    try:
+        await _run_bounded_tixcraft_operation(
+            target_area.evaluate("el => el.click()"),
+            timeout_seconds,
+            "AREA_JAVASCRIPT_CLICK",
+            config_dict,
+        )
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as click_exc:
+        if _has_tixcraft_area_navigation_transitioned(tab, source_url):
+            runtime_health.runtime_log(
+                "[AREA] javascript_click_navigation_observed",
+                config_dict,
+                error_type=type(click_exc).__name__,
+                current_url=_get_cached_tab_url(tab),
+            )
+            return True
+        runtime_health.runtime_log(
+            "[AREA] click_failed",
+            config_dict,
+            error_type=type(click_exc).__name__,
+            current_url=source_url,
+        )
+        return False
+
+
 async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
+    """Run one area iteration and always return through the reload finalizer."""
+    try:
+        return await _nodriver_tixcraft_area_auto_select_impl(
+            tab,
+            url,
+            config_dict,
+        )
+    except asyncio.CancelledError:
+        _release_tixcraft_area_dom_scan()
+        raise
+    except Exception as exc:
+        _release_tixcraft_area_dom_scan()
+        runtime_health.runtime_log(
+            "[AREA] iteration_failed",
+            config_dict,
+            error_type=type(exc).__name__,
+            current_url=url,
+        )
+        try:
+            await _finalize_tixcraft_area_iteration(
+                tab,
+                url,
+                config_dict,
+                TixCraftAreaOutcome.DOM_QUERY_FAILED,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as finalize_exc:
+            runtime_health.runtime_log(
+                "[AREA] finalizer_failed",
+                config_dict,
+                error_type=type(finalize_exc).__name__,
+                current_url=url,
+            )
+        return False
+
+
+async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
     # 函數開始時檢查暫停
     if await check_and_handle_pause(config_dict):
         return False
 
     debug = util.create_debug_logger(config_dict)
-    _state["last_valid_area_url"] = url
+    _sync_tixcraft_notification_flow(url)
+    valid_area_url = _normalize_tixcraft_area_url(url)
+    if valid_area_url:
+        _state["last_valid_area_url"] = valid_area_url
     if _state.get("manual_intervention_required"):
         debug.log("[AREA SELECT] Manual intervention cleared after returning to area page")
         _reset_tixcraft_submit_state()
@@ -2737,15 +5209,96 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
 
     leak_dom_guard = should_use_leak_watch(config_dict, url)
     leak_scheduler = _get_leak_scheduler() if leak_dom_guard else None
+    now_monotonic = time.monotonic()
     if leak_dom_guard:
-        if not await runtime_health.wait_for_interactive_ready(tab, config_dict):
-            runtime_health.runtime_log("[AREA] dom_read_skipped", config_dict, reason="page_loading", current_url=url)
-            return False
-        if not leak_scheduler.mark_dom_scan_start():
-            runtime_health.runtime_log("[AREA] dom_read_skipped", config_dict, reason="dom_scan_pending", current_url=url)
-            return False
-        runtime_health.runtime_log("[AREA] dom_read_start", config_dict, current_url=url)
+        expired_events = leak_scheduler.maintenance(
+            config_dict,
+            url,
+            now=now_monotonic,
+        )
+        for expired_event in expired_events:
+            runtime_health.runtime_log(
+                "[LEAK] pending_watchdog_expired",
+                config_dict,
+                reason=expired_event,
+                current_url=url,
+            )
 
+    pending_area = _state.get("pending_area_navigation")
+    if isinstance(pending_area, TixCraftPendingNavigation):
+        same_tab = not pending_area.tab_identity or pending_area.tab_identity == id(tab)
+        same_route = _tixcraft_route_key(url) == _tixcraft_route_key(
+            pending_area.source_url
+        )
+        if not same_tab or not same_route:
+            _clear_pending_area_navigation("area_context_changed", config_dict)
+        elif not _pending_navigation_expired(pending_area, now_monotonic):
+            _runtime_log_rate_limited(
+                "tixcraft_area_navigation_wait_log",
+                "[AREA] click_waiting_navigation",
+                config_dict,
+                now=now_monotonic,
+                identity=f"{pending_area.token}:{pending_area.source_url}",
+                current_url=url,
+            )
+            return False
+        else:
+            _clear_pending_area_navigation("click_not_navigated", config_dict)
+            _state["area_navigation_retry_due"] = False
+            await _finalize_tixcraft_area_iteration(
+                tab,
+                url,
+                config_dict,
+                TixCraftAreaOutcome.CLICK_NOT_NAVIGATED,
+            )
+            return False
+
+    if _state.pop("area_navigation_retry_due", False):
+        await _finalize_tixcraft_area_iteration(
+            tab,
+            url,
+            config_dict,
+            TixCraftAreaOutcome.CLICK_NOT_NAVIGATED,
+        )
+        return False
+
+    if leak_dom_guard:
+        if not await runtime_health.wait_for_interactive_ready(
+            tab,
+            config_dict,
+            log_success=False,
+        ):
+            _runtime_log_rate_limited(
+                "tixcraft_area_page_loading_log",
+                "[AREA] dom_read_skipped",
+                config_dict,
+                identity=_tixcraft_route_key(url),
+                reason="page_loading",
+                current_url=url,
+            )
+            await _finalize_tixcraft_area_iteration(
+                tab,
+                url,
+                config_dict,
+                TixCraftAreaOutcome.PAGE_NOT_READY,
+            )
+            return False
+        if not leak_scheduler.mark_dom_scan_start(now=time.monotonic()):
+            _runtime_log_rate_limited(
+                "tixcraft_area_dom_pending_log",
+                "[AREA] dom_read_skipped",
+                config_dict,
+                identity=_tixcraft_route_key(url),
+                reason="dom_scan_pending",
+                current_url=url,
+            )
+            await _finalize_tixcraft_area_iteration(
+                tab,
+                url,
+                config_dict,
+                TixCraftAreaOutcome.DOM_SCAN_BUSY,
+            )
+            return False
     import json
 
     area_keyword = config_dict["area_auto_select"]["area_keyword"].strip()
@@ -2759,18 +5312,41 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 ".zone",
                 config_dict,
                 reason="AREA_QUERY_ZONE",
+                log_success=False,
             )
         else:
             el = await tab.query_selector('.zone')
-    except Exception:
+    except asyncio.CancelledError:
         if leak_dom_guard:
-            leak_scheduler.mark_dom_scan_end()
-        return
+            leak_scheduler.mark_dom_scan_end(now=time.monotonic())
+        raise
+    except Exception as exc:
+        if leak_dom_guard:
+            leak_scheduler.mark_dom_scan_end(now=time.monotonic())
+        runtime_health.runtime_log(
+            "[AREA] zone_query_failed",
+            config_dict,
+            error_type=type(exc).__name__,
+            current_url=url,
+        )
+        await _finalize_tixcraft_area_iteration(
+            tab,
+            url,
+            config_dict,
+            TixCraftAreaOutcome.DOM_QUERY_FAILED,
+        )
+        return False
 
     if not el:
         if leak_dom_guard:
-            leak_scheduler.mark_dom_scan_end()
-        return
+            leak_scheduler.mark_dom_scan_end(now=time.monotonic())
+        await _finalize_tixcraft_area_iteration(
+            tab,
+            url,
+            config_dict,
+            TixCraftAreaOutcome.ZONE_MISSING,
+        )
+        return False
 
     # Batch pre-fetch: one JS call to get all area text and font data
     area_list_cache = None
@@ -2782,6 +5358,7 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 "a",
                 config_dict,
                 reason="AREA_QUERY_LINKS",
+                log_success=False,
             )
             area_text_cache_raw = await runtime_health.evaluate_with_timeout(
                 tab,
@@ -2793,6 +5370,7 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         """,
                 config_dict,
                 reason="AREA_DOM_READ",
+                log_success=False,
             )
         else:
             area_list_cache = await el.query_selector_all('a')
@@ -2808,20 +5386,23 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         if area_text_cache:
             debug.log(f"[AREA KEYWORD] Batch pre-fetch: {len(area_text_cache)} areas cached")
             _record_action("area_dom_read", str(len(area_text_cache)))
-            runtime_health.runtime_log(
+            _runtime_log_rate_limited(
+                "tixcraft_area_dom_success_log",
                 "[AREA] dom_read_done",
                 config_dict,
+                identity=f"{_tixcraft_route_key(url)}:{len(area_text_cache)}",
                 area_count=len(area_text_cache),
-                current_url=url,
+                current_url=_tixcraft_route_key(url),
             )
     except Exception:
         area_list_cache = None
         area_text_cache = None
     finally:
         if leak_dom_guard:
-            leak_scheduler.mark_dom_scan_end()
+            leak_scheduler.mark_dom_scan_end(now=time.monotonic())
 
     is_need_refresh = False
+    outcome = TixCraftAreaOutcome.NO_AVAILABLE_AREA
     matched_blocks = None
 
     if area_keyword:
@@ -2893,7 +5474,12 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
     else:
         target_area = util.get_target_item_from_matched_list(matched_blocks, auto_select_mode)
     if target_area:
-        area_text = await _read_selected_area_name(target_area, area_list_cache, area_text_cache)
+        area_text = await _read_selected_area_name(
+            target_area,
+            area_list_cache,
+            area_text_cache,
+            config_dict,
+        )
         _state["selected_area_candidate"] = area_text
         if area_text:
             _record_action("area_candidate_selected", area_text)
@@ -2907,58 +5493,49 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 current_url=url,
             )
 
-        click_succeeded = False
-        try:
-            await target_area.click()
-            click_succeeded = True
-        except asyncio.CancelledError:
-            raise
-        except Exception as click_exc:
-            runtime_health.runtime_log(
-                "[AREA] native_click_failed",
-                config_dict,
-                error_type=type(click_exc).__name__,
-                current_url=url,
-            )
-            try:
-                await target_area.evaluate('el => el.click()')
-                click_succeeded = True
-            except asyncio.CancelledError:
-                raise
-            except Exception as js_click_exc:
-                runtime_health.runtime_log(
-                    "[AREA] click_failed",
-                    config_dict,
-                    error_type=type(js_click_exc).__name__,
-                    current_url=url,
-                )
+        click_succeeded = await _dispatch_tixcraft_area_click(
+            target_area,
+            tab,
+            valid_area_url or url,
+            config_dict,
+        )
 
         if click_succeeded:
+            click_now = time.monotonic()
             if leak_dom_guard:
-                leak_scheduler.mark_area_click_pending(url)
-            _state["last_selected_area"] = area_text
-            _state["selected_area_metadata"] = {
-                "name": area_text,
-                "confirmed": bool(area_text),
-                "event_id": _state.get("current_event_id", ""),
-                "game_id": _state.get("current_game_id", ""),
-                "area_url": url,
-            }
-            _record_action("area_clicked", area_text)
+                leak_scheduler.mark_area_click_pending(
+                    valid_area_url or url,
+                    now=click_now,
+                )
+            pending = _set_pending_area_navigation(
+                tab,
+                valid_area_url or url,
+                area_text,
+                config_dict,
+                now=click_now,
+            )
+            outcome = TixCraftAreaOutcome.CLICK_DISPATCHED
+            _record_action("area_click_dispatched", area_text)
             runtime_health.runtime_log(
-                "[AREA] clicked",
+                "[AREA] click_dispatched",
                 config_dict,
                 seat_area=area_text,
+                click_token=pending.token,
                 current_url=url,
             )
         else:
             is_need_refresh = True
+            outcome = TixCraftAreaOutcome.CLICK_NOT_NAVIGATED
 
-    # Auto refresh if needed (simple wait mode, consistent with TicketPlus/iBon/FamiTicket)
-    if is_need_refresh:
-        await _reload_page_when_due(tab, config_dict, "tixcraft_area_reload", "[AREA SELECT]")
-    else:
-        _state["tixcraft_area_reload_next_at"] = 0
+    if is_need_refresh and outcome == TixCraftAreaOutcome.CLICK_DISPATCHED:
+        outcome = TixCraftAreaOutcome.NO_AVAILABLE_AREA
+    await _finalize_tixcraft_area_iteration(
+        tab,
+        url,
+        config_dict,
+        outcome,
+    )
+    return outcome == TixCraftAreaOutcome.CLICK_DISPATCHED
 
 async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
                                             area_list_cache=None, area_text_cache=None):
@@ -2988,7 +5565,19 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
         area_list = area_list_cache
     else:
         try:
-            area_list = await el.query_selector_all('a')
+            if is_leak_watch_mode(config_dict):
+                area_list = await runtime_health.wait_for_operation(
+                    el.query_selector_all("a"),
+                    _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                    "AREA_FALLBACK_QUERY_LINKS",
+                    config_dict,
+                    default=None,
+                    log_success=False,
+                )
+            else:
+                area_list = await el.query_selector_all('a')
+        except asyncio.CancelledError:
+            raise
         except Exception:
             debug.log(f"[AREA KEYWORD] Failed to query area list")
             return True, None
@@ -3009,8 +5598,25 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
             row_text = area_text_cache[area_index - 1].get('text', '')
         else:
             try:
-                row_html = await row.get_html()
+                if is_leak_watch_mode(config_dict):
+                    row_html = await runtime_health.wait_for_operation(
+                        row.get_html(),
+                        _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                        "AREA_FALLBACK_ROW_HTML",
+                        config_dict,
+                        default=None,
+                        log_success=False,
+                    )
+                    if row_html is None:
+                        debug.log(
+                            f"[AREA KEYWORD] [{area_index}] Timed out reading row content"
+                        )
+                        break
+                else:
+                    row_html = await row.get_html()
                 row_text = util.remove_html_tags(row_html)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 debug.log(f"[AREA KEYWORD] [{area_index}] Failed to get row content")
                 break
@@ -3061,9 +5667,31 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
                     font_text = area_text_cache[area_index - 1].get('fontText', '')
                 else:
                     font_text = ''
-                    font_el = await row.query_selector('font')
+                    if is_leak_watch_mode(config_dict):
+                        font_el = await _run_bounded_tixcraft_operation(
+                            row.query_selector("font"),
+                            _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                            "AREA_FALLBACK_QUERY_FONT",
+                            config_dict,
+                        )
+                    else:
+                        font_el = await row.query_selector('font')
                     if font_el:
-                        font_text = await font_el.evaluate('el => el.textContent') or ''
+                        if is_leak_watch_mode(config_dict):
+                            font_text = (
+                                await _run_bounded_tixcraft_operation(
+                                    font_el.evaluate("el => el.textContent"),
+                                    _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+                                    "AREA_FALLBACK_FONT_TEXT",
+                                    config_dict,
+                                )
+                                or ""
+                            )
+                        else:
+                            font_text = (
+                                await font_el.evaluate("el => el.textContent")
+                                or ""
+                            )
                 if font_text:
                     font_text = "@%s@" % font_text
 
@@ -3452,6 +6080,44 @@ async def nodriver_tixcraft_ticket_main_agree(tab, config_dict):
     if not is_finish_checkbox_click:
         debug.log("Warning: Failed to check agreement checkbox")
 
+
+async def _dispatch_tixcraft_enter_submit(tab, current_url, submit_guard) -> bool:
+    """Commit submit state immediately after Enter keyDown triggers the form."""
+
+    await tab.send(
+        cdp.input_.dispatch_key_event(
+            "keyDown",
+            code="Enter",
+            key="Enter",
+            text="\r",
+            windows_virtual_key_code=13,
+        )
+    )
+    submit_guard.mark_submitted(current_url, pending_seconds=1.5)
+    _mark_tixcraft_submit_started(current_url)
+    _record_action("submit_clicked")
+    try:
+        await tab.send(
+            cdp.input_.dispatch_key_event(
+                "keyUp",
+                code="Enter",
+                key="Enter",
+                text="\r",
+                windows_virtual_key_code=13,
+            )
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # keyDown can submit and replace the document before keyUp is sent.
+        runtime_health.runtime_log(
+            "[TIXCRAFT CAPTCHA] Enter keyUp best-effort failed",
+            None,
+            error=str(exc),
+        )
+    return True
+
+
 async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, domain_name):
     # 函數開始時檢查暫停
     if await check_and_handle_pause(config_dict):
@@ -3464,6 +6130,12 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
     ticket_number = str(config_dict["ticket_number"])
     allow_less_tickets = config_dict.get("tixcraft", {}).get("allow_less_tickets", False)
     ticket_state_key = f"ticket_assigned_{current_url}_{ticket_number}_{int(allow_less_tickets)}"
+    for stale_key in list(_state.keys()):
+        if (
+            str(stale_key).startswith("ticket_assigned_")
+            and stale_key != ticket_state_key
+        ):
+            _state.pop(stale_key, None)
 
     # Skip this iteration while a captcha submit is in flight (awaiting navigation).
     if _state.get("captcha_submit_until", 0) > time.time():
@@ -3697,13 +6369,15 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                             if not submit_guard.can_submit(current_url):
                                 debug.log("[TIXCRAFT CAPTCHA] SubmitGuard pending; skip duplicate submit")
                                 return is_verifyCode_editing, False
-                            # 提交表單 (按 Enter) - 使用完整的鍵盤事件
-                            await tab.send(cdp.input_.dispatch_key_event("keyDown", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
-                            await tab.send(cdp.input_.dispatch_key_event("keyUp", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
+                            # Enter keyDown can submit immediately. Persist the
+                            # guard and attempt before the best-effort keyUp.
+                            await _dispatch_tixcraft_enter_submit(
+                                tab,
+                                current_url,
+                                submit_guard,
+                            )
                             is_verifyCode_editing = False
                             is_form_submitted = True
-                            submit_guard.mark_submitted(current_url, pending_seconds=1.5)
-                            _record_action("submit_clicked")
                             # Short submit-in-progress guard: stop the main loop from
                             # re-clicking the captcha input while navigation is pending.
                             _state["captcha_submit_until"] = time.time() + 1.5
@@ -4027,16 +6701,34 @@ async def nodriver_ticketmaster_check_ip_block(tab, config_dict, current_url="")
 
     # Still within previous block wait period
     block_until = _state.get("ip_block_until", 0)
-    if block_until > 0 and time.time() < block_until:
-        remaining = int(block_until - time.time())
-        debug.log(f"[EPS BLOCK] Still waiting for block to expire, {remaining}s remaining")
-        await sleep_with_pause_check(tab, 5, config_dict)
+    now_monotonic = time.monotonic()
+    recovery_retry_at = float(
+        _state.get("soft_block_recovery_retry_at", 0.0) or 0.0
+    )
+    if recovery_retry_at > now_monotonic:
+        return True
+    if block_until > 0 and now_monotonic < block_until:
+        remaining = max(0.0, block_until - now_monotonic)
+        debug.log(
+            f"[EPS BLOCK] Still waiting for block to expire, {remaining:.1f}s remaining"
+        )
+        await sleep_with_pause_check(
+            tab,
+            min(5.0, remaining),
+            config_dict,
+        )
         return True
 
     try:
         detection = await _detect_tixcraft_soft_block(tab, current_url, config_dict)
         if not detection.get("blocked", False):
-            _state["ip_block_count"] = 0
+            if detection.get("health_confirmed", False):
+                _state["ip_block_count"] = 0
+                _clear_tixcraft_soft_block_backoff()
+                return False
+            if _state.get("soft_block_phase") in {"backoff", "recovering"}:
+                _defer_tixcraft_soft_block_recovery(now_monotonic)
+                return True
             return False
         _state["ip_block_count"] = int(_state.get("ip_block_count", 0)) + 1
         await _handle_tixcraft_soft_block(tab, config_dict, current_url, detection)
@@ -4133,18 +6825,48 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             "captcha_submit_until": 0,
             "ocr_completed_url": "",
             "last_valid_area_url": "",
+            "recent_area_route_url": "",
             "last_selected_area": "",
             "selected_area_candidate": "",
             "selected_area_metadata": {},
+            "pending_area_navigation": None,
+            "pending_date_navigation": None,
+            "area_navigation_token": 0,
+            "date_navigation_token": 0,
+            "area_navigation_retry_due": False,
+            "date_navigation_retry_due": False,
             "current_event_id": "",
             "current_game_id": "",
+            "current_event_origin": "",
             "event_name": "",
             "event_name_quality": 0,
+            "event_snapshot": None,
             "event_metadata_cache": {},
+            "event_metadata_next_probe_at": 0.0,
             "last_ticket_count": "",
+            "last_ticket_count_confirmed": False,
             "notification_flow_generation": 0,
             "notification_flow_url": "",
             "last_notification_metadata_warning": None,
+            "notification_session_id": uuid.uuid4().hex,
+            "attempt_sequence": 0,
+            "purchase_attempt": None,
+            "attempt_last_page_class": "",
+            "notification_submit_started_at": 0.0,
+            "notification_order_probe_next_at": 0.0,
+            "notification_retry_at": {},
+            "soft_block_blank_since": 0.0,
+            "soft_block_blank_url": "",
+            "soft_block_probe_failure_since": 0.0,
+            "soft_block_probe_failure_url": "",
+            "soft_block_probe_failure_count": 0,
+            "soft_block_known_good_url": "",
+            "soft_block_known_good_at": 0.0,
+            "soft_block_recovery_in_progress": False,
+            "soft_block_recovery_landing_url": "",
+            "soft_block_recovery_landed_at": 0.0,
+            "soft_block_recovery_scan_pending": False,
+            "soft_block_recovery_scan_deadline": 0.0,
             "manual_intervention_required": False,
             "last_homepage_redirect_time": 0,
             "sold_out_cooldown_until": 0,
@@ -4153,6 +6875,9 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             "ticketmaster_captcha_processed_url": "",
             "ip_block_until": 0,
             "ip_block_count": 0,
+            "soft_block_phase": "",
+            "soft_block_backoff_until": 0.0,
+            "soft_block_recovery_retry_at": 0.0,
             "queue_it_enter_time": None,
         })
 
@@ -4192,10 +6917,41 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         if await nodriver_ticketmaster_check_ip_block(tab, config_dict, current_url=url):
             return False
 
+    observed_area_url = _normalize_tixcraft_area_url(url)
+    if observed_area_url:
+        _state["last_valid_area_url"] = observed_area_url
+        _state["recent_area_route_url"] = observed_area_url
+
     page_class = classify_page(url)
-    runtime_health.runtime_log("[TIXCRAFT] dispatch", config_dict, page_class=page_class.value, current_url=url)
-    if page_class != PageClass.AREA and "leak_scheduler" in _state:
-        _state["leak_scheduler"].clear_area_click_pending()
+    if should_use_leak_watch(config_dict):
+        scheduler = _get_leak_scheduler()
+        expired_events = scheduler.maintenance(
+            config_dict,
+            url,
+            now=time.monotonic(),
+        )
+        for expired_event in expired_events:
+            runtime_health.runtime_log(
+                "[LEAK] pending_watchdog_expired",
+                config_dict,
+                reason=expired_event,
+                current_url=url,
+            )
+    _reconcile_tixcraft_pending_navigation(
+        tab,
+        url,
+        page_class,
+        config_dict,
+    )
+    _track_tixcraft_attempt_page(page_class, url)
+    _runtime_log_rate_limited(
+        "tixcraft_dispatch_runtime_log",
+        "[TIXCRAFT] dispatch",
+        config_dict,
+        identity=f"{page_class.value}:{_tixcraft_route_key(url)}",
+        page_class=page_class.value,
+        current_url=url,
+    )
     if page_class in {PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA, PageClass.TICKET}:
         await _remember_tixcraft_event_name(tab, url)
     if _state.get("last_valid_area_url"):
@@ -4355,15 +7111,13 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     else:
         _state["played_sound_ticket"] = False
 
-    if '/ticket/order' in url:
+    order_pending_observed = '/ticket/order' in url
+    if not order_pending_observed and page_class == PageClass.TICKET:
+        order_pending_observed = await _detect_tixcraft_order_pending(tab, url)
+    if order_pending_observed:
         _state["done_time"] = time.time()
         _record_action("order_pending", url)
-        if not _state.get("notified_order_pending", False):
-            notify_context = await _build_tixcraft_notification_context(tab, config_dict, "order_pending", url)
-            if notify_context is not None:
-                send_discord_notification(config_dict, "order_pending", "TixCraft", context=notify_context)
-                send_telegram_notification(config_dict, "order_pending", "TixCraft", context=notify_context)
-                _state["notified_order_pending"] = True
+        await _emit_tixcraft_attempt_notification(tab, config_dict, "order_pending", url)
 
     is_quit_bot = False
     if '/ticket/checkout' in url:
@@ -4388,12 +7142,22 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
         if not _state["played_sound_order"] and config_dict["advanced"]["play_sound"]["order"]:
             play_sound_while_ordering(config_dict)
-        if not _state.get("notified_checkout_reached", False):
-            notify_context = await _build_tixcraft_notification_context(tab, config_dict, "checkout_reached", url)
-            if notify_context is not None:
-                send_discord_notification(config_dict, "checkout_reached", "TixCraft", context=notify_context)
-                send_telegram_notification(config_dict, "checkout_reached", "TixCraft", context=notify_context)
-                _state["notified_checkout_reached"] = True
+        attempt = _get_tixcraft_purchase_attempt()
+        order_enqueued = bool(attempt and "order_pending" in attempt.discord_stages)
+        if attempt is not None and not order_enqueued:
+            await _emit_tixcraft_attempt_notification(
+                tab,
+                config_dict,
+                "order_pending",
+                url,
+            )
+        if attempt is not None:
+            await _emit_tixcraft_attempt_notification(
+                tab,
+                config_dict,
+                "checkout_reached",
+                url,
+            )
         _state["played_sound_order"] = True
     else:
         _state["is_popup_checkout"] = False

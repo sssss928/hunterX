@@ -329,7 +329,7 @@ function applyOrRestore(selector, property, englishValue) {
 function renderReadmePane() {
     const englishHtml = `
 <div class="alert alert-info" role="alert">
-        <p class="mb-0"><strong>Version</strong>: HunterX (0.4.2) | <strong>Technical support</strong>: Claude Code AI-assisted development</p>
+        <p class="mb-0"><strong>Version</strong>: HunterX (0.4.4) | <strong>Technical support</strong>: Claude Code AI-assisted development</p>
 </div>
 
 <div class="accordion mb-3" id="devStatusAccordion">
@@ -799,6 +799,7 @@ function uiText(key, extra = '') {
         'save_failed': { 'zh-TW': `儲存失敗：${extra}`, en: `Save failed: ${extra}` },
         'saving': { 'zh-TW': '儲存中...', en: 'Saving...' },
         'saved': { 'zh-TW': '已存檔', en: 'Saved' },
+        'profile_not_ready': { 'zh-TW': '設定檔仍在載入或已切換，請稍候再試。', en: 'The profile is still loading or has changed. Please try again.' },
         'missing_ticket_number': { 'zh-TW': '提示: 請指定張數', en: 'Please select the number of tickets.' },
         'invalid_refresh_datetime': { 'zh-TW': '刷新在指定時間格式需為 YYYY/MM/DD HH:MM:SS 或 YYYY/MM/DD HH:MM:SS.SSS。', en: 'Refresh time must use YYYY/MM/DD HH:MM:SS or YYYY/MM/DD HH:MM:SS.SSS.' },
         'invalid_leak_refresh_interval_seconds': { 'zh-TW': '提示: 撿漏刷新間隔請填 0 以上的秒數。', en: 'Enter a non-negative number for the leak-watch refresh interval.' },
@@ -857,10 +858,29 @@ const PROFILE_PLATFORMS = [
 
 const PROFILE_STORAGE_KEY = 'maxbot_current_profile';
 let current_profile = localStorage.getItem(PROFILE_STORAGE_KEY) || 'default';
+let loaded_profile = null;
+let profile_load_generation = 0;
+let active_profile_load = null;
+
+function profile_query_for(profileName) {
+    return (profileName && profileName !== 'default')
+        ? '?profile=' + encodeURIComponent(profileName) : '';
+}
 
 function profile_query() {
-    return (current_profile && current_profile !== 'default')
-        ? '?profile=' + encodeURIComponent(current_profile) : '';
+    return profile_query_for(current_profile);
+}
+
+function profile_context_is_ready(profileSnapshot) {
+    return active_profile_load === null
+        && profileSnapshot === current_profile
+        && current_profile === loaded_profile;
+}
+
+function require_profile_context(profileSnapshot) {
+    if (profile_context_is_ready(profileSnapshot)) return true;
+    run_message(uiText('profile_not_ready'));
+    return false;
 }
 
 function refresh_profile_tabs(callback) {
@@ -959,25 +979,31 @@ function profile_modal_error(msg) {
 }
 
 function create_profile_for_platform(slug, homepage) {
+    const sourceProfile = current_profile;
+    if (!require_profile_context(sourceProfile)) return;
     $.get('/profiles').done(function(data) {
+        if (!profile_context_is_ready(sourceProfile)) return;
         const existing = (data && data.profiles) ? data.profiles : [];
         let name = slug;
         let n = 2;
         while (existing.includes(name)) { name = slug + '-' + n; n++; }
-        create_profile(name, homepage);
+        create_profile(name, homepage, sourceProfile);
     });
 }
 
 function create_profile_custom() {
+    const sourceProfile = current_profile;
+    if (!require_profile_context(sourceProfile)) return;
     const name = ($('#profile_custom_name').val() || '').trim();
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(name) || name === 'default') {
         profile_modal_error('名稱限英數、底線、連字號（最長 32 字元），且不可為 default');
         return;
     }
-    create_profile(name, '');
+    create_profile(name, '', sourceProfile);
 }
 
-function create_profile(name, homepage) {
+function create_profile(name, homepage, sourceProfile) {
+    if (!require_profile_context(sourceProfile)) return;
     // Clone current form settings as the base config for the new profile.
     const cfg = settings ? JSON.parse(JSON.stringify(settings)) : null;
     if (cfg && homepage) cfg.homepage = homepage;
@@ -986,12 +1012,14 @@ function create_profile(name, homepage) {
         method: 'POST',
         data: JSON.stringify({ name: name, config: cfg })
     }).done(function() {
+        if (!profile_context_is_ready(sourceProfile)) return;
         $('#profile_modal').modal('hide');
         current_profile = name;
         localStorage.setItem(PROFILE_STORAGE_KEY, name);
         refresh_profile_tabs();
         maxbot_load_api();
     }).fail(function(xhr) {
+        if (!profile_context_is_ready(sourceProfile)) return;
         let msg = '建立失敗';
         try { msg = JSON.parse(xhr.responseText).error || msg; } catch (e) {}
         profile_modal_error(msg);
@@ -1010,7 +1038,10 @@ function related_instance_rows(name, rows) {
 }
 
 function delete_profile(name) {
+    const profileSnapshot = current_profile;
+    if (!require_profile_context(profileSnapshot)) return;
     $.get('/instances').always(function(data) {
+        if (!profile_context_is_ready(profileSnapshot)) return;
         const rows = (data && data.instances) ? data.instances : [];
         const alive = related_instance_rows(name, rows).filter(function(it){ return it.alive; }).map(function(it){ return it.id; });
         let message = '刪除設定檔「' + name + '」？';
@@ -1019,15 +1050,17 @@ function delete_profile(name) {
         }
         message += '\n\n此動作無法復原。';
         if (!window.confirm(message)) return;
-        delete_profile_api(name);
+        delete_profile_api(name, profileSnapshot);
     });
 }
 
-function delete_profile_api(name) {
+function delete_profile_api(name, profileSnapshot) {
+    if (!require_profile_context(profileSnapshot)) return;
     $.ajax({
         url: '/profiles?profile=' + encodeURIComponent(name),
         method: 'DELETE'
     }).done(function() {
+        if (!profile_context_is_ready(profileSnapshot)) return;
         if (current_profile === name) {
             current_profile = 'default';
             localStorage.setItem(PROFILE_STORAGE_KEY, current_profile);
@@ -1584,13 +1617,26 @@ function load_settins_to_form(settings)
 
 function maxbot_load_api()
 {
-    let api_url = "/load" + profile_query();
-    $.get( api_url, function() {
-        //alert( "success" );
-    })
+    const requestedProfile = current_profile;
+    const requestGeneration = ++profile_load_generation;
+    const previousLoad = active_profile_load;
+    if (previousLoad && typeof previousLoad.abort === 'function') {
+        previousLoad.abort();
+    }
+    loaded_profile = null;
+    settings = null;
+
+    const api_url = "/load" + profile_query_for(requestedProfile);
+    const loadRequest = $.ajax({
+        url: api_url,
+        method: 'GET'
+    });
+    active_profile_load = loadRequest;
+    loadRequest
     .done(function(data) {
-        //alert( "second success" );
-        //console.log(data);
+        if (requestGeneration !== profile_load_generation || requestedProfile !== current_profile) return;
+        loaded_profile = requestedProfile;
+        if (requestedProfile !== current_profile || current_profile !== loaded_profile) return;
         settings = data;
         load_settins_to_form(data);
     })
@@ -1598,23 +1644,26 @@ function maxbot_load_api()
         //alert( "error" );
     })
     .always(function() {
-        //alert( "finished" );
+        if (requestGeneration === profile_load_generation && active_profile_load === loadRequest) {
+            active_profile_load = null;
+        }
     });
 }
 
 function maxbot_reset_api()
 {
-    if (current_profile !== 'default') {
+    const profileSnapshot = current_profile;
+    if (!require_profile_context(profileSnapshot)) return;
+    if (profileSnapshot !== 'default') {
         message('重設僅支援 default 設定檔；其他設定檔請直接刪除後重建。');
         return;
     }
     let api_url = "/reset";
-    $.get( api_url, function() {
+    $.post( api_url, function() {
         //alert( "success" );
     })
     .done(function(data) {
-        //alert( "second success" );
-        //console.log(data);
+        if (!profile_context_is_ready(profileSnapshot)) return;
         settings = data;
         load_settins_to_form(data);
         check_unsaved_fields();
@@ -1658,37 +1707,43 @@ function next_instance_id(base, rows)
 
 function maxbot_launch()
 {
+    const launchProfile = current_profile;
+    if (!require_profile_context(launchProfile)) return;
     // Warn when this profile already has a live instance (same-account session
     // kick risk). If confirmed, launch a second instance under a numbered id.
     $.get('/instances').done(function(data) {
+        if (!profile_context_is_ready(launchProfile)) return;
         const rows = (data && data.instances) ? data.instances : [];
-        const alive = rows.some(function(it){ return it.id === current_profile && it.alive; });
+        const alive = rows.some(function(it){ return it.id === launchProfile && it.alive; });
         if (alive) {
             if (!window.confirm(uiText('dup_run_confirm'))) return;
-            do_launch(next_instance_id(current_profile, rows));
+            do_launch(next_instance_id(launchProfile, rows), launchProfile);
         } else {
-            do_launch('');
+            do_launch('', launchProfile);
         }
     }).fail(function() {
+        if (!profile_context_is_ready(launchProfile)) return;
         // /instances unavailable (older backend): fall back to a plain launch.
-        do_launch('');
+        do_launch('', launchProfile);
     });
 }
 
-function do_launch(instance_override)
+function do_launch(instance_override, launchProfile)
 {
+    if (!require_profile_context(launchProfile)) return;
     run_message(uiText('launching'));
-    if (!save_changes_to_dict(true)) return;
-    maxbot_save_api(function(){ maxbot_run_api(instance_override); });
+    if (!save_changes_to_dict(true, launchProfile)) return;
+    maxbot_save_api(function(){ maxbot_run_api(instance_override, launchProfile); }, launchProfile);
 }
 
-function maxbot_run_api(instance_override)
+function maxbot_run_api(instance_override, launchProfile)
 {
-    let api_url = "/run" + profile_query();
+    if (!require_profile_context(launchProfile)) return;
+    let api_url = "/run" + profile_query_for(launchProfile);
     if (instance_override) {
-        api_url += (profile_query() ? '&' : '?') + 'instance=' + encodeURIComponent(instance_override);
+        api_url += (profile_query_for(launchProfile) ? '&' : '?') + 'instance=' + encodeURIComponent(instance_override);
     }
-    $.get( api_url, function() {
+    $.post( api_url, function() {
         //alert( "success" );
     })
     .done(function(data) {
@@ -1708,7 +1763,7 @@ function maxbot_run_api(instance_override)
 function maxbot_shutdown_api()
 {
     let api_url = "/shutdown";
-    $.get( api_url, function() {
+    $.post( api_url, function() {
         //alert( "success" );
     })
     .done(function(data) {
@@ -1723,8 +1778,10 @@ function maxbot_shutdown_api()
     });
 }
 
-function save_changes_to_dict(silent_flag)
+function save_changes_to_dict(silent_flag, profileSnapshot)
 {
+    const targetProfile = profileSnapshot === undefined ? current_profile : profileSnapshot;
+    if (!require_profile_context(targetProfile)) return false;
     const ticket_number_value = parseInt(ticket_number.value);
     const tixcraft_soft_block_delay_value = (tixcraft_soft_block_delay?.value || '').trim();
     const leak_refresh_interval_value = (leak_refresh_interval_seconds?.value || '').trim();
@@ -1897,14 +1954,17 @@ function save_changes_to_dict(silent_flag)
     return false;
 }
 
-function maxbot_save_api(callback)
+function maxbot_save_api(callback, profileSnapshot)
 {
-    let api_url = "/save" + profile_query();
+    const targetProfile = profileSnapshot === undefined ? current_profile : profileSnapshot;
+    if (!require_profile_context(targetProfile)) return;
+    let api_url = "/save" + profile_query_for(targetProfile);
     if(settings) {
         $.post( api_url, JSON.stringify(settings), function() {
             //alert( "success" );
         })
         .done(function(data) {
+            if (!profile_context_is_ready(targetProfile)) return;
             console.log("[MaxBot] 設定儲存成功");
             check_unsaved_fields();
             if(callback) callback();
@@ -1922,9 +1982,11 @@ function maxbot_save_api(callback)
 
 function maxbot_pause_api()
 {
-    let api_url = "/pause" + profile_query();
+    const profileSnapshot = current_profile;
+    if (!require_profile_context(profileSnapshot)) return;
+    let api_url = "/pause" + profile_query_for(profileSnapshot);
     if(settings) {
-        $.get( api_url, function() {
+        $.post( api_url, function() {
             //alert( "success" );
         })
         .done(function(data) {
@@ -1941,9 +2003,11 @@ function maxbot_pause_api()
 
 function maxbot_resume_api()
 {
-    let api_url = "/resume" + profile_query();
+    const profileSnapshot = current_profile;
+    if (!require_profile_context(profileSnapshot)) return;
+    let api_url = "/resume" + profile_query_for(profileSnapshot);
     if(settings) {
-        $.get( api_url, function() {
+        $.post( api_url, function() {
             //alert( "success" );
         })
         .done(function(data) {
@@ -1959,11 +2023,13 @@ function maxbot_resume_api()
 }
 function maxbot_save()
 {
+    const profileSnapshot = current_profile;
+    if (!require_profile_context(profileSnapshot)) return;
     run_message(uiText('saving'));
-    if (!save_changes_to_dict(true)) return;
+    if (!save_changes_to_dict(true, profileSnapshot)) return;
     maxbot_save_api(function() {
         run_message(uiText('saved'));
-    });
+    }, profileSnapshot);
 }
 
 function check_unsaved_fields()
@@ -2213,21 +2279,21 @@ function instances_dashboard_api() {
 }
 
 function instance_pause(id) {
-    $.get('/pause' + instance_query(id)).always(instances_dashboard_api);
+    $.post('/pause' + instance_query(id)).always(instances_dashboard_api);
 }
 
 function instance_resume(id) {
-    $.get('/resume' + instance_query(id)).always(instances_dashboard_api);
+    $.post('/resume' + instance_query(id)).always(instances_dashboard_api);
 }
 
 function instance_stop(id) {
     if (!window.confirm(uiText('stop_confirm', id))) return;
-    $.get('/stop' + instance_query(id)).always(instances_dashboard_api);
+    $.post('/stop' + instance_query(id)).always(instances_dashboard_api);
 }
 
 function instance_quit(id) {
     if (!window.confirm(uiText('quit_confirm', id))) return;
-    $.get('/quit' + instance_query(id)).always(instances_dashboard_api);
+    $.post('/quit' + instance_query(id)).always(instances_dashboard_api);
 }
 
 function pause_all_instances() {
@@ -2236,13 +2302,13 @@ function pause_all_instances() {
     $.get('/instances').done(function(data) {
         const rows = (data && data.instances) ? data.instances : [];
         rows.filter(function(it){ return it.alive && !it.paused; })
-            .forEach(function(it){ $.get('/pause' + instance_query(it.id)); });
+            .forEach(function(it){ $.post('/pause' + instance_query(it.id)); });
         setTimeout(instances_dashboard_api, 300);
     });
 }
 
 function cleanup_offline_instances() {
-    $.get('/cleanup_instances').done(function(data) {
+    $.post('/cleanup_instances').done(function(data) {
         const removed = (data && data.removed) ? data.removed : [];
         run_message(removed.length > 0 ? uiText('cleanup_done', removed.join(', ')) : uiText('cleanup_none'));
         instances_dashboard_api();
@@ -2296,6 +2362,8 @@ ocr_captcha_use_universal.addEventListener('change', function() {
 });
 
 document.querySelector('#btn_test_discord_webhook').addEventListener('click', function() {
+    const profileSnapshot = current_profile;
+    if (!require_profile_context(profileSnapshot)) return;
     const url = discord_webhook_url.value.trim();
     if (!url) {
         alert(uiText('discord_empty'));
@@ -2305,7 +2373,7 @@ document.querySelector('#btn_test_discord_webhook').addEventListener('click', fu
     btn.disabled = true;
     btn.textContent = '...';
     $.ajax({
-        url: '/test_discord_webhook',
+        url: '/test_discord_webhook' + profile_query_for(profileSnapshot),
         type: 'POST',
         contentType: 'application/json',
         data: JSON.stringify({ webhook_url: url, custom_message: notification_message.value }),
@@ -2335,6 +2403,8 @@ document.querySelector('#btn_test_discord_webhook').addEventListener('click', fu
 });
 
 document.querySelector('#btn_test_telegram').addEventListener('click', function() {
+    const profileSnapshot = current_profile;
+    if (!require_profile_context(profileSnapshot)) return;
     const token = telegram_bot_token.value.trim();
     const chatId = telegram_chat_id.value.trim();
     if (!token || !chatId) {
@@ -2345,7 +2415,7 @@ document.querySelector('#btn_test_telegram').addEventListener('click', function(
     btn.disabled = true;
     btn.textContent = '...';
     $.ajax({
-        url: '/test_telegram',
+        url: '/test_telegram' + profile_query_for(profileSnapshot),
         type: 'POST',
         contentType: 'application/json',
         data: JSON.stringify({ bot_token: token, chat_id: chatId, custom_message: notification_message.value }),

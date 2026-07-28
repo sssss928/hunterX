@@ -230,13 +230,29 @@ def build_shared_notification_context(config_dict, stage, platform_name, context
     )
 
 
-def send_discord_notification(config_dict, stage, platform_name, context=None):
+def is_discord_notification_enabled(config_dict):
+    adv = (config_dict or {}).get("advanced", {})
+    return bool(adv.get("discord_webhook_url", ""))
+
+
+def send_discord_notification(
+    config_dict,
+    stage,
+    platform_name,
+    context=None,
+    notification_id=None,
+):
     """Send Discord webhook notification if configured.
 
     Args:
         config_dict: Configuration dictionary
         stage: "ticket" or "order"
         platform_name: Platform name (e.g., "TixCraft", "iBon")
+        context: Optional pre-populated notification context.
+        notification_id: Stable logical event ID for dispatcher deduplication.
+
+    Returns:
+        The notification ID when queued, otherwise ``None``.
     """
     adv = config_dict.get("advanced", {})
     webhook_url = adv.get("discord_webhook_url", "")
@@ -245,10 +261,13 @@ def send_discord_notification(config_dict, stage, platform_name, context=None):
         custom_message = adv.get("discord_message", "")
         context = build_shared_notification_context(config_dict, stage, platform_name, context=context)
         safe_message = context.format_message(custom_message)
-        util.send_discord_webhook_async(
+        return util.send_discord_webhook_async(
             webhook_url, stage, platform_name,
-            verbose=verbose, custom_message=safe_message
+            verbose=verbose,
+            custom_message=safe_message,
+            notification_id=notification_id,
         )
+    return None
 
 def send_telegram_notification(config_dict, stage, platform_name, context=None):
     """Send Telegram bot notification if configured.
@@ -476,7 +495,43 @@ def convert_remote_object(obj, depth=0):
     else:
         return obj
 
-async def nodriver_current_url(tab, config_dict=None):
+def format_cached_target_url_diagnostic(tab) -> str:
+    """Describe cached URL availability without persisting URL credentials."""
+
+    try:
+        target = getattr(tab, "target", None)
+        target_url = getattr(target, "url", "") if target else ""
+    except Exception:
+        target_url = ""
+    if not isinstance(target_url, str):
+        target_url = ""
+
+    target_url = target_url.strip()
+    target_route = ""
+    if target_url:
+        try:
+            parsed = urlparse(target_url)
+            hostname = parsed.hostname or ""
+            if parsed.scheme and hostname:
+                safe_host = f"[{hostname}]" if ":" in hostname else hostname
+                safe_netloc = safe_host
+                if parsed.port is not None:
+                    safe_netloc = f"{safe_netloc}:{parsed.port}"
+                target_route = parsed._replace(
+                    netloc=safe_netloc,
+                    params="",
+                    query="",
+                    fragment="",
+                ).geturl().replace("\r", "").replace("\n", "")[:512]
+        except (TypeError, ValueError):
+            target_route = ""
+    return (
+        f"fallback_available={bool(target_url)}; "
+        f"target_route={target_route!r}"
+    )
+
+
+async def nodriver_current_url(tab, config_dict=None, *, prefer_cached=False):
     debug = util.create_debug_logger(config_dict)
     is_quit_bot = False
     exit_bot_error_strings = [
@@ -492,43 +547,98 @@ async def nodriver_current_url(tab, config_dict=None):
         "no close frame received",
     ]
 
+    def read_target_url():
+        try:
+            target = getattr(tab, "target", None)
+            target_url = getattr(target, "url", "") if target else ""
+        except Exception:
+            return ""
+        return target_url.strip() if isinstance(target_url, str) else ""
+
+    def read_js_url(payload):
+        """Normalize NoDriver's serialized JS value without trusting its shape."""
+        try:
+            if isinstance(payload, str):
+                return payload.strip()
+            if not isinstance(payload, dict):
+                return ""
+
+            url_parts = []
+            # Preserve NoDriver's payload iteration order, matching the legacy
+            # parser, while avoiding an O(n log n) sort in the 50 ms URL loop.
+            for key, value in payload.items():
+                if not isinstance(key, str) or not key.isnumeric():
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                part = value.get("0", "")
+                if isinstance(part, str):
+                    url_parts.append(part)
+            return "".join(url_parts).strip()
+        except Exception:
+            return ""
+
     url = ""
     if tab:
-        url_dict = {}
+        if prefer_cached:
+            # TargetInfo.url is maintained by CDP and does not enter the page's
+            # JavaScript execution context. During a scheduled-sale countdown,
+            # this avoids losing the target boundary to a suspended or
+            # navigation-racing js_dumps call. Callers opt in because ordinary
+            # dispatch still benefits from JS being able to supersede a stale
+            # cached target.
+            url = read_target_url()
+            if url:
+                try:
+                    parsed_cached_url = urlparse(url)
+                except ValueError:
+                    parsed_cached_url = urlparse("")
+                if (
+                    parsed_cached_url.scheme.lower() in {"http", "https"}
+                    and parsed_cached_url.hostname
+                ):
+                    return url, is_quit_bot
         try:
-            url_dict = await asyncio.wait_for(
+            url_payload = await asyncio.wait_for(
                 tab.js_dumps('window.location.href'), timeout=5.0
             )
         except asyncio.TimeoutError:
             # js_dumps blocks when JS execution is suspended (alert dialog, navigation, tab throttling)
             # tab.target.url is a CDP-cached value that never requires JS execution
-            url = tab.target.url if hasattr(tab, 'target') and tab.target else ""
-            debug.log(f"[URL DIAG] js_dumps timed out (5s); fallback target.url={url!r}")
+            url = read_target_url()
+            debug.log(
+                "[URL DIAG] js_dumps timed out (5s); "
+                f"fallback_available={bool(url)}"
+            )
             return url, is_quit_bot
         except Exception as exc:
             str_exc = ""
             try:
                 str_exc = str(exc)
-            except Exception as exc2:
+            except Exception:
                 pass
             is_silent = any(s in str_exc for s in silent_error_strings)
             if not is_silent:
-                print(exc)
+                print(f"{type(exc).__name__}: failed to read current browser URL")
             if len(str_exc) > 0:
                 for each_error_string in exit_bot_error_strings:
                     if each_error_string in str_exc:
                         is_quit_bot = True
+            url = read_target_url()
             if not is_silent:
-                target_url_now = getattr(getattr(tab, 'target', None), 'url', None)
-                debug.log(f"[URL DIAG] js_dumps error; target.url={target_url_now!r}; exc={str_exc[:120]!r}")
+                debug.log(
+                    "[URL DIAG] js_dumps error; "
+                    f"fallback_available={bool(url)}; "
+                    f"exc_type={type(exc).__name__}"
+                )
+            return url, is_quit_bot
 
-        url_array = []
-        if url_dict:
-            for k in url_dict:
-                if k.isnumeric():
-                    if "0" in url_dict[k]:
-                        url_array.append(url_dict[k]["0"])
-            url = ''.join(url_array)
+        url = read_js_url(url_payload)
+        if not url:
+            # A navigation race can produce a successful JS call with an empty
+            # or partially serialized result. The cached CDP target URL remains
+            # non-blocking and is safer than skipping platform dispatch.
+            url = read_target_url()
     return url, is_quit_bot
 
 async def nodriver_resize_window(tab, config_dict):

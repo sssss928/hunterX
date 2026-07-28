@@ -1,17 +1,25 @@
+import atexit
 import json
 import logging
 import os
 import pathlib
 import platform
+import queue
 import random
 import re
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 import unicodedata
-from datetime import datetime
-from typing import Optional
+from collections import OrderedDict
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from enum import Enum
+from typing import Callable, Optional
 
 import uuid
 import requests
@@ -392,23 +400,70 @@ def is_text_match_keyword(keyword_string, text, config_dict=None):
                 break
     return is_match_keyword
 
+def _atomic_write_text(filename, data, *, durable=False, backup=False):
+    """Replace a text file atomically using a temporary file beside the target."""
+    target_path = os.path.abspath(os.fspath(filename))
+    target_dir = os.path.dirname(target_path)
+    temp_fd, temp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(target_path)}.",
+        suffix=".tmp",
+        dir=target_dir,
+        text=True,
+    )
+    open_fd = temp_fd
+    backup_temp_path = ""
+    try:
+        outfile = os.fdopen(temp_fd, "w", encoding="utf-8", newline="\n")
+        open_fd = -1
+        with outfile:
+            outfile.write(str(data))
+            outfile.flush()
+            if durable:
+                os.fsync(outfile.fileno())
+        if backup and os.path.isfile(target_path):
+            backup_fd, backup_temp_path = tempfile.mkstemp(
+                prefix=f".{os.path.basename(target_path)}.backup.",
+                suffix=".tmp",
+                dir=target_dir,
+            )
+            with os.fdopen(backup_fd, "wb") as backup_file:
+                with open(target_path, "rb") as current_file:
+                    while True:
+                        chunk = current_file.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        backup_file.write(chunk)
+                backup_file.flush()
+                if durable:
+                    os.fsync(backup_file.fileno())
+            os.replace(backup_temp_path, f"{target_path}.bak")
+            backup_temp_path = ""
+        os.replace(temp_path, target_path)
+    except BaseException:
+        if open_fd >= 0:
+            try:
+                os.close(open_fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        if backup_temp_path:
+            try:
+                os.unlink(backup_temp_path)
+            except OSError:
+                pass
+        raise
+
+
 def save_json(config_dict, target_path):
     json_str = json.dumps(config_dict, indent=4)
-    try:
-        with open(target_path, 'w') as outfile:
-            outfile.write(json_str)
-    except Exception as e:
-        pass
+    _atomic_write_text(target_path, json_str, durable=True, backup=True)
+
 
 def write_string_to_file(filename, data):
-    outfile = None
-    if platform.system() == 'Windows':
-        outfile = open(filename, 'w', encoding='UTF-8')
-    else:
-        outfile = open(filename, 'w')
-
-    if not outfile is None:
-        outfile.write("%s" % data)
+    _atomic_write_text(filename, data)
 
 def save_url_to_file(remote_url, CONST_MAXBOT_ANSWER_ONLINE_FILE, force_write = False, timeout=0.5):
     html_text = ""
@@ -2291,22 +2346,14 @@ def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kkt
         if platform.system() == 'Windows':
             print("execute .exe binary.")
         executable, executable_dir = resolve_frozen_executable(script_name, working_dir)
-        try:
-            subprocess.Popen([executable, *cmd_argument], cwd=executable_dir)
-        except Exception as exc:
-            print("exception:", str(exc))
+        return subprocess.Popen([executable, *cmd_argument], cwd=executable_dir)
     else:
         interpreter_binary = sys.executable
         print("execute in shell mode.")
 
-        try:
-            print('try', interpreter_binary)
-            cmd_array = [interpreter_binary, script_name + '.py'] + cmd_argument
-            s=subprocess.Popen(cmd_array, cwd=working_dir)
-        except Exception as exc:
-            msg=str(exc)
-            print("exeption:", msg)
-            pass
+        print('try', interpreter_binary)
+        cmd_array = [interpreter_binary, script_name + '.py'] + cmd_argument
+        return subprocess.Popen(cmd_array, cwd=working_dir)
 
 def parse_nodriver_result(result):
     """
@@ -2429,6 +2476,465 @@ def build_discord_message(stage: str, platform_name: str, custom_message: str = 
     }
 
 
+class DiscordDeliveryState(str, Enum):
+    DETECTED = "detected"
+    ENQUEUED = "enqueued"
+    SENDING = "sending"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class DiscordDeliverySnapshot:
+    """Sanitized, thread-safe view of one logical Discord notification."""
+
+    notification_id: str
+    request_id: str
+    stage: str
+    state: str
+    attempt_count: int
+    http_status: int | None
+    error: str
+    history: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _DiscordNotificationEvent:
+    notification_id: str
+    request_id: str
+    webhook_url: str
+    stage: str
+    platform_name: str
+    timeout: float
+    verbose: bool
+    custom_message: str | None
+
+
+@dataclass
+class _DiscordDeliveryRecord:
+    notification_id: str
+    request_id: str
+    stage: str
+    state: str = DiscordDeliveryState.DETECTED.value
+    attempt_count: int = 0
+    http_status: int | None = None
+    error: str = ""
+    history: tuple[str, ...] = (DiscordDeliveryState.DETECTED.value,)
+    requeue_count: int = 0
+
+
+class DiscordNotificationDispatcher:
+    """Bounded Discord delivery queue with a fixed number of workers.
+
+    Enqueueing never performs HTTP and never waits for queue capacity. Delivery
+    records intentionally exclude webhook URLs and message bodies so diagnostics
+    cannot disclose secrets.
+    """
+
+    _RECORD_HISTORY_CAPACITY = 32
+
+    def __init__(
+        self,
+        *,
+        queue_capacity: int = 128,
+        worker_count: int = 1,
+        max_attempts: int = 3,
+        max_elapsed_seconds: float = 10.0,
+        base_backoff_seconds: float = 0.25,
+        max_backoff_seconds: float = 2.0,
+        history_capacity: int = 2048,
+        max_terminal_requeues: int = 2,
+        post_func: Callable[..., requests.Response] | None = None,
+        sleep_func: Callable[[float], None] | None = None,
+        monotonic_func: Callable[[], float] | None = None,
+    ) -> None:
+        if queue_capacity < 1:
+            raise ValueError("queue_capacity must be at least 1")
+        if worker_count < 1:
+            raise ValueError("worker_count must be at least 1")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if max_elapsed_seconds <= 0:
+            raise ValueError("max_elapsed_seconds must be positive")
+        if max_terminal_requeues < 0:
+            raise ValueError("max_terminal_requeues must be non-negative")
+
+        self.queue_capacity = queue_capacity
+        self.worker_count = worker_count
+        self.max_attempts = max_attempts
+        self.max_elapsed_seconds = max_elapsed_seconds
+        self.base_backoff_seconds = max(0.0, base_backoff_seconds)
+        self.max_backoff_seconds = max(0.0, max_backoff_seconds)
+        self.history_capacity = max(history_capacity, queue_capacity + worker_count)
+        self.max_terminal_requeues = max_terminal_requeues
+        self._post = post_func or http_post
+        self._sleep = sleep_func or time.sleep
+        self._monotonic = monotonic_func or time.monotonic
+        self._queue: queue.Queue[_DiscordNotificationEvent] = queue.Queue(maxsize=queue_capacity)
+        self._lock = threading.RLock()
+        self._idle = threading.Condition(self._lock)
+        self._records: OrderedDict[str, _DiscordDeliveryRecord] = OrderedDict()
+        self._workers: list[threading.Thread] = []
+        self._pending_count = 0
+        self._closing = False
+
+    def enqueue(
+        self,
+        webhook_url: str,
+        stage: str,
+        platform_name: str,
+        *,
+        timeout: float = 3.0,
+        verbose: bool = False,
+        custom_message: str | None = None,
+        notification_id: str | None = None,
+    ) -> str | None:
+        """Add one logical event without blocking and return its notification ID."""
+        if not webhook_url:
+            return None
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+
+        event_id = str(notification_id or uuid.uuid4().hex).strip()
+        if not event_id:
+            event_id = uuid.uuid4().hex
+        request_id = uuid.uuid4().hex
+        event = _DiscordNotificationEvent(
+            notification_id=event_id,
+            request_id=request_id,
+            webhook_url=webhook_url,
+            stage=stage,
+            platform_name=platform_name,
+            timeout=timeout,
+            verbose=verbose,
+            custom_message=custom_message,
+        )
+
+        with self._lock:
+            if event_id in self._records:
+                existing = self._records[event_id]
+                capacity_retry = existing.error == "queue_full"
+                if (
+                    existing.state == DiscordDeliveryState.FAILED.value
+                    and self._is_retryable_terminal_failure(existing.error)
+                    and (
+                        capacity_retry
+                        or existing.requeue_count < self.max_terminal_requeues
+                    )
+                    and not self._closing
+                ):
+                    existing.request_id = request_id
+                    existing.stage = stage
+                    existing.state = DiscordDeliveryState.DETECTED.value
+                    existing.attempt_count = 0
+                    existing.http_status = None
+                    existing.error = ""
+                    if not capacity_retry:
+                        existing.requeue_count += 1
+                    self._append_history_locked(
+                        existing,
+                        DiscordDeliveryState.DETECTED.value,
+                    )
+                    record = existing
+                else:
+                    LOGGER.debug("[Discord] duplicate notification_id=%s ignored", event_id)
+                    if existing.state == DiscordDeliveryState.FAILED.value:
+                        return None
+                    return event_id
+            else:
+                self._trim_history_locked()
+                record = _DiscordDeliveryRecord(
+                    notification_id=event_id,
+                    request_id=request_id,
+                    stage=stage,
+                )
+                self._records[event_id] = record
+
+            if self._closing:
+                self._transition_locked(record, DiscordDeliveryState.FAILED, error="dispatcher_shutdown")
+                self._log_terminal(record, verbose)
+                return None
+
+            try:
+                self._queue.put_nowait(event)
+            except queue.Full:
+                self._transition_locked(record, DiscordDeliveryState.FAILED, error="queue_full")
+                self._log_terminal(record, verbose)
+                return None
+
+            self._pending_count += 1
+            self._transition_locked(record, DiscordDeliveryState.ENQUEUED)
+            self._start_workers_locked()
+            LOGGER.debug(
+                "[Discord] notification_id=%s request_id=%s stage=%s state=enqueued",
+                event_id,
+                request_id,
+                stage,
+            )
+            return event_id
+
+    def get_status(self, notification_id: str) -> DiscordDeliverySnapshot | None:
+        with self._lock:
+            record = self._records.get(notification_id)
+            if record is None:
+                return None
+            return DiscordDeliverySnapshot(
+                notification_id=record.notification_id,
+                request_id=record.request_id,
+                stage=record.stage,
+                state=record.state,
+                attempt_count=record.attempt_count,
+                http_status=record.http_status,
+                error=record.error,
+                history=record.history,
+            )
+
+    def drain(self, timeout: float = 1.5) -> bool:
+        """Wait up to ``timeout`` seconds for queued and in-flight work."""
+        deadline = self._monotonic() + max(0.0, timeout)
+        with self._idle:
+            while self._pending_count:
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    return False
+                self._idle.wait(timeout=remaining)
+            return True
+
+    def shutdown(self, timeout: float = 1.5) -> bool:
+        """Stop accepting events and perform a bounded graceful drain."""
+        started_at = self._monotonic()
+        with self._lock:
+            self._closing = True
+            workers = tuple(self._workers)
+
+        drained = self.drain(timeout=timeout)
+        remaining = max(0.0, timeout - (self._monotonic() - started_at))
+        deadline = self._monotonic() + remaining
+        for worker in workers:
+            worker.join(timeout=max(0.0, deadline - self._monotonic()))
+        return drained and not any(worker.is_alive() for worker in workers)
+
+    @property
+    def pending_count(self) -> int:
+        with self._lock:
+            return self._pending_count
+
+    def _start_workers_locked(self) -> None:
+        if self._workers:
+            return
+        for index in range(self.worker_count):
+            worker = threading.Thread(
+                target=self._worker_main,
+                name=f"hunterx-discord-{index + 1}",
+                daemon=True,
+            )
+            self._workers.append(worker)
+            worker.start()
+
+    def _worker_main(self) -> None:
+        while True:
+            try:
+                event = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                with self._lock:
+                    if self._closing and self._pending_count == 0:
+                        return
+                continue
+
+            try:
+                self._deliver(event)
+            except Exception as exc:
+                safe_error = self._sanitize_error(exc, event.webhook_url)
+                with self._lock:
+                    record = self._records.get(event.notification_id)
+                    if record is not None:
+                        self._transition_locked(record, DiscordDeliveryState.FAILED, error=safe_error)
+                        self._log_terminal(record, event.verbose)
+            finally:
+                self._queue.task_done()
+                with self._idle:
+                    self._pending_count = max(0, self._pending_count - 1)
+                    self._idle.notify_all()
+
+    def _deliver(self, event: _DiscordNotificationEvent) -> None:
+        started_at = self._monotonic()
+        payload = build_discord_message(
+            event.stage,
+            event.platform_name,
+            custom_message=event.custom_message,
+        )
+        last_error = ""
+        last_status: int | None = None
+
+        for attempt in range(1, self.max_attempts + 1):
+            remaining = self.max_elapsed_seconds - (self._monotonic() - started_at)
+            if remaining <= 0:
+                last_error = "delivery_time_budget_exhausted"
+                break
+
+            with self._lock:
+                record = self._records[event.notification_id]
+                record.attempt_count = attempt
+                record.error = ""
+                record.http_status = None
+                self._transition_locked(record, DiscordDeliveryState.SENDING)
+            LOGGER.debug(
+                "[Discord] notification_id=%s request_id=%s stage=%s state=sending attempt=%s",
+                event.notification_id,
+                event.request_id,
+                event.stage,
+                attempt,
+            )
+
+            response = None
+            try:
+                response = self._post(
+                    event.webhook_url,
+                    json=payload,
+                    timeout=min(event.timeout, remaining),
+                )
+            except Exception as exc:
+                last_status = None
+                last_error = self._sanitize_error(exc, event.webhook_url)
+                retryable = True
+            else:
+                last_status = int(response.status_code)
+                if last_status in (200, 204):
+                    with self._lock:
+                        record = self._records[event.notification_id]
+                        self._transition_locked(
+                            record,
+                            DiscordDeliveryState.DELIVERED,
+                            http_status=last_status,
+                        )
+                        self._log_terminal(record, event.verbose)
+                    return
+                retryable = last_status == 429 or 500 <= last_status <= 599
+                last_error = f"http_{last_status}"
+
+            if not retryable or attempt >= self.max_attempts:
+                break
+
+            retry_after = self._retry_after_seconds(response) if last_status == 429 else None
+            delay = retry_after
+            if delay is None:
+                delay = min(
+                    self.max_backoff_seconds,
+                    self.base_backoff_seconds * (2 ** (attempt - 1)),
+                )
+            remaining = self.max_elapsed_seconds - (self._monotonic() - started_at)
+            if delay > remaining:
+                last_error = "delivery_time_budget_exhausted"
+                break
+            if delay > 0:
+                self._sleep(delay)
+
+        with self._lock:
+            record = self._records[event.notification_id]
+            self._transition_locked(
+                record,
+                DiscordDeliveryState.FAILED,
+                http_status=last_status,
+                error=last_error or "delivery_failed",
+            )
+            self._log_terminal(record, event.verbose)
+
+    def _transition_locked(
+        self,
+        record: _DiscordDeliveryRecord,
+        state: DiscordDeliveryState,
+        *,
+        http_status: int | None = None,
+        error: str = "",
+    ) -> None:
+        value = state.value
+        if record.state != value:
+            self._append_history_locked(record, value)
+        record.state = value
+        if http_status is not None:
+            record.http_status = http_status
+        if error:
+            record.error = error
+
+    def _append_history_locked(
+        self,
+        record: _DiscordDeliveryRecord,
+        value: str,
+    ) -> None:
+        record.history = (*record.history, value)[-self._RECORD_HISTORY_CAPACITY :]
+
+    def _trim_history_locked(self) -> None:
+        while len(self._records) >= self.history_capacity:
+            removable_id = next(
+                (
+                    event_id
+                    for event_id, record in self._records.items()
+                    if record.state in {
+                        DiscordDeliveryState.DELIVERED.value,
+                        DiscordDeliveryState.FAILED.value,
+                    }
+                ),
+                None,
+            )
+            if removable_id is None:
+                break
+            self._records.pop(removable_id, None)
+
+    @staticmethod
+    def _sanitize_error(exc: Exception, webhook_url: str) -> str:
+        message = f"{type(exc).__name__}: {exc}"
+        return redact_sensitive_text(message, secrets=[webhook_url])
+
+    @staticmethod
+    def _is_retryable_terminal_failure(error: str) -> bool:
+        normalized = str(error or "").strip().lower()
+        if normalized == "dispatcher_shutdown":
+            return False
+        if normalized.startswith("http_4") and normalized != "http_429":
+            return False
+        return True
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response | None) -> float | None:
+        if response is None:
+            return None
+        value = response.headers.get("Retry-After")
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                return None
+
+    @staticmethod
+    def _log_terminal(record: _DiscordDeliveryRecord, verbose: bool) -> None:
+        message = (
+            "[Discord] notification_id=%s request_id=%s stage=%s state=%s "
+            "attempts=%s http_status=%s error=%s"
+        )
+        args = (
+            record.notification_id,
+            record.request_id,
+            record.stage,
+            record.state,
+            record.attempt_count,
+            record.http_status,
+            record.error or "-",
+        )
+        if record.state == DiscordDeliveryState.FAILED.value:
+            LOGGER.warning(message, *args)
+        elif verbose:
+            LOGGER.info(message, *args)
+        else:
+            LOGGER.debug(message, *args)
+
+
 def send_discord_webhook(
     webhook_url: str,
     stage: str,
@@ -2469,9 +2975,37 @@ def send_discord_webhook(
         # Discord returns 204 No Content on success
         return response.status_code in (200, 204)
     except (requests.RequestException, ValueError) as exc:
-        safe_msg = str(exc).replace(webhook_url, "***") if webhook_url else str(exc)
+        safe_msg = redact_sensitive_text(str(exc), secrets=[webhook_url])
         debug.log(f"[Discord Webhook] Send failed: {safe_msg}")
         return False
+
+
+_DISCORD_DISPATCHER_LOCK = threading.Lock()
+_DISCORD_DISPATCHER: DiscordNotificationDispatcher | None = None
+
+
+def get_discord_notification_dispatcher() -> DiscordNotificationDispatcher:
+    global _DISCORD_DISPATCHER
+    if _DISCORD_DISPATCHER is None:
+        with _DISCORD_DISPATCHER_LOCK:
+            if _DISCORD_DISPATCHER is None:
+                _DISCORD_DISPATCHER = DiscordNotificationDispatcher()
+    return _DISCORD_DISPATCHER
+
+
+def get_discord_delivery_status(notification_id: str) -> DiscordDeliverySnapshot | None:
+    dispatcher = _DISCORD_DISPATCHER
+    return dispatcher.get_status(notification_id) if dispatcher is not None else None
+
+
+def drain_discord_notifications(timeout: float = 1.5) -> bool:
+    dispatcher = _DISCORD_DISPATCHER
+    return dispatcher.drain(timeout=timeout) if dispatcher is not None else True
+
+
+def shutdown_discord_notifications(timeout: float = 1.5) -> bool:
+    dispatcher = _DISCORD_DISPATCHER
+    return dispatcher.shutdown(timeout=timeout) if dispatcher is not None else True
 
 
 def send_discord_webhook_async(
@@ -2480,13 +3014,15 @@ def send_discord_webhook_async(
     platform_name: str,
     timeout: float = 3.0,
     verbose: bool = False,
-    custom_message: str = None
-) -> None:
+    custom_message: str = None,
+    notification_id: str | None = None,
+    dispatcher: DiscordNotificationDispatcher | None = None,
+) -> str | None:
     """
     Send Discord Webhook notification asynchronously.
 
-    Uses a daemon thread to send without blocking the main flow.
-    Failures are handled silently without raising exceptions.
+    Enqueues into a bounded dispatcher backed by a fixed worker pool. No HTTP
+    request or capacity wait occurs on the caller's thread.
 
     Args:
         webhook_url: Discord Webhook URL
@@ -2495,18 +3031,29 @@ def send_discord_webhook_async(
         timeout: Request timeout in seconds, default 3.0
         verbose: Whether to print error messages
         custom_message: User-defined message text; if non-empty, overrides default.
-    """
-    # Skip if URL is empty or None
-    if not webhook_url:
-        return
+        notification_id: Stable logical event ID used for delivery deduplication.
+        dispatcher: Optional dispatcher override, primarily for isolated tests.
 
-    thread = threading.Thread(
-        target=send_discord_webhook,
-        args=(webhook_url, stage, platform_name),
-        kwargs={"timeout": timeout, "verbose": verbose, "custom_message": custom_message},
-        daemon=True
+    Returns:
+        The logical notification ID only when the event is already known or was
+        successfully enqueued; ``None`` when disabled, shutting down, or full.
+    """
+    if not webhook_url:
+        return None
+
+    active_dispatcher = dispatcher or get_discord_notification_dispatcher()
+    return active_dispatcher.enqueue(
+        webhook_url,
+        stage,
+        platform_name,
+        timeout=timeout,
+        verbose=verbose,
+        custom_message=custom_message,
+        notification_id=notification_id,
     )
-    thread.start()
+
+
+atexit.register(shutdown_discord_notifications)
 
 
 def build_telegram_message(stage: str, platform_name: str, custom_message: str = None) -> str:

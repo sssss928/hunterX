@@ -88,7 +88,6 @@ def clean_seat_area(value: str | None, fallback: str = "Unknown Area") -> str:
         line = raw_line.strip()
         line = re.sub(r"\s*(剩餘|剩余)\s*\d+\s*$", "", line)
         line = re.sub(r"\s*(已售完|熱賣中|热卖中|sold out|unavailable)\s*$", "", line, flags=re.IGNORECASE)
-        line = re.sub(r"\s*(?:票價\s*)?(?:NT\$|TWD|\$)\s*[\d,]+\s*$", "", line, flags=re.IGNORECASE)
         line = re.sub(r"\s+", " ", line).strip()
         if line:
             lines.append(line)
@@ -108,7 +107,9 @@ _NUMBER_EMOJI = {
     10: "🔟",
 }
 
-_NUMBERED_ROW_PREFIX = re.compile(r"^(?:(?:[1-9]\ufe0f?\u20e3)|🔟|\d+[.)、])\s*")
+_SEAT_NUMBER_PREFIX = re.compile(
+    r"^(?:(?:[1-9]\ufe0f?\u20e3)|🔟|\d+\s*[.)、])\s*"
+)
 
 
 def format_seat_rows(value: str | list[str] | tuple[str, ...] | None, fallback: str = "-") -> str:
@@ -124,22 +125,26 @@ def format_seat_rows(value: str | list[str] | tuple[str, ...] | None, fallback: 
         line = redact_sensitive_text(raw_line).strip()
         if not line:
             continue
-        if line in {"-", "訂單建立中﹍", "訂單建立中"}:
+        if line in {
+            "-",
+            "訂單建立中﹍",
+            "訂單建立中",
+            "自由入場／未劃位",
+            "未能讀取座位資料，請立即查看結帳頁",
+            "資料擷取失敗，請立即查看目前頁面",
+        }:
             lines.append(line)
             continue
-        seat_index += 1
-        numbered_prefix = _NUMBERED_ROW_PREFIX.match(line)
-        if numbered_prefix:
-            prefix = numbered_prefix.group(0).strip()
-            content = line[numbered_prefix.end():].strip()
-            lines.append(f"{prefix} {content}".strip())
+        line = _SEAT_NUMBER_PREFIX.sub("", line).strip()
+        if not line:
             continue
+        seat_index += 1
         prefix = _NUMBER_EMOJI.get(seat_index, f"{seat_index}.")
         lines.append(f"{prefix} {line}")
     return "\n".join(lines) if lines else fallback
 
 
-@dataclass
+@dataclass(frozen=True)
 class NotificationContext:
     platform: str = "Unknown Platform"
     event_name: str = "Unknown Event"
@@ -188,7 +193,7 @@ class NotificationContext:
             f"票數：{values['ticket_count']}\n"
             f"區域： {values['seat_area']}\n"
             f"排數：\n{values['seat_rows']}\n"
-            f"狀態：{values['stage']}"
+            f"\n狀態：{values['stage']}"
         )
 
 
@@ -208,7 +213,7 @@ def make_notification_context(
         event_name=event_name or "Unknown Event",
         ticket_count=str(ticket_count) if ticket_count not in (None, "") else "-",
         seat_area=seat_area or "Unknown Area",
-        seat_rows=seat_rows or "-",
+        seat_rows=format_seat_rows(seat_rows or "-", "-"),
         stage=stage or "-",
         current_url=current_url or "",
         page_class=page_class or "",

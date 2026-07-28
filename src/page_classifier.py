@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from urllib.parse import parse_qs, urlsplit
 
 
 class PageClass(str, Enum):
@@ -24,7 +25,27 @@ def classify_page(url: str = "", text: str = "") -> PageClass:
     url_lower = (url or "").lower()
     text_lower = (text or "").lower()
 
-    if "queue-it.net" in url_lower or "queue" in url_lower:
+    try:
+        parsed = urlsplit(url_lower)
+    except ValueError:
+        parsed = urlsplit("")
+    hostname = (parsed.hostname or "").rstrip(".")
+    normalized_path = parsed.path.rstrip("/") or "/"
+    explicit_waiting_route = (
+        normalized_path in {"/queue", "/waiting-room", "/waitingroom"}
+        or normalized_path.startswith(("/queue/", "/waiting-room/", "/waitingroom/"))
+    )
+    query = parse_qs(parsed.query)
+    explicit_queue_value = any(
+        value in {"1", "true", "waiting", "queued"}
+        for value in query.get("queue", [])
+    )
+    if (
+        hostname == "queue-it.net"
+        or hostname.endswith(".queue-it.net")
+        or explicit_waiting_route
+        or explicit_queue_value
+    ):
         return PageClass.QUEUE
     if "/ticket/checkout" in url_lower or "/checkout" in url_lower:
         return PageClass.CHECKOUT
@@ -32,7 +53,11 @@ def classify_page(url: str = "", text: str = "") -> PageClass:
         return PageClass.ORDER
     if "/payment" in url_lower or "ecpay" in url_lower:
         return PageClass.PAYMENT
-    if "/ticket/ticket/" in url_lower or "/ticket/check-captcha/" in url_lower:
+    if (
+        "/ticket/ticket/" in url_lower
+        or "/ticket/check-captcha/" in url_lower
+        or "/ticket/verify/" in url_lower
+    ):
         return PageClass.TICKET
     if "/ticket/area/" in url_lower:
         return PageClass.AREA

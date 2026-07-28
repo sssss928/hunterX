@@ -6,6 +6,7 @@ import math
 import re
 import socket
 import struct
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -19,9 +20,20 @@ NTP_UNIX_EPOCH_DELTA_SECONDS = 2_208_988_800
 NTP_PACKET_SIZE = 48
 NS_PER_SECOND = 1_000_000_000
 NS_PER_MS = 1_000_000
+MAX_TRUSTED_CLOCK_UNCERTAINTY_MS = 100
+TRUSTED_CLOCK_SOURCES = frozenset({"ntp", "sntp"})
+RUNTIME_NTP_CRITICAL_WINDOW_SECONDS = 10.0
+RUNTIME_NTP_MIN_START_LEAD_SECONDS = 30.0
+RUNTIME_NTP_SOCKET_BUDGET_MS = 6_000
+RUNTIME_NTP_OUTER_TIMEOUT_MARGIN_SECONDS = 1.0
+RUNTIME_NTP_MAX_SOCKET_TIMEOUT_MS = 2_000
+RUNTIME_NTP_MAX_SERVERS = 4
+RUNTIME_NTP_MAX_SAMPLES_PER_SERVER = 3
+
+_RUNTIME_NTP_WORKER_LOCK = threading.Lock()
 
 
-DEFAULT_REFRESH_CALIBRATION = {
+DEFAULT_REFRESH_CALIBRATION: dict[str, Any] = {
     "enable": False,
     "auto_calibrate": False,
     "advanced_delay_mode": "disabled",
@@ -41,7 +53,7 @@ DEFAULT_REFRESH_CALIBRATION = {
 }
 
 
-DEFAULT_TIME_CALIBRATION = {
+DEFAULT_TIME_CALIBRATION: dict[str, Any] = {
     "mode": "auto",
     "ntp_servers": ["time.google.com", "pool.ntp.org"],
     "ntp_timeout_ms": 1000,
@@ -180,8 +192,17 @@ class RefreshTriggerController:
     last_trigger_error_ns: int | None = None
 
     def arm(self, target_dt: datetime, calibration: dict[str, Any], state_key: str) -> TriggerPlan:
-        if self.phase in (TriggerPhase.FROZEN, TriggerPhase.TRIGGERED, TriggerPhase.POST_TRIGGER_RELOAD):
+        if self.phase in (TriggerPhase.FROZEN, TriggerPhase.TRIGGERED):
             return self.plan  # type: ignore[return-value]
+        if (
+            state_key == self.state_key
+            and self.plan is not None
+            and self.trigger_deadline_monotonic_ns is not None
+        ):
+            # Convert the wall-clock target exactly once. Re-anchoring on every
+            # automation-loop iteration would make an already-armed deadline
+            # jump when NTP or the user adjusts the system wall clock.
+            return self.plan
         if state_key != self.state_key:
             self.generation += 1
             self.state_key = state_key
@@ -225,6 +246,10 @@ class RefreshTriggerController:
     def mark_post_trigger_reload(self) -> None:
         if self.phase == TriggerPhase.TRIGGERED:
             self.phase = TriggerPhase.POST_TRIGGER_RELOAD
+
+    def mark_trigger_failed(self) -> None:
+        if self.phase == TriggerPhase.TRIGGERED:
+            self.phase = TriggerPhase.ERROR
 
 
 def parse_refresh_datetime_value(raw_value: Any) -> datetime | None:
@@ -366,7 +391,16 @@ def get_effective_refresh_calibration(
     url: str | None = None,
     platform_id: str | None = None,
 ) -> tuple[dict[str, Any], PlatformTimingDecision]:
+    raw_calibration = config_dict.get("refresh_calibration", {})
+    if not isinstance(raw_calibration, dict):
+        raw_calibration = {}
     calibration = get_refresh_calibration(config_dict)
+    calibration["_clock_source_explicit"] = "source" in raw_calibration
+    calibration["_clock_offset_explicit"] = "clock_offset_ms" in raw_calibration
+    calibration["_clock_uncertainty_explicit"] = (
+        "clock_uncertainty_ms" in raw_calibration
+    )
+    calibration["_clock_sample_count_explicit"] = "sample_count" in raw_calibration
     decision = get_platform_timing_capability(platform_id, url, config_dict)
     if not decision.advanced_active:
         calibration = dict(calibration)
@@ -409,19 +443,96 @@ def get_refresh_calibration(config_dict: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _trusted_clock_offset(calibration: dict[str, Any]) -> tuple[int, int, str, bool]:
+    """Return a reference-clock correction only when its provenance is trusted.
+
+    Offset correction is deliberately separate from network/renderer latency.
+    RTT cannot establish one-way request latency and must never be used as a
+    blind early-refresh budget.
+    """
+
+    source = str(calibration.get("source") or "").strip().lower()
+    confidence = _normalize_confidence(calibration.get("confidence"))
+    offset_ms = _calibration_int(calibration, "clock_offset_ms", 0)
+    uncertainty_ms = _calibration_int(
+        calibration,
+        "clock_uncertainty_ms",
+        MAX_TRUSTED_CLOCK_UNCERTAINTY_MS + 1,
+        0,
+        60000,
+    )
+    sample_count = int(
+        _finite_float(
+            calibration.get("sample_count", 0),
+            0,
+            0,
+            1000,
+        )
+    )
+    source_explicit = bool(
+        calibration.get("_clock_source_explicit", "source" in calibration)
+    )
+    offset_explicit = bool(
+        calibration.get(
+            "_clock_offset_explicit",
+            "clock_offset_ms" in calibration,
+        )
+    )
+    uncertainty_explicit = bool(
+        calibration.get(
+            "_clock_uncertainty_explicit",
+            "clock_uncertainty_ms" in calibration,
+        )
+    )
+    sample_count_explicit = bool(
+        calibration.get(
+            "_clock_sample_count_explicit",
+            "sample_count" in calibration,
+        )
+    )
+    if source not in TRUSTED_CLOCK_SOURCES:
+        return 0, 0, "unavailable", False
+    if (
+        not source_explicit
+        or not offset_explicit
+        or not uncertainty_explicit
+        or not sample_count_explicit
+        or sample_count < 2
+    ):
+        return 0, 0, confidence, False
+    if confidence not in {"high", "medium"}:
+        return 0, 0, confidence, False
+    if uncertainty_ms > MAX_TRUSTED_CLOCK_UNCERTAINTY_MS:
+        return 0, 0, confidence, False
+    return offset_ms, uncertainty_ms, confidence, True
+
+
 def compute_trigger_plan(target_dt: datetime, calibration: dict[str, Any] | None = None) -> TriggerPlan:
-    normalized = get_refresh_calibration({"refresh_calibration": calibration or {}})
+    raw_calibration = calibration if isinstance(calibration, dict) else {}
+    normalized = get_refresh_calibration({"refresh_calibration": raw_calibration})
     frontend_budget_ms = 0
     ticket_network_budget_ms = 0
     scheduler_budget_ms = 0
     safety_margin_ms = 0
-    clock_offset_ms = 0
-    clock_uncertainty_ms = 0
+    (
+        clock_offset_ms,
+        clock_uncertainty_ms,
+        confidence,
+        clock_offset_trusted,
+    ) = _trusted_clock_offset(raw_calibration)
     total_advance_ms = 0
 
     computed_reference = target_dt
-    local_trigger_time = target_dt
-    warnings = ["standard target refresh; delay calibration is ignored"]
+    local_trigger_time = target_dt - timedelta(milliseconds=clock_offset_ms)
+    if clock_offset_trusted:
+        warnings = [
+            "standard target refresh with trusted NTP clock correction; "
+            "RTT and browser/network latency are not used to advance the request"
+        ]
+    else:
+        warnings = [
+            "standard target refresh; untrusted clock offsets and RTT delay calibration are ignored"
+        ]
 
     return TriggerPlan(
         target_reference_time=target_dt,
@@ -435,7 +546,7 @@ def compute_trigger_plan(target_dt: datetime, calibration: dict[str, Any] | None
         scheduler_budget_ms=scheduler_budget_ms,
         safety_margin_ms=safety_margin_ms,
         total_advance_ms=total_advance_ms,
-        confidence="unavailable",
+        confidence=confidence if clock_offset_trusted else "unavailable",
         timezone=normalized["timezone"],
         warnings=tuple(warnings),
     )
@@ -446,6 +557,11 @@ def calculate_refresh_trigger_datetime(target_dt: datetime, calibration: dict[st
 
 
 def describe_refresh_calibration(calibration: dict[str, Any]) -> str:
+    offset_ms, uncertainty_ms, _confidence, is_trusted = _trusted_clock_offset(
+        calibration
+    )
+    if is_trusted:
+        return f"trusted NTP clock correction {offset_ms:+d}ms (uncertainty {uncertainty_ms}ms)"
     return "standard target refresh"
 
 
@@ -453,7 +569,8 @@ def wall_datetime_to_monotonic_deadline_ns(trigger_wall_dt: datetime, clock: Clo
     active_clock = clock or RealClock()
     anchor_wall_ns = active_clock.wall_time_ns()
     anchor_mono_ns = active_clock.monotonic_ns()
-    trigger_wall_ns = int(trigger_wall_dt.timestamp() * NS_PER_SECOND)
+    trigger_wall_seconds = int(trigger_wall_dt.replace(microsecond=0).timestamp())
+    trigger_wall_ns = trigger_wall_seconds * NS_PER_SECOND + trigger_wall_dt.microsecond * 1_000
     return anchor_mono_ns + (trigger_wall_ns - anchor_wall_ns)
 
 
@@ -686,6 +803,386 @@ def calibrate_ntp_servers(
         "failures": failures,
         "warning": "NTP delay is clock-calibration uncertainty, not ticket-site latency.",
     }
+
+
+def _normalize_runtime_ntp_config(raw_config: Any) -> dict[str, Any]:
+    """Return a bounded, NTP-only runtime calibration specification.
+
+    The settings endpoint supports other display/diagnostic time sources, but
+    only NTP/SNTP can provide a clock offset suitable for the sale trigger.
+    Runtime work is deliberately smaller than the settings endpoint's maximum
+    so a failed DNS/server path cannot consume the automation loop's critical
+    window.
+    """
+
+    raw = raw_config if isinstance(raw_config, dict) else {}
+    merged = dict(DEFAULT_TIME_CALIBRATION)
+    merged.update(raw)
+    mode = str(merged.get("mode") or "auto").strip().lower()
+    if mode not in {"auto", "ntp", "http", "system"}:
+        mode = "auto"
+
+    raw_servers = merged.get("ntp_servers")
+    server_values: list[Any] | tuple[Any, ...]
+    if isinstance(raw_servers, str):
+        server_values = raw_servers.split(",")
+    elif isinstance(raw_servers, (list, tuple)):
+        server_values = raw_servers
+    else:
+        server_values = DEFAULT_TIME_CALIBRATION["ntp_servers"]
+    servers: list[str] = []
+    seen_servers: set[str] = set()
+    for raw_server in server_values:
+        server = str(raw_server or "").strip()
+        server_key = server.lower()
+        if not server or server_key in seen_servers:
+            continue
+        seen_servers.add(server_key)
+        servers.append(server)
+
+    timeout_ms = round(
+        _finite_float(
+            merged.get("ntp_timeout_ms"),
+            DEFAULT_TIME_CALIBRATION["ntp_timeout_ms"],
+            50,
+            RUNTIME_NTP_MAX_SOCKET_TIMEOUT_MS,
+        )
+    )
+    samples_per_server = round(
+        _finite_float(
+            merged.get("ntp_samples_per_server"),
+            DEFAULT_TIME_CALIBRATION["ntp_samples_per_server"],
+            2,
+            RUNTIME_NTP_MAX_SAMPLES_PER_SERVER,
+        )
+    )
+    maximum_attempts = max(2, RUNTIME_NTP_SOCKET_BUDGET_MS // timeout_ms)
+    maximum_servers = max(1, maximum_attempts // samples_per_server)
+    servers = servers[: min(RUNTIME_NTP_MAX_SERVERS, maximum_servers)]
+    total_attempts = len(servers) * samples_per_server
+    requested_minimum = round(
+        _finite_float(
+            merged.get("ntp_min_valid_samples"),
+            DEFAULT_TIME_CALIBRATION["ntp_min_valid_samples"],
+            2,
+            10,
+        )
+    )
+    min_valid_samples = min(total_attempts, requested_minimum)
+    background_refresh_seconds = round(
+        _finite_float(
+            merged.get("background_refresh_seconds"),
+            DEFAULT_TIME_CALIBRATION["background_refresh_seconds"],
+            60,
+            86_400,
+        )
+    )
+    outer_timeout_seconds = (
+        (total_attempts * timeout_ms) / 1000
+        + RUNTIME_NTP_OUTER_TIMEOUT_MARGIN_SECONDS
+    )
+    eligible = (
+        mode in {"auto", "ntp"}
+        and bool(servers)
+        and total_attempts >= 2
+        and min_valid_samples >= 2
+    )
+    identity = (
+        mode,
+        tuple(server.lower() for server in servers),
+        timeout_ms,
+        samples_per_server,
+        min_valid_samples,
+        background_refresh_seconds,
+    )
+    return {
+        "eligible": eligible,
+        "mode": mode,
+        "servers": tuple(servers),
+        "timeout_ms": timeout_ms,
+        "samples_per_server": samples_per_server,
+        "min_valid_samples": min_valid_samples,
+        "background_refresh_seconds": background_refresh_seconds,
+        "max_age_seconds": max(120, background_refresh_seconds * 2),
+        "outer_timeout_seconds": max(
+            1.0,
+            outer_timeout_seconds,
+        ),
+        "identity": identity,
+    }
+
+
+def sanitize_runtime_ntp_calibration(raw_result: Any) -> dict[str, Any] | None:
+    """Keep only trusted clock scalars from a runtime NTP result."""
+
+    if not isinstance(raw_result, dict) or not raw_result.get("success", False):
+        return None
+    source = str(raw_result.get("source") or "").strip().lower()
+    confidence = _normalize_confidence(raw_result.get("confidence"))
+    offset_raw = raw_result.get("clock_offset_ms")
+    uncertainty_raw = raw_result.get("clock_uncertainty_ms")
+    sample_raw = raw_result.get("sample_count")
+    if offset_raw is None or uncertainty_raw is None or sample_raw is None:
+        return None
+    try:
+        offset_value = float(offset_raw)
+        uncertainty_value = float(uncertainty_raw)
+        sample_value = float(sample_raw)
+    except (TypeError, ValueError):
+        return None
+    if not all(
+        math.isfinite(value)
+        for value in (offset_value, uncertainty_value, sample_value)
+    ):
+        return None
+    if (
+        source not in TRUSTED_CLOCK_SOURCES
+        or abs(offset_value) > 60_000
+        or uncertainty_value < 0
+        or sample_value < 2
+    ):
+        return None
+
+    candidate = {
+        "source": source,
+        "clock_offset_ms": round(offset_value),
+        "clock_uncertainty_ms": round(uncertainty_value),
+        "sample_count": int(sample_value),
+        "confidence": confidence,
+    }
+    _offset, _uncertainty, _confidence, trusted = _trusted_clock_offset(
+        candidate
+    )
+    return candidate if trusted else None
+
+
+def _run_runtime_ntp_worker(spec: dict[str, Any]) -> dict[str, Any]:
+    """Serialize runtime NTP work even if an asyncio timeout cancels its Future."""
+
+    if not _RUNTIME_NTP_WORKER_LOCK.acquire(blocking=False):
+        raise RuntimeError("runtime NTP worker is already active")
+    try:
+        return calibrate_ntp_servers(
+            spec["servers"],
+            timeout_ms=spec["timeout_ms"],
+            samples_per_server=spec["samples_per_server"],
+            min_valid_samples=spec["min_valid_samples"],
+        )
+    finally:
+        _RUNTIME_NTP_WORKER_LOCK.release()
+
+
+@dataclass
+class RuntimeNtpCalibrationCoordinator:
+    """Memory-only, non-blocking runtime NTP calibration coordinator."""
+
+    clock: Clock = field(default_factory=RealClock)
+    critical_window_seconds: float = RUNTIME_NTP_CRITICAL_WINDOW_SECONDS
+    minimum_start_lead_seconds: float = RUNTIME_NTP_MIN_START_LEAD_SECONDS
+    task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
+    status: str = field(default="idle", init=False)
+    generation: int = field(default=0, init=False)
+    revision: int = field(default=0, init=False)
+    _identity: tuple[Any, ...] | None = field(default=None, init=False, repr=False)
+    _task_generation: int = field(default=0, init=False, repr=False)
+    _task_identity: tuple[Any, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _last_attempt_monotonic_ns: int | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _result: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _result_identity: tuple[Any, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _result_monotonic_ns: int | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+
+    async def _calibrate(
+        self,
+        spec: dict[str, Any],
+        generation: int,
+        identity: tuple[Any, ...],
+    ) -> tuple[int, tuple[Any, ...], Any, str]:
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_run_runtime_ntp_worker, spec),
+                timeout=float(spec["outer_timeout_seconds"]),
+            )
+            return generation, identity, result, "completed"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return (
+                generation,
+                identity,
+                None,
+                f"error:{type(exc).__name__}",
+            )
+
+    @staticmethod
+    def _consume_cancelled_task(task: asyncio.Task[Any]) -> None:
+        try:
+            task.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    def _consume_finished_task(
+        self,
+        *,
+        now_ns: int,
+        critical_window: bool,
+    ) -> None:
+        task = self.task
+        if task is None or not task.done():
+            return
+        self.task = None
+        try:
+            generation, identity, raw_result, outcome = task.result()
+        except asyncio.CancelledError:
+            self.status = "cancelled"
+            return
+        except Exception as exc:
+            self.status = f"error:{type(exc).__name__}"
+            return
+
+        if generation != self.generation or identity != self._identity:
+            self.status = "discarded_generation"
+            return
+        if outcome != "completed":
+            self.status = outcome
+            return
+        if critical_window:
+            self.status = "discarded_critical_window"
+            return
+        trusted = sanitize_runtime_ntp_calibration(raw_result)
+        if trusted is None:
+            self.status = "discarded_untrusted"
+            return
+
+        self.revision += 1
+        trusted["calibrated_at_monotonic_ns"] = now_ns
+        trusted["runtime_generation"] = generation
+        trusted["runtime_revision"] = self.revision
+        self._result = trusted
+        self._result_identity = identity
+        self._result_monotonic_ns = now_ns
+        self.status = "applied"
+
+    def tick(
+        self,
+        time_calibration_config: Any,
+        *,
+        target_identity: str,
+        target_remaining_seconds: float,
+    ) -> dict[str, Any] | None:
+        """Poll/apply/start work without awaiting network I/O."""
+
+        spec = _normalize_runtime_ntp_config(time_calibration_config)
+        identity = (str(target_identity or ""), spec["identity"])
+        now_ns = self.clock.monotonic_ns()
+        try:
+            remaining_seconds = float(target_remaining_seconds)
+        except (TypeError, ValueError):
+            remaining_seconds = math.inf
+        if not math.isfinite(remaining_seconds):
+            remaining_seconds = math.inf
+        critical_window = remaining_seconds <= max(
+            0.0,
+            float(self.critical_window_seconds),
+        )
+
+        if identity != self._identity:
+            self.generation += 1
+            self._identity = identity
+            self._last_attempt_monotonic_ns = None
+            self._result = None
+            self._result_identity = None
+            self._result_monotonic_ns = None
+            self.status = (
+                "generation_changed"
+                if self.task is not None
+                else "idle"
+            )
+
+        self._consume_finished_task(
+            now_ns=now_ns,
+            critical_window=critical_window,
+        )
+
+        if (
+            self._result is not None
+            and self._result_identity == identity
+            and self._result_monotonic_ns is not None
+            and not critical_window
+        ):
+            age_ns = now_ns - self._result_monotonic_ns
+            max_age_ns = int(spec["max_age_seconds"] * NS_PER_SECOND)
+            if age_ns < 0 or age_ns > max_age_ns:
+                self._result = None
+                self._result_identity = None
+                self._result_monotonic_ns = None
+                self.status = "expired"
+
+        result = dict(self._result) if self._result is not None else None
+        if (
+            self.task is not None
+            or not spec["eligible"]
+            or not target_identity
+            or critical_window
+        ):
+            return result
+
+        minimum_lead = max(
+            float(self.minimum_start_lead_seconds),
+            float(spec["outer_timeout_seconds"]) + 5.0,
+        )
+        if remaining_seconds <= minimum_lead:
+            return result
+
+        refresh_interval_ns = int(
+            spec["background_refresh_seconds"] * NS_PER_SECOND
+        )
+        if (
+            self._last_attempt_monotonic_ns is not None
+            and now_ns - self._last_attempt_monotonic_ns < refresh_interval_ns
+        ):
+            return result
+
+        self._last_attempt_monotonic_ns = now_ns
+        self._task_generation = self.generation
+        self._task_identity = identity
+        self.task = asyncio.create_task(
+            self._calibrate(
+                spec,
+                self._task_generation,
+                identity,
+            ),
+            name=f"runtime-ntp-calibration-{self.generation}",
+        )
+        self.status = "running"
+        return result
+
+    def close(self) -> None:
+        self.generation += 1
+        task = self.task
+        self.task = None
+        if task is not None:
+            task.cancel()
+            task.add_done_callback(self._consume_cancelled_task)
+        self._result = None
+        self._result_identity = None
+        self._result_monotonic_ns = None
+        self.status = "cancelled"
 
 
 def select_time_source(candidates: list[dict[str, Any]], max_age_seconds: int = 3600) -> dict[str, Any]:

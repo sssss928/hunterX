@@ -2,10 +2,10 @@
 #encoding=utf-8
 import argparse
 import base64
-import contextlib
 import json
 import logging
 import asyncio
+import math
 import os
 import pathlib
 import platform
@@ -32,9 +32,10 @@ import util
 import settings
 import runtime_health
 from refresh_timing import (
+    RUNTIME_NTP_CRITICAL_WINDOW_SECONDS,
     RefreshTriggerController,
+    RuntimeNtpCalibrationCoordinator,
     TriggerPhase,
-    calculate_refresh_trigger_datetime,
     compute_remaining_ns,
     describe_refresh_calibration,
     format_remaining_seconds,
@@ -44,8 +45,10 @@ from refresh_timing import (
     wall_datetime_to_monotonic_deadline_ns,
 )
 from NonBrowser import NonBrowser
+from page_classifier import PageClass, classify_page
 from platforms.common_async import is_interval_due
 from reload_guard import guarded_reload
+from trigger_arbiter import TriggerReloadArbiter, TriggerReloadDecision
 
 try:
     import ddddocr
@@ -65,6 +68,7 @@ from platforms.tixcraft import *
 from platforms.ibon import *
 from platforms.kham import *
 from platforms.hkticketing import *
+import platforms.tixcraft as tixcraft_platform
 
 CONST_CITYLINE_SIGN_IN_URL = "https://www.cityline.com/Login.html?targetUrl=https%3A%2F%2Fwww.cityline.com%2FEvents.html"
 CONST_CITYLINE_HK_SIGN_IN_URL = "https://www.cityline.com.hk/Login.html?targetUrl=%s"
@@ -81,7 +85,23 @@ logging.basicConfig()
 logger = logging.getLogger('logger')
 
 CONFIG_RELOAD_CHECK_INTERVAL_SEC = 0.5
-_ACTIVE_SESSION_MANAGER = None
+REFRESH_TRIGGER_RETRY_DELAY_NS = 200_000_000
+REFRESH_TRIGGER_RETRY_WINDOW_NS = 2_000_000_000
+REFRESH_TRIGGER_MAX_ATTEMPTS = 2
+REFRESH_TRIGGER_MAX_LATENESS_NS = 60_000_000_000
+REFRESH_STALE_RESPONSE_RETRY_DELAY_NS = 500_000_000
+REFRESH_CACHED_URL_FAST_PATH_WINDOW_NS = 10_000_000_000
+REFRESH_GATE_HEALTH_CACHE_SECONDS = 3.0
+REFRESH_GATE_HEALTH_NEAR_BOUNDARY_SECONDS = 2.5
+REFRESH_PREFLIGHT_RECOVERY_RETRY_DELAY_NS = 500_000_000
+REFRESH_TRIGGER_RETRYABLE_REASONS = frozenset(
+    {
+        "empty_url",
+        "reload_exception",
+        "reload_failed",
+        "reload_in_flight",
+    }
+)
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -547,26 +567,871 @@ def _should_suppress_target_boundary_action(current_url: str) -> bool:
     return any(marker in url for marker in confirmed_path_markers)
 
 
+def _is_tixcraft_family_url(current_url) -> bool:
+    try:
+        host = (urllib.parse.urlsplit(str(current_url or "")).hostname or "").lower()
+    except ValueError:
+        return False
+    labels = host.split(".")
+    return (
+        host == "tixcraft.com"
+        or host.endswith(".tixcraft.com")
+        or host == "indievox.com"
+        or host.endswith(".indievox.com")
+        or "ticketmaster" in labels
+    )
+
+
+def _is_tixcraft_dom_url(current_url) -> bool:
+    try:
+        host = (urllib.parse.urlsplit(str(current_url or "")).hostname or "").lower()
+    except ValueError:
+        return False
+    return (
+        host == "tixcraft.com"
+        or host.endswith(".tixcraft.com")
+        or host == "indievox.com"
+        or host.endswith(".indievox.com")
+    )
+
+
+def _get_trigger_runtime_state(current_url: str):
+    """Expose only the live TixCraft state needed by the refresh arbiter."""
+
+    if not _is_tixcraft_family_url(current_url):
+        return {}
+    state = getattr(tixcraft_platform, "_state", None)
+    return state if isinstance(state, dict) else {}
+
+
+def _get_runtime_ntp_coordinator(
+    state,
+    controller,
+) -> RuntimeNtpCalibrationCoordinator:
+    coordinator = state.get("runtime_ntp_coordinator")
+    if not isinstance(coordinator, RuntimeNtpCalibrationCoordinator):
+        coordinator = RuntimeNtpCalibrationCoordinator(clock=controller.clock)
+        state["runtime_ntp_coordinator"] = coordinator
+    return coordinator
+
+
+def _close_runtime_ntp_coordinator(state) -> None:
+    coordinator = state.get("runtime_ntp_coordinator")
+    if isinstance(coordinator, RuntimeNtpCalibrationCoordinator):
+        coordinator.close()
+
+
+def _get_runtime_refresh_calibration_config(
+    config_dict,
+    state,
+    controller,
+    current_str,
+    target_dt,
+):
+    """Poll runtime NTP state and return an ephemeral timing config."""
+
+    now_wall = datetime.fromtimestamp(
+        controller.clock.wall_time_ns() / 1_000_000_000
+    )
+    remaining_seconds = (
+        (target_dt - now_wall).total_seconds()
+        if target_dt is not None
+        else float("inf")
+    )
+    raw_time_config = config_dict.get("time_calibration")
+    if not isinstance(raw_time_config, dict):
+        # Production settings migration always supplies this section. Treat a
+        # missing section as an explicit local-clock fallback so tests, legacy
+        # hand-written configs, and partial profiles never start hidden I/O.
+        raw_time_config = {"mode": "system"}
+    coordinator = _get_runtime_ntp_coordinator(state, controller)
+    runtime_calibration = coordinator.tick(
+        raw_time_config,
+        target_identity=current_str if target_dt is not None else "",
+        target_remaining_seconds=remaining_seconds,
+    )
+    state["runtime_clock_calibration"] = runtime_calibration
+    state["runtime_clock_calibration_status"] = coordinator.status
+    state["runtime_clock_calibration_generation"] = coordinator.generation
+    if runtime_calibration is None:
+        return config_dict
+
+    timing_config = dict(config_dict)
+    raw_refresh_calibration = config_dict.get("refresh_calibration")
+    merged_calibration = (
+        dict(raw_refresh_calibration)
+        if isinstance(raw_refresh_calibration, dict)
+        else {}
+    )
+    # Runtime NTP replaces only reference-clock fields. It never persists and
+    # never contributes HTTP/renderer/RTT delay to the trigger.
+    merged_calibration.update(runtime_calibration)
+    timing_config["refresh_calibration"] = merged_calibration
+    return timing_config
+
+
+def _clear_runtime_recovery_scan_guard(runtime_state) -> None:
+    runtime_state["soft_block_recovery_scan_pending"] = False
+    runtime_state["soft_block_recovery_landing_url"] = ""
+    runtime_state["soft_block_recovery_scan_deadline"] = 0.0
+
+
+def _maintain_tixcraft_refresh_runtime(
+    tab,
+    current_url,
+    config_dict,
+    *,
+    now_monotonic=None,
+):
+    """Expire stale coordination guards while refresh_datetime owns dispatch.
+
+    This function performs state-only maintenance. It never scans inventory,
+    clicks a date/area, submits a form, navigates, or reloads.
+    """
+
+    if not _is_tixcraft_family_url(current_url):
+        return ()
+    runtime_state = _get_trigger_runtime_state(current_url)
+    if not runtime_state:
+        return ()
+    try:
+        now = (
+            float(now_monotonic)
+            if now_monotonic is not None
+            else time.monotonic()
+        )
+    except (TypeError, ValueError):
+        now = time.monotonic()
+    if not math.isfinite(now):
+        now = time.monotonic()
+
+    events = []
+    scheduler = runtime_state.get("leak_scheduler")
+    if scheduler is not None:
+        try:
+            events.extend(
+                scheduler.maintenance(
+                    config_dict,
+                    current_url,
+                    now=now,
+                )
+            )
+        except Exception as exc:
+            runtime_health.runtime_log(
+                "[REFRESH] scheduler_maintenance_error",
+                config_dict,
+                error_type=type(exc).__name__,
+            )
+
+    pending_type = getattr(
+        tixcraft_platform,
+        "TixCraftPendingNavigation",
+        (),
+    )
+    current_route = _refresh_route_key(current_url)
+    current_page = classify_page(current_url)
+    current_event_id = str(runtime_state.get("current_event_id", "") or "")
+    current_game_id = str(runtime_state.get("current_game_id", "") or "")
+    current_flow_generation = int(
+        runtime_state.get("notification_flow_generation", 0) or 0
+    )
+
+    for kind in ("date", "area"):
+        key = f"pending_{kind}_navigation"
+        pending = runtime_state.get(key)
+        if pending is None:
+            continue
+        is_valid_pending = bool(pending_type) and isinstance(
+            pending,
+            pending_type,
+        )
+        if not is_valid_pending:
+            runtime_state.pop(key, None)
+            events.append(f"pending_{kind}_invalid")
+            if kind == "area" and scheduler is not None:
+                scheduler.clear_area_click_pending()
+            continue
+
+        source_route = _refresh_route_key(
+            getattr(pending, "source_url", "")
+        )
+        pending_event_id = str(getattr(pending, "event_id", "") or "")
+        pending_game_id = str(getattr(pending, "game_id", "") or "")
+        pending_flow_generation = int(
+            getattr(pending, "flow_generation", 0) or 0
+        )
+        tab_identity = int(getattr(pending, "tab_identity", 0) or 0)
+        deadline = float(getattr(pending, "deadline", 0.0) or 0.0)
+        identity_changed = (
+            (tab_identity and tab_identity != id(tab))
+            or (
+                pending_event_id
+                and current_event_id
+                and pending_event_id != current_event_id
+            )
+            or (
+                pending_game_id
+                and current_game_id
+                and pending_game_id != current_game_id
+            )
+            or (
+                pending_flow_generation
+                and current_flow_generation
+                and pending_flow_generation != current_flow_generation
+            )
+        )
+        route_changed = bool(
+            source_route and current_route != source_route
+        )
+        if kind == "date":
+            allowed_pages = getattr(
+                tixcraft_platform,
+                "_TIXCRAFT_CONFIRMED_DATE_TARGET_PAGES",
+                {
+                    PageClass.AREA,
+                    PageClass.TICKET,
+                    PageClass.ORDER,
+                    PageClass.CHECKOUT,
+                    PageClass.PAYMENT,
+                },
+            )
+        else:
+            allowed_pages = getattr(
+                tixcraft_platform,
+                "_TIXCRAFT_CONFIRMED_PURCHASE_PAGES",
+                {
+                    PageClass.TICKET,
+                    PageClass.ORDER,
+                    PageClass.CHECKOUT,
+                    PageClass.PAYMENT,
+                },
+            )
+        confirmed_transition = (
+            route_changed
+            and not identity_changed
+            and current_page in allowed_pages
+        )
+        context_changed = identity_changed or (
+            route_changed and not confirmed_transition
+        )
+        expired = (
+            not confirmed_transition
+            and (
+                not math.isfinite(deadline)
+                or deadline <= 0
+                or now >= deadline
+            )
+        )
+        if not context_changed and not expired:
+            continue
+
+        runtime_state.pop(key, None)
+        event_suffix = "context_changed" if context_changed else "expired"
+        events.append(f"pending_{kind}_{event_suffix}")
+        if kind == "area" and scheduler is not None:
+            scheduler.clear_area_click_pending()
+
+    if runtime_state.get("soft_block_recovery_scan_pending", False):
+        try:
+            recovery_deadline = float(
+                runtime_state.get(
+                    "soft_block_recovery_scan_deadline",
+                    0.0,
+                )
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            recovery_deadline = 0.0
+        recovery_route = _refresh_route_key(
+            runtime_state.get("soft_block_recovery_landing_url", "")
+        )
+        recovery_context_changed = bool(
+            recovery_route and recovery_route != current_route
+        )
+        recovery_expired = (
+            not math.isfinite(recovery_deadline)
+            or recovery_deadline <= 0
+            or now >= recovery_deadline
+        )
+        if recovery_context_changed or recovery_expired:
+            _clear_runtime_recovery_scan_guard(runtime_state)
+            events.append(
+                "recovery_scan_context_changed"
+                if recovery_context_changed
+                else "recovery_scan_expired"
+            )
+
+    for event in events:
+        runtime_health.runtime_log(
+            "[REFRESH] stale_runtime_guard_pruned",
+            config_dict,
+            reason=event,
+            current_url=current_url,
+        )
+    return tuple(events)
+
+
+def _mark_tixcraft_scheduled_reload_landed(
+    current_url,
+    config_dict,
+    *,
+    now_monotonic=None,
+) -> None:
+    """Advance leak/area cooldown after the refresh coordinator reloads."""
+
+    runtime_state = _get_trigger_runtime_state(current_url)
+    if not runtime_state:
+        return
+    try:
+        landed_at = (
+            float(now_monotonic)
+            if now_monotonic is not None
+            else time.monotonic()
+        )
+    except (TypeError, ValueError):
+        landed_at = time.monotonic()
+    if not math.isfinite(landed_at):
+        landed_at = time.monotonic()
+
+    # A reload creates a new document. Any fast-negative health cache belongs
+    # to the old document and could otherwise hide EPS/white-screen state for
+    # the first 250 ms after the scheduled reload.
+    runtime_state["soft_block_known_good_url"] = ""
+    runtime_state["soft_block_known_good_at"] = 0.0
+    runtime_state["soft_block_blank_since"] = 0.0
+    runtime_state["soft_block_blank_url"] = ""
+    runtime_state["soft_block_probe_failure_since"] = 0.0
+    runtime_state["soft_block_probe_failure_url"] = ""
+    runtime_state["soft_block_probe_failure_count"] = 0
+
+    scheduler = runtime_state.get("leak_scheduler")
+    if scheduler is not None:
+        try:
+            scheduler.mark_recovery_landed(
+                config_dict,
+                now=landed_at,
+            )
+        except Exception as exc:
+            runtime_health.runtime_log(
+                "[REFRESH] scheduler_cooldown_error",
+                config_dict,
+                error_type=type(exc).__name__,
+            )
+    runtime_state["tixcraft_area_reload_url"] = current_url
+    if scheduler is not None:
+        runtime_state["tixcraft_area_reload_next_at"] = getattr(
+            scheduler,
+            "next_cycle_at",
+            landed_at,
+        )
+
+
+def _refresh_soft_block_probe_token(state, current_url, boundary_name):
+    controller = state["controller"]
+    return (
+        state.get("state_key", ""),
+        controller.generation,
+        _refresh_route_key(current_url),
+        boundary_name,
+    )
+
+
+def _invalidate_refresh_gate_health_evidence(state) -> None:
+    """Discard page-health evidence whenever a reload replaces the document."""
+
+    state["refresh_soft_block_preflight_token"] = None
+    state["refresh_soft_block_preflight_reason"] = ""
+    state["refresh_gate_health_next_probe_at"] = 0.0
+    state["refresh_gate_health_ready_route"] = ""
+    state["refresh_gate_health_ready_at"] = 0.0
+
+
+async def _preflight_tixcraft_refresh_boundary(
+    tab,
+    current_url,
+    config_dict,
+    state,
+    boundary_name,
+) -> TriggerReloadDecision | None:
+    """Run one bounded page-health read before a TixCraft boundary reload."""
+
+    if (
+        not _is_tixcraft_family_url(current_url)
+        or classify_page(current_url)
+        not in {PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA}
+    ):
+        return None
+    token = _refresh_soft_block_probe_token(
+        state,
+        current_url,
+        boundary_name,
+    )
+    cached_health_route = state.get("refresh_gate_health_ready_route", "")
+    cached_health_at = float(
+        state.get("refresh_gate_health_ready_at", 0.0) or 0.0
+    )
+    if (
+        cached_health_route == _refresh_route_key(current_url)
+        and time.monotonic() - cached_health_at
+        <= REFRESH_GATE_HEALTH_CACHE_SECONDS
+    ):
+        state["refresh_soft_block_preflight_token"] = token
+        state["refresh_soft_block_preflight_reason"] = "ready"
+        return None
+    if token == state.get("refresh_soft_block_preflight_token"):
+        cached_reason = state.get("refresh_soft_block_preflight_reason", "")
+        if cached_reason == "order_processing_detected":
+            return TriggerReloadDecision(
+                attempted=False,
+                reloaded=False,
+                reason=cached_reason,
+                page_class=classify_page(current_url),
+            )
+        # Ready evidence has a short TTL and inconclusive/blocked evidence must
+        # be re-read after recovery; neither may be cached for the whole trigger.
+
+    state["refresh_soft_block_preflight_token"] = token
+    reason = "ready"
+    try:
+        snapshot = await tixcraft_platform._read_tixcraft_page_health(
+            tab,
+            config_dict,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        snapshot = {"probeFailed": True}
+
+    if not isinstance(snapshot, dict) or snapshot.get("probeFailed", False):
+        reason = "health_probe_unavailable"
+    elif snapshot.get("blocked", False):
+        reason = "soft_block_detected"
+    elif snapshot.get("knownOrderProcessing", False):
+        reason = "order_processing_detected"
+    elif snapshot.get("whiteOverlay", False):
+        reason = "soft_block_detected"
+    else:
+        page_text = (
+            f"{snapshot.get('title', '')}\n"
+            f"{snapshot.get('bodyText', '')}"
+        )
+        if tixcraft_platform._is_tixcraft_soft_block_text(page_text):
+            reason = "soft_block_detected"
+        elif tixcraft_platform._is_tixcraft_blank_page_snapshot(snapshot):
+            reason = "soft_block_detected"
+
+    state["refresh_soft_block_preflight_reason"] = reason
+    state["refresh_soft_block_preflight_snapshot_kind"] = str(
+        snapshot.get("kind", "") if isinstance(snapshot, dict) else ""
+    )
+    if reason == "ready":
+        return None
+    return TriggerReloadDecision(
+        attempted=False,
+        reloaded=False,
+        reason=reason,
+        page_class=classify_page(current_url),
+    )
+
+
+async def _run_refresh_gate_health_watchdog(
+    tab,
+    current_url,
+    config_dict,
+    state,
+    remaining_seconds,
+) -> bool:
+    """Keep TixCraft soft-block recovery alive while normal dispatch is gated."""
+
+    if (
+        not _is_tixcraft_family_url(current_url)
+        or classify_page(current_url)
+        not in {PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA}
+    ):
+        state["refresh_gate_health_ready_route"] = ""
+        state["refresh_gate_health_ready_at"] = 0.0
+        return False
+
+    now = time.monotonic()
+    if remaining_seconds <= REFRESH_GATE_HEALTH_NEAR_BOUNDARY_SECONDS:
+        interval = 0.0
+    elif remaining_seconds <= 60.0:
+        interval = 1.0
+    else:
+        interval = 5.0
+    next_probe_at = float(
+        state.get("refresh_gate_health_next_probe_at", 0.0) or 0.0
+    )
+    if interval > 0 and now < next_probe_at:
+        return False
+
+    state["refresh_gate_health_next_probe_at"] = now + max(0.5, interval)
+    detection = await tixcraft_platform._detect_tixcraft_soft_block(
+        tab,
+        current_url,
+        config_dict,
+    )
+    blocked = bool(detection.get("blocked", False))
+    if blocked:
+        state["refresh_recovery_dispatch_required"] = True
+        state["last_refresh_reload_decision"] = "soft_block_detected"
+    platform_state = getattr(tixcraft_platform, "_state", {})
+    route_key = _refresh_route_key(current_url)
+    health_confirmed = bool(
+        not blocked
+        and platform_state.get("soft_block_known_good_url") == route_key
+        and float(platform_state.get("soft_block_known_good_at", 0.0) or 0.0)
+        > 0
+    )
+    if health_confirmed:
+        state["refresh_gate_health_ready_route"] = route_key
+        state["refresh_gate_health_ready_at"] = time.monotonic()
+    else:
+        state["refresh_gate_health_ready_route"] = ""
+        state["refresh_gate_health_ready_at"] = 0.0
+    return bool(blocked)
+
+
+async def _defer_refresh_trigger_for_page_recovery(
+    tab,
+    current_url,
+    config_dict,
+    state,
+    controller,
+    decision,
+) -> None:
+    """Preserve the one-shot trigger until health recovery can be confirmed."""
+
+    now_ns = controller.clock.monotonic_ns()
+    state["refresh_recovery_dispatch_required"] = True
+    state["refresh_soft_block_preflight_token"] = None
+    state["refresh_soft_block_preflight_reason"] = ""
+    state["refresh_gate_health_ready_route"] = ""
+    state["refresh_gate_health_ready_at"] = 0.0
+    state["refresh_retry_pending"] = True
+    state["refresh_retry_not_before_monotonic_ns"] = (
+        now_ns + REFRESH_PREFLIGHT_RECOVERY_RETRY_DELAY_NS
+    )
+    # The soft-block handler may legitimately spend the configured wait time
+    # recovering. Start a fresh bounded reload window after it returns.
+    state["refresh_retry_deadline_monotonic_ns"] = (
+        now_ns + REFRESH_TRIGGER_RETRY_WINDOW_NS
+    )
+    state["last_refresh_reload_decision"] = decision.reason
+
+
+def _get_trigger_arbiter(state) -> TriggerReloadArbiter:
+    arbiter = state.get("trigger_arbiter")
+    if not isinstance(arbiter, TriggerReloadArbiter):
+        arbiter = TriggerReloadArbiter()
+        state["trigger_arbiter"] = arbiter
+    return arbiter
+
+
+def _should_prefer_cached_refresh_url(config_dict, state) -> bool:
+    if not str(config_dict.get("refresh_datetime", "") or "").strip():
+        return False
+    if state.get("post_boundary_retry_pending", False):
+        return True
+    if state.get("reached", False):
+        return False
+    controller = state.get("controller")
+    if (
+        isinstance(controller, RefreshTriggerController)
+        and controller.trigger_deadline_monotonic_ns is not None
+    ):
+        return controller.remaining_ns() <= REFRESH_CACHED_URL_FAST_PATH_WINDOW_NS
+    target_dt = parse_refresh_datetime(config_dict.get("refresh_datetime", ""))
+    if target_dt is None:
+        return False
+    remaining_ns = int(
+        (target_dt.timestamp() * 1_000_000_000) - time.time_ns()
+    )
+    return remaining_ns <= REFRESH_CACHED_URL_FAST_PATH_WINDOW_NS
+
+
+def _reset_refresh_trigger_retry(state) -> None:
+    state["refresh_retry_pending"] = False
+    state["refresh_reload_attempts"] = 0
+    state["refresh_retry_deadline_monotonic_ns"] = None
+    state["refresh_retry_not_before_monotonic_ns"] = 0
+    state["post_boundary_retry_pending"] = False
+    state["post_boundary_retry_route"] = ""
+    state["post_boundary_retry_not_before_monotonic_ns"] = 0
+    state["post_boundary_retry_deadline_monotonic_ns"] = 0
+
+
+def _refresh_route_key(url) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if not parsed.scheme or not host:
+        return ""
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    path = (parsed.path or "/").rstrip("/") or "/"
+    return f"{parsed.scheme.lower()}://{host}{port}{path}"
+
+
+def _arm_stale_response_retry(tab, state, controller, current_url) -> None:
+    cached_url = ""
+    try:
+        cached_url = getattr(getattr(tab, "target", None), "url", "") or ""
+    except Exception:
+        cached_url = ""
+    effective_url = cached_url or current_url
+    if not _is_tixcraft_dom_url(effective_url):
+        return
+    if classify_page(effective_url) not in {
+        PageClass.ACTIVITY,
+        PageClass.DATE,
+        PageClass.AREA,
+    }:
+        return
+    route = _refresh_route_key(effective_url)
+    if not route:
+        return
+    now_ns = controller.clock.monotonic_ns()
+    boundary_ns = controller.trigger_deadline_monotonic_ns or now_ns
+    state["post_boundary_retry_pending"] = True
+    state["post_boundary_retry_route"] = route
+    state["post_boundary_retry_not_before_monotonic_ns"] = (
+        now_ns + REFRESH_STALE_RESPONSE_RETRY_DELAY_NS
+    )
+    state["post_boundary_retry_deadline_monotonic_ns"] = (
+        boundary_ns + REFRESH_TRIGGER_RETRY_WINDOW_NS
+    )
+
+
+async def _read_tixcraft_sale_dom_ready(tab, current_url, config_dict):
+    """Return True/False only when a bounded DOM probe is conclusive.
+
+    ``None`` is fail-safe: an unavailable JS context must not be interpreted as
+    a stale response and trigger another request.
+    """
+
+    if not _is_tixcraft_dom_url(current_url):
+        return None
+    page_class = classify_page(current_url)
+    selectors = {
+        PageClass.ACTIVITY: 'a[href*="/activity/game/"]',
+        PageClass.DATE: (
+            '#gameList button[data-href], '
+            '#gameList a[href*="/ticket/area/"]'
+        ),
+        PageClass.AREA: ".zone",
+    }
+    selector = selectors.get(page_class)
+    if not selector:
+        return None
+    script = (
+        "(() => {"
+        "const ready = document.readyState === 'interactive' "
+        "|| document.readyState === 'complete';"
+        "if (!ready) return null;"
+        "const body = document.body;"
+        "if (!body) return null;"
+        "const knownShell = body.querySelector("
+        "'.activity-info, .game-title, #gameList, .zone, #TicketForm'"
+        ");"
+        "const bodyText = (body.innerText || '').replace(/\\s+/g, '');"
+        "const elementCount = body.querySelectorAll('*').length;"
+        "if (!knownShell && bodyText.length <= 8 && elementCount <= 25) "
+        "return null;"
+        f"return document.querySelector({json.dumps(selector)}) !== null;"
+        "})()"
+    )
+    try:
+        result = await runtime_health.evaluate_with_timeout(
+            tab,
+            script,
+            config_dict,
+            timeout_seconds=0.35,
+            reason="REFRESH_STALE_DOM_EVIDENCE",
+            default=None,
+            log_success=False,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return None
+    try:
+        parsed = util.parse_nodriver_result(result)
+    except Exception:
+        parsed = result
+    return parsed if isinstance(parsed, bool) else None
+
+
+async def _request_refresh_datetime_reload(
+    tab,
+    config_dict,
+    state,
+    current_url,
+    reason,
+    expected_route="",
+) -> TriggerReloadDecision:
+    controller = state["controller"]
+    decision = await _get_trigger_arbiter(state).request_reload(
+        tab,
+        current_url=current_url,
+        runtime_state=_get_trigger_runtime_state(current_url),
+        reason=reason,
+        reload_callable=guarded_reload,
+        config_dict=config_dict,
+        now_monotonic=controller.clock.monotonic_ns() / 1_000_000_000,
+        expected_route=expected_route,
+    )
+    if decision.reloaded:
+        _invalidate_refresh_gate_health_evidence(state)
+        _mark_tixcraft_scheduled_reload_landed(
+            current_url,
+            config_dict,
+            now_monotonic=time.monotonic(),
+        )
+    return decision
+
+
+def _finish_refresh_trigger_without_reload(state, controller, decision) -> None:
+    state["reached"] = True
+    state["refresh_retry_pending"] = False
+    state["last_refresh_reload_decision"] = decision.reason
+    controller.mark_trigger_failed()
+
+
+async def _execute_refresh_trigger_reload(
+    tab,
+    config_dict,
+    state,
+    current_url,
+    controller,
+    reason,
+) -> TriggerReloadDecision:
+    preflight = await _preflight_tixcraft_refresh_boundary(
+        tab,
+        current_url,
+        config_dict,
+        state,
+        "initial_trigger",
+    )
+    if preflight is not None:
+        if preflight.reason in {
+            "soft_block_detected",
+            "health_probe_unavailable",
+        }:
+            await _defer_refresh_trigger_for_page_recovery(
+                tab,
+                current_url,
+                config_dict,
+                state,
+                controller,
+                preflight,
+            )
+            return preflight
+        _finish_refresh_trigger_without_reload(
+            state,
+            controller,
+            preflight,
+        )
+        return preflight
+
+    now_ns = controller.clock.monotonic_ns()
+    retry_deadline_ns = state.get("refresh_retry_deadline_monotonic_ns")
+    if retry_deadline_ns is None:
+        boundary_ns = controller.trigger_deadline_monotonic_ns or now_ns
+        retry_deadline_ns = boundary_ns + REFRESH_TRIGGER_RETRY_WINDOW_NS
+        state["refresh_retry_deadline_monotonic_ns"] = retry_deadline_ns
+
+    decision = await _request_refresh_datetime_reload(
+        tab,
+        config_dict,
+        state,
+        current_url,
+        reason,
+    )
+    state["last_refresh_reload_decision"] = decision.reason
+    if decision.attempted:
+        state["refresh_reload_attempts"] = int(
+            state.get("refresh_reload_attempts", 0) or 0
+        ) + 1
+
+    if decision.reloaded:
+        state["reached"] = True
+        state["refresh_retry_pending"] = False
+        controller.mark_post_trigger_reload()
+        if reason == "refresh_datetime_trigger":
+            _arm_stale_response_retry(
+                tab,
+                state,
+                controller,
+                current_url,
+            )
+        return decision
+
+    decision_time_ns = controller.clock.monotonic_ns()
+    attempts = int(state.get("refresh_reload_attempts", 0) or 0)
+    still_in_window = decision_time_ns < int(retry_deadline_ns)
+    can_retry = (
+        decision.reason in REFRESH_TRIGGER_RETRYABLE_REASONS
+        and attempts < REFRESH_TRIGGER_MAX_ATTEMPTS
+        and still_in_window
+    )
+    if can_retry:
+        state["refresh_retry_pending"] = True
+        state["refresh_retry_not_before_monotonic_ns"] = (
+            decision_time_ns + REFRESH_TRIGGER_RETRY_DELAY_NS
+        )
+    else:
+        _finish_refresh_trigger_without_reload(state, controller, decision)
+    return decision
+
+
 async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
     # Gate platform dispatching until refresh_datetime is reached.
     # Returns True if gate is active (caller should continue),
     # False if gate is cleared (proceed with dispatching).
     current_str = config_dict.get("refresh_datetime", "")
-    calibration, timing_decision = get_effective_refresh_calibration(config_dict, current_url)
-    state_key = current_str + "|" + json.dumps(calibration, sort_keys=True) + "|" + json.dumps(
-        timing_decision.to_dict(),
-        sort_keys=True,
-    )
     controller = state.get("controller")
     if controller is None:
         controller = RefreshTriggerController()
         state["controller"] = controller
+    target_dt = parse_refresh_datetime(current_str)
+    timing_config = _get_runtime_refresh_calibration_config(
+        config_dict,
+        state,
+        controller,
+        current_str,
+        target_dt,
+    )
+    calibration, timing_decision = get_effective_refresh_calibration(
+        timing_config,
+        current_url,
+    )
+    state_key = (
+        current_str
+        + "|"
+        + json.dumps(calibration, sort_keys=True)
+        + "|"
+        + json.dumps(
+            timing_decision.to_dict(),
+            sort_keys=True,
+        )
+    )
+
+    _maintain_tixcraft_refresh_runtime(
+        tab,
+        current_url,
+        config_dict,
+        now_monotonic=time.monotonic(),
+    )
 
     # Detect config change: reset state if user changed the value or delay-calibration offsets.
     if state_key != state.get("state_key", "") and controller.phase not in (
         TriggerPhase.FROZEN,
         TriggerPhase.TRIGGERED,
-        TriggerPhase.POST_TRIGGER_RELOAD,
     ):
         state["state_key"] = state_key
         state["target_str"] = current_str
@@ -576,28 +1441,144 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
         state["reported_platform_timing"] = False
         state["target_boundary_done"] = False
         state["target_boundary_deadline_monotonic_ns"] = None
+        state["refresh_soft_block_preflight_token"] = None
+        state["refresh_soft_block_preflight_reason"] = ""
+        state["refresh_gate_health_next_probe_at"] = 0.0
+        state["refresh_gate_health_ready_route"] = ""
+        state["refresh_gate_health_ready_at"] = 0.0
+        _reset_refresh_trigger_retry(state)
 
     if not state.get("reported_platform_timing", False):
         for warning in timing_decision.warnings:
             print(f"[REFRESH] {warning}")
         state["reported_platform_timing"] = True
 
-    # If already reached, no gating
-    if state["reached"] or controller.phase == TriggerPhase.TRIGGERED:
+    post_boundary_retry_reloaded = False
+    if state.get("post_boundary_retry_pending", False):
+        now_ns = controller.clock.monotonic_ns()
+        retry_deadline_ns = int(
+            state.get("post_boundary_retry_deadline_monotonic_ns", 0) or 0
+        )
+        current_route = _refresh_route_key(current_url)
+        expected_route = state.get("post_boundary_retry_route", "")
+        if now_ns >= retry_deadline_ns or current_route != expected_route:
+            state["post_boundary_retry_pending"] = False
+        else:
+            retry_not_before_ns = int(
+                state.get(
+                    "post_boundary_retry_not_before_monotonic_ns",
+                    0,
+                )
+                or 0
+            )
+            if now_ns >= retry_not_before_ns:
+                # Clear before awaiting so cancellation/re-entry cannot create
+                # a third scheduled request.
+                state["post_boundary_retry_pending"] = False
+                arbiter = _get_trigger_arbiter(state)
+                runtime_state = _get_trigger_runtime_state(current_url)
+                preflight = arbiter.can_reload(
+                    tab,
+                    current_url=current_url,
+                    runtime_state=runtime_state,
+                    now_monotonic=now_ns / 1_000_000_000,
+                )
+                if preflight.reason != "ready":
+                    print(
+                        "[REFRESH] Bounded stale-response retry canceled:",
+                        preflight.reason,
+                    )
+                else:
+                    dom_ready = await _read_tixcraft_sale_dom_ready(
+                        tab,
+                        current_url,
+                        config_dict,
+                    )
+                    if dom_ready is False:
+                        try:
+                            latest_url = (
+                                getattr(
+                                    getattr(tab, "target", None),
+                                    "url",
+                                    "",
+                                )
+                                or ""
+                            )
+                        except Exception:
+                            latest_url = ""
+                        if _refresh_route_key(latest_url) != expected_route:
+                            print(
+                                "[REFRESH] Bounded stale-response retry canceled: "
+                                "route advanced during DOM probe"
+                            )
+                        else:
+                            decision = await _preflight_tixcraft_refresh_boundary(
+                                tab,
+                                latest_url,
+                                config_dict,
+                                state,
+                                "stale_response_retry",
+                            )
+                            if decision is None:
+                                decision = await _request_refresh_datetime_reload(
+                                    tab,
+                                    config_dict,
+                                    state,
+                                    latest_url,
+                                    "refresh_datetime_stale_response_retry",
+                                    expected_route=expected_route,
+                                )
+                            state["last_refresh_reload_decision"] = decision.reason
+                            if decision.reloaded:
+                                post_boundary_retry_reloaded = True
+                                print("[REFRESH] Bounded stale-response retry completed.")
+                            else:
+                                print(
+                                    "[REFRESH] Bounded stale-response retry skipped:",
+                                    decision.reason,
+                                )
+                    elif dom_ready is True:
+                        print(
+                            "[REFRESH] Bounded stale-response retry canceled: "
+                            "sale DOM is ready"
+                        )
+                    else:
+                        print(
+                            "[REFRESH] Bounded stale-response retry canceled: "
+                            "DOM evidence unavailable"
+                        )
+
+    if post_boundary_retry_reloaded:
+        return True
+
+    # If already reached, no gating.
+    if state.get("reached", False):
         return False
 
-    target_dt = parse_refresh_datetime(current_str)
     if target_dt is None:
         # Empty or invalid = no waiting
         state["reached"] = True
         return False
 
-    now = datetime.now()
-    trigger_dt = calculate_refresh_trigger_datetime(target_dt, calibration)
+    now = datetime.fromtimestamp(controller.clock.wall_time_ns() / 1_000_000_000)
+    was_armed = (
+        controller.state_key == state_key
+        and controller.plan is not None
+        and controller.trigger_deadline_monotonic_ns is not None
+    )
     plan = controller.arm(target_dt, calibration, state_key)
 
-    if calibration.get("enable", False):
-        freeze_seconds = calibration.get("freeze_before_seconds", 10)
+    trusted_clock_plan = plan.confidence in {"high", "medium"}
+    if calibration.get("enable", False) or trusted_clock_plan:
+        freeze_seconds = calibration.get(
+            "freeze_before_seconds",
+            RUNTIME_NTP_CRITICAL_WINDOW_SECONDS,
+        )
+        if trusted_clock_plan:
+            freeze_seconds = max(
+                RUNTIME_NTP_CRITICAL_WINDOW_SECONDS,
+                float(freeze_seconds),
+            )
         if controller.maybe_freeze(target_dt, freeze_seconds):
             print(
                 "[REFRESH-B] Freeze trigger:",
@@ -609,7 +1590,20 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
             )
         if controller.plan is not None:
             plan = controller.plan
-            trigger_dt = plan.local_trigger_time
+
+    if controller.phase in {TriggerPhase.ARMED, TriggerPhase.FROZEN}:
+        watchdog_remaining_seconds = max(
+            0.0,
+            controller.remaining_ns() / 1_000_000_000,
+        )
+        if await _run_refresh_gate_health_watchdog(
+            tab,
+            current_url,
+            config_dict,
+            state,
+            watchdog_remaining_seconds,
+        ):
+            return True
 
     target_boundary_required = calibration.get("enable", False) and plan.local_trigger_time < target_dt
     if target_boundary_required and state.get("target_boundary_deadline_monotonic_ns") is None:
@@ -627,31 +1621,123 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
             if _should_suppress_target_boundary_action(current_url):
                 print(f"[REFRESH] Public-sale target boundary suppressed; workflow appears advanced: {current_url}")
             else:
-                try:
-                    await guarded_reload(tab, reason="refresh_datetime_target_boundary")
+                decision = await _preflight_tixcraft_refresh_boundary(
+                    tab,
+                    current_url,
+                    config_dict,
+                    state,
+                    "public_sale_target",
+                )
+                if (
+                    decision is not None
+                    and decision.reason
+                    in {"soft_block_detected", "health_probe_unavailable"}
+                ):
+                    state["target_boundary_done"] = False
+                    state["reached"] = False
+                    state["refresh_recovery_dispatch_required"] = True
+                    state["refresh_soft_block_preflight_token"] = None
+                    state["refresh_soft_block_preflight_reason"] = ""
+                    return True
+                if decision is None:
+                    decision = await _request_refresh_datetime_reload(
+                        tab,
+                        config_dict,
+                        state,
+                        current_url,
+                        "refresh_datetime_target_boundary",
+                    )
+                state["last_refresh_reload_decision"] = decision.reason
+                if decision.reloaded:
                     print(
                         "[REFRESH] Public-sale target boundary reached:",
                         target_dt.strftime('%Y/%m/%d %H:%M:%S.%f')[:-3],
                     )
-                except Exception as exc:
-                    print(f"[REFRESH] Target-boundary reload failed: {exc}")
+                    return True
+                else:
+                    print(
+                        "[REFRESH] Target-boundary reload skipped:",
+                        decision.reason,
+                    )
         return False
 
     if controller.phase == TriggerPhase.POST_TRIGGER_RELOAD:
         return False
 
-    # Already far past target: do not reload stale schedules repeatedly.
-    if (now - target_dt).total_seconds() > 60:
+    if controller.phase == TriggerPhase.TRIGGERED:
+        if not state.get("refresh_retry_pending", False):
+            controller.mark_trigger_failed()
+            state["reached"] = True
+            return False
+        now_ns = controller.clock.monotonic_ns()
+        retry_deadline_ns = int(
+            state.get("refresh_retry_deadline_monotonic_ns", 0) or 0
+        )
+        attempts = int(state.get("refresh_reload_attempts", 0) or 0)
+        if (
+            now_ns >= retry_deadline_ns
+            or attempts >= REFRESH_TRIGGER_MAX_ATTEMPTS
+        ):
+            state["refresh_retry_pending"] = False
+            state["reached"] = True
+            controller.mark_trigger_failed()
+            return False
+        retry_not_before_ns = int(
+            state.get("refresh_retry_not_before_monotonic_ns", 0) or 0
+        )
+        if now_ns < retry_not_before_ns:
+            return True
+        decision = await _execute_refresh_trigger_reload(
+            tab,
+            config_dict,
+            state,
+            current_url,
+            controller,
+            "refresh_datetime_trigger_retry",
+        )
+        if decision.reloaded:
+            print(
+                "[REFRESH] Trigger retry succeeded:",
+                plan.computed_trigger_display,
+            )
+            return True
+        elif state.get("refresh_retry_pending", False):
+            print("[REFRESH] Trigger retry deferred:", decision.reason)
+        else:
+            print("[REFRESH] Trigger retry stopped:", decision.reason)
+        return bool(state.get("refresh_retry_pending", False))
+
+    deadline_ns = controller.trigger_deadline_monotonic_ns
+    if (
+        deadline_ns is not None
+        and controller.clock.monotonic_ns() - deadline_ns
+        > REFRESH_TRIGGER_MAX_LATENESS_NS
+    ):
+        # A machine can resume long after the sale boundary. Replaying an old
+        # one-shot schedule then would be both surprising and an unnecessary
+        # request burst, so expire it instead of treating it as on-time.
         state["reached"] = True
+        _reset_refresh_trigger_retry(state)
+        controller.phase = TriggerPhase.STOPPED
         return False
 
-    # Reached trigger time. In B mode this can be before official sale time so
-    # the page request lands closer to the server-side opening boundary.
+    # Already far past target: do not reload stale schedules repeatedly.
+    if not was_armed and (now - target_dt).total_seconds() > 60:
+        state["reached"] = True
+        controller.phase = TriggerPhase.STOPPED
+        return False
+
+    # Reached the monotonic deadline derived from the reference wall target.
     if controller.should_trigger_once():
-        state["reached"] = not target_boundary_required
-        try:
-            await guarded_reload(tab, reason="refresh_datetime_trigger")
-            controller.mark_post_trigger_reload()
+        decision = await _execute_refresh_trigger_reload(
+            tab,
+            config_dict,
+            state,
+            current_url,
+            controller,
+            "refresh_datetime_trigger",
+        )
+        if decision.reloaded:
             print(
                 "[REFRESH] Trigger reached:",
                 plan.computed_trigger_display,
@@ -660,9 +1746,12 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
                 "|",
                 describe_refresh_calibration(calibration),
             )
-        except Exception as exc:
-            print(f"[REFRESH] Trigger reload failed: {exc}")
-        return False
+            return True
+        elif state.get("refresh_retry_pending", False):
+            print("[REFRESH] Trigger reload deferred for one safe retry:", decision.reason)
+        else:
+            print("[REFRESH] Trigger reload skipped:", decision.reason)
+        return bool(state.get("refresh_retry_pending", False))
 
     # Before target time: gate is active
     remaining_ns = controller.remaining_ns()
@@ -670,7 +1759,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
     target_remaining = max(0.0, (target_dt - now).total_seconds())
 
     # Countdown display
-    now_mono = time.monotonic()
+    now_mono = controller.clock.monotonic_ns() / 1_000_000_000
     should_print = False
     if remaining <= 60:
         if now_mono - state["last_countdown_print"] >= 1.0:
@@ -700,10 +1789,15 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
         if controller.trigger_deadline_monotonic_ns is not None:
             await sleep_until_deadline(controller.trigger_deadline_monotonic_ns, controller.clock)
         if controller.should_trigger_once():
-            state["reached"] = not target_boundary_required
-            try:
-                await guarded_reload(tab, reason="refresh_datetime_trigger_retry")
-                controller.mark_post_trigger_reload()
+            decision = await _execute_refresh_trigger_reload(
+                tab,
+                config_dict,
+                state,
+                current_url,
+                controller,
+                "refresh_datetime_trigger",
+            )
+            if decision.reloaded:
                 print(
                     "[REFRESH] Trigger reached:",
                     plan.computed_trigger_display,
@@ -712,9 +1806,12 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
                     "|",
                     describe_refresh_calibration(calibration),
                 )
-            except Exception as exc:
-                print(f"[REFRESH] Trigger reload failed: {exc}")
-        return False
+                return True
+            elif state.get("refresh_retry_pending", False):
+                print("[REFRESH] Trigger reload deferred for one safe retry:", decision.reason)
+            else:
+                print("[REFRESH] Trigger reload skipped:", decision.reason)
+        return bool(state.get("refresh_retry_pending", False))
 
     return True
 
@@ -734,7 +1831,7 @@ async def reload_config(config_dict, last_mtime, config_filepath):
                 fields = [
                     "ticket_number", "date_auto_select", "area_auto_select", "keyword_exclude",
                     "ocr_captcha", "tixcraft", "kktix", "cityline",
-                    "refresh_datetime", "refresh_calibration", "contact",
+                    "refresh_datetime", "refresh_calibration", "time_calibration", "contact",
                     "date_auto_fallback", "area_auto_fallback"
                 ]
                 for field in fields:
@@ -765,9 +1862,7 @@ async def reload_config(config_dict, last_mtime, config_filepath):
 
     return config_dict, last_mtime
 
-async def main(args):
-    global _ACTIVE_SESSION_MANAGER
-
+async def _run_main(args, resources):
     instance_id = ""
     if args and getattr(args, "instance", None):
         instance_id = args.instance
@@ -781,6 +1876,10 @@ async def main(args):
         else:
             print(f"[INSTANCE] Invalid instance id '{instance_id}' (allowed: [A-Za-z0-9_-], max 32 chars), fallback to default")
 
+    heartbeat_filename = "heartbeat.txt"
+    resources["heartbeat_path"] = util.get_instance_state_path(
+        heartbeat_filename
+    )
     config_dict = get_config_dict(args)
 
     # Prefix logs with timestamp (optional) and instance id (always) so mixed
@@ -795,15 +1894,22 @@ async def main(args):
             prefix_parts.append(datetime.now().strftime("[%H:%M:%S]"))
         prefix_parts.append(_instance_tag)
         _original_print(*prefix_parts, *args_p, **kwargs_p)
+    resources["original_print"] = _original_print
     builtins.print = _prefixed_print
 
+    refresh_datetime_state = {
+        "target_str": "",
+        "reached": False,
+        "last_countdown_print": 0,
+    }
+    resources["refresh_datetime_state"] = refresh_datetime_state
     driver = None
     tab = None
     session_manager = None
     if not config_dict is None:
         sandbox = False
         session_manager = create_browser_session_manager(config_dict, args)
-        _ACTIVE_SESSION_MANAGER = session_manager
+        resources["session_manager"] = session_manager
         conf = get_extension_config(config_dict, args, session_manager=session_manager)
         nodriver_overwrite_prefs(conf)
         # PS: nodrirver run twice always cause error:
@@ -873,16 +1979,10 @@ async def main(args):
 
     maxbot_last_reset_time = time.time()
     heartbeat_interval_sec = 5
-    heartbeat_filename = "heartbeat.txt"
     last_heartbeat_time = 0.0
     last_runtime_alive_log = 0.0
     last_empty_url_log = 0.0
     is_quit_bot = False
-    refresh_datetime_state = {
-        "target_str": "",
-        "reached": False,
-        "last_countdown_print": 0,
-    }
     ticketplus_purchase_done = False  # Guard: stop polling after purchase completed
 
     # Initialize config mtime. Hot reload watches the file this instance was
@@ -914,6 +2014,7 @@ async def main(args):
 
         # pass if driver not loaded.
         if driver is None:
+            _close_runtime_ntp_coordinator(refresh_datetime_state)
             print("nodriver not accessible!")
             break
 
@@ -921,25 +2022,20 @@ async def main(args):
             is_quit_bot = True
 
         if not is_quit_bot:
-            url, is_quit_bot = await nodriver_current_url(tab, config_dict)
+            prefer_cached_url = _should_prefer_cached_refresh_url(
+                config_dict,
+                refresh_datetime_state,
+            )
+            url, is_quit_bot = await nodriver_current_url(
+                tab,
+                config_dict,
+                prefer_cached=prefer_cached_url,
+            )
             #print("url:", url)
 
         if is_quit_bot:
-            try:
-                if session_manager is not None:
-                    await session_manager.stop_browser()
-                driver = None
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                runtime_health.runtime_log(
-                    "[LOOP] browser_stop_failed",
-                    config_dict,
-                    error_type=type(exc).__name__,
-                )
             util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_INT28_QUIT_FILE))
             util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_AUTOMATION_STOP_FILE))
-            util.force_remove_file(util.get_instance_state_path(heartbeat_filename))
             break
 
         if url is None:
@@ -949,9 +2045,9 @@ async def main(args):
                 now_mono = time.time()
                 if now_mono - last_empty_url_log >= 2.0:
                     last_empty_url_log = now_mono
-                    target_url_now = getattr(getattr(tab, 'target', None), 'url', None)
                     util.create_debug_logger(config_dict).log(
-                        f"[URL DIAG] empty url, skipping dispatch; target.url={target_url_now!r}"
+                        "[URL DIAG] empty url, skipping dispatch; "
+                        f"{format_cached_target_url_diagnostic(tab)}"
                     )
                 continue
 
@@ -980,6 +2076,15 @@ async def main(args):
 
         # Gate: block platform dispatching until refresh_datetime target time
         if await check_refresh_datetime_gate(tab, config_dict, refresh_datetime_state, url):
+            if refresh_datetime_state.pop(
+                "refresh_recovery_dispatch_required",
+                False,
+            ):
+                await tixcraft_platform.nodriver_ticketmaster_check_ip_block(
+                    tab,
+                    config_dict,
+                    current_url=url,
+                )
             await asyncio.sleep(0.1)
             continue
 
@@ -1023,7 +2128,25 @@ async def main(args):
             tixcraft_family = True
 
         if tixcraft_family:
-            is_quit_bot = await nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser)
+            try:
+                is_quit_bot = await nodriver_tixcraft_main(
+                    tab,
+                    url,
+                    config_dict,
+                    ocr,
+                    Captcha_Browser,
+                )
+            except Exception as exc:
+                if not runtime_health.is_browser_connection_closed_error(exc):
+                    raise
+                runtime_health.runtime_log(
+                    "[BROWSER] connection_closed",
+                    config_dict,
+                    error_type=type(exc).__name__,
+                )
+                print("[BROWSER] Browser connection closed; stopping this instance cleanly.")
+                is_quit_bot = True
+                continue
             if is_quit_bot:
                 # 不自動暫停：讓多開實例可獨立運作
                 # 保留 is_quit_bot = False 以防止程式結束，但不建立暫停檔案
@@ -1096,38 +2219,74 @@ async def main(args):
         if url[:len(facebook_login_url)]==facebook_login_url:
             await nodriver_facebook_main(tab, config_dict)
 
-async def _main_with_cleanup(args):
-    global _ACTIVE_SESSION_MANAGER
 
+async def _cleanup_main_resources(resources):
+    """Release runtime resources without masking an in-flight main error."""
+
+    if resources.get("cleanup_complete", False):
+        return None
+
+    cleanup_errors = []
+    refresh_datetime_state = resources.get("refresh_datetime_state")
+    if isinstance(refresh_datetime_state, dict):
+        try:
+            _close_runtime_ntp_coordinator(refresh_datetime_state)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+    session_manager = resources.get("session_manager")
+    if session_manager is not None:
+        stop_task = asyncio.create_task(session_manager.stop_browser())
+        try:
+            await asyncio.shield(stop_task)
+        except asyncio.CancelledError as exc:
+            # A cancellation arriving during finalization must still allow the
+            # session owner to finish closing the browser. Re-raise it only
+            # after the remaining synchronous cleanup has completed.
+            cleanup_errors.append(exc)
+            if not stop_task.done():
+                try:
+                    await stop_task
+                except BaseException as stop_exc:
+                    cleanup_errors.append(stop_exc)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+    heartbeat_path = resources.get("heartbeat_path")
+    if heartbeat_path:
+        try:
+            util.force_remove_file(heartbeat_path)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+    original_print = resources.get("original_print")
+    if original_print is not None:
+        try:
+            import builtins
+
+            builtins.print = original_print
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+    resources["cleanup_complete"] = True
+    return cleanup_errors[0] if cleanup_errors else None
+
+
+async def main(args):
+    resources = {
+        "session_manager": None,
+        "refresh_datetime_state": None,
+        "heartbeat_path": "",
+        "original_print": None,
+        "cleanup_complete": False,
+    }
     try:
-        await main(args)
-    except asyncio.CancelledError:
-        raise
-    except BaseException as exc:
-        if not runtime_health.is_connection_closed_error(exc):
-            raise
-        runtime_health.runtime_log(
-            "[RUNTIME] browser_connection_closed",
-            error_type=type(exc).__name__,
-        )
-        print(f"[RUNTIME] Browser connection closed; stopping safely ({type(exc).__name__}).")
+        return await _run_main(args, resources)
     finally:
-        manager = _ACTIVE_SESSION_MANAGER
-        _ACTIVE_SESSION_MANAGER = None
-        if manager is not None:
-            try:
-                await manager.stop_browser()
-            except asyncio.CancelledError:
-                # Finish the idempotent browser cleanup before propagating Ctrl+C.
-                cleanup_task = asyncio.create_task(manager.stop_browser())
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(cleanup_task)
-                raise
-            except BaseException as exc:
-                runtime_health.runtime_log(
-                    "[RUNTIME] browser_cleanup_failed",
-                    error_type=type(exc).__name__,
-                )
+        primary_exception = sys.exc_info()[1]
+        cleanup_exception = await _cleanup_main_resources(resources)
+        if primary_exception is None and cleanup_exception is not None:
+            raise cleanup_exception
 
 
 def cli():
@@ -1215,10 +2374,7 @@ def cli():
         metavar="PORT")
 
     args = parser.parse_args()
-    try:
-        asyncio.run(_main_with_cleanup(args))
-    except KeyboardInterrupt:
-        print("Interrupted by user.")
+    asyncio.run(main(args))
 
 if __name__ == "__main__":
     cli()
