@@ -107,13 +107,30 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirement.txt -r requirements-dev.txt
 
+      - name: Read project version
+        id: project
+        shell: pwsh
+        run: |
+          $VersionOutput = & python scripts/release_utils.py project-version --metadata src/hunter_metadata.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to read the project version (python exit code $LASTEXITCODE)."
+          }
+          $Version = ($VersionOutput | Out-String).Trim()
+          $ArtifactNameOutput = & python scripts/release_utils.py artifact-name --version $Version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to resolve the artifact name (python exit code $LASTEXITCODE)."
+          }
+          $ArtifactName = ($ArtifactNameOutput | Out-String).Trim()
+          "version=$Version" >> $env:GITHUB_OUTPUT
+          "artifact_name=$ArtifactName" >> $env:GITHUB_OUTPUT
+
       - name: Build Windows package
         shell: pwsh
-        run: ./scripts/build_windows.ps1 -Version 0.1.0
+        run: ./scripts/build_windows.ps1 -Version "${{ steps.project.outputs.version }}"
 
       - name: Upload build smoke artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-build-smoke
-          path: dist/release/hunterX_windows_0.1.0.zip
+          name: ${{ steps.project.outputs.artifact_name }}
+          path: dist/release/${{ steps.project.outputs.artifact_name }}
           if-no-files-found: error
