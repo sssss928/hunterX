@@ -12,13 +12,18 @@ def test_refresh_datetime_gate_platform_aware_deadline_behavior() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     env = dict(os.environ)
     env["PYTHONPATH"] = str(repo_root / "src")
+    env["HUNTERX_SRC_PATH"] = str(repo_root / "src")
     script = textwrap.dedent(
         r"""
         import asyncio
         import json
+        import os
+        import sys
         from datetime import datetime, timedelta
 
-        from nodriver_tixcraft import check_refresh_datetime_gate
+        sys.path.insert(0, os.environ["HUNTERX_SRC_PATH"])
+        import nodriver_tixcraft as runtime
+        check_refresh_datetime_gate = runtime.check_refresh_datetime_gate
 
 
         class FakeTab:
@@ -58,6 +63,19 @@ def test_refresh_datetime_gate_platform_aware_deadline_behavior() -> None:
 
         async def run():
             results = {}
+
+            async def safe_health(*_args, **_kwargs):
+                return {
+                    "blocked": False,
+                    "readyState": "complete",
+                    "hasBody": True,
+                    "hasKnownContent": True,
+                    "bodyText": "",
+                    "title": "",
+                    "elementCount": 1,
+                }
+
+            runtime.tixcraft_platform._read_tixcraft_page_health = safe_health
 
             target = datetime.now() + timedelta(milliseconds=90)
             tab = FakeTab()
@@ -126,7 +144,7 @@ def test_refresh_datetime_gate_platform_aware_deadline_behavior() -> None:
     payload = json.loads(payload_line.removeprefix("RESULT_JSON="))
 
     assert payload["tixcraft_boundary"] == {
-        "first": False,
+        "first": True,
         "second": False,
         "reload_count": 1,
         "reached": True,

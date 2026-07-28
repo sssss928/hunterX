@@ -83,16 +83,71 @@ def test_settings_smoke_passes_with_frontend_runtime_assets(tmp_path: Path, monk
 
     captured = capsys.readouterr()
     assert "smoke test ok" in captured.out
+    assert "notification formatter: ok (1-10)" in captured.out
 
 
 def test_settings_frontend_static_version_matches_release() -> None:
     html = Path("src/www/settings.html").read_text(encoding="utf-8")
     js = Path("src/www/settings.js").read_text(encoding="utf-8")
 
-    assert "HunterX (0.4.2)" in html
-    assert "HunterX (0.4.2)" in js
+    assert "HunterX (0.4.4)" in html
+    assert "HunterX (0.4.4)" in js
+    assert "HunterX (0.4.3)" not in html
+    assert "HunterX (0.4.3)" not in js
+    assert "HunterX (0.4.2)" not in html
+    assert "HunterX (0.4.2)" not in js
     assert "HunterX (0.2.1)" not in html
     assert "HunterX (0.2.1)" not in js
+
+
+def test_release_helpers_and_packaged_readme_match_v044() -> None:
+    release_readme = Path("build_scripts/README_Release.txt").read_text(
+        encoding="utf-8"
+    )
+    quick_start = Path("build_scripts/QUICK_START.md").read_text(encoding="utf-8")
+    build_batch = Path("build_scripts/build_and_test.bat").read_text(encoding="utf-8")
+
+    assert "hunterX_windows_0.4.4.zip" in release_readme
+    assert "hunterX_windows_0.4.4.zip" in quick_start
+    assert "hunterX_windows_%VERSION%.zip" in build_batch
+    assert "project-version --metadata src\\hunter_metadata.py" in build_batch
+    assert "validate-project-version --version" in build_batch
+    assert "scripts\\build_windows.ps1" in build_batch
+    assert "verify_release_archive.py windows" in build_batch
+    assert "git describe --tags" not in build_batch
+
+
+def test_windows_build_isolates_runtimes_and_packages_license() -> None:
+    build_script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
+    build_batch = Path("build_scripts/build_and_test.bat").read_text(encoding="utf-8")
+    bot_spec = Path("build_scripts/nodriver_tixcraft.spec").read_text(encoding="utf-8")
+    settings_spec = Path("build_scripts/settings.spec").read_text(encoding="utf-8")
+
+    assert build_script.count("$LASTEXITCODE -ne 0") >= 3
+    assert "nodriver_tixcraft PyInstaller build failed" in build_script
+    assert "settings PyInstaller build failed" in build_script
+    assert 'Test-Path -LiteralPath "LICENSE"' in build_script
+    assert 'Copy-Item -LiteralPath "LICENSE"' in build_script
+    assert "Copy-DirectoryFailClosed" in build_script
+    assert 'contents_directory=\'_nodriver_internal\'' in bot_spec
+    assert 'contents_directory=\'_settings_internal\'' in settings_spec
+    assert 'dist\\nodriver_tixcraft\\_nodriver_internal' in build_script
+    assert 'dist\\settings\\_settings_internal' in build_script
+    assert 'Join-Path $PackageDir "_nodriver_internal"' in build_script
+    assert 'Join-Path $PackageDir "_settings_internal"' in build_script
+    assert "python -m pytest" in build_batch
+    assert "python -m pip_audit" in build_batch
+    assert 'dist\\nodriver_tixcraft\\_internal' not in build_script
+    assert 'dist\\settings\\_internal' not in build_script
+    assert "taskkill" not in build_batch.lower()
+    assert "tasklist" not in build_batch.lower()
+    assert 'Join-Path $PackageDir "_internal"' not in build_script
+    assert "Merge-DirectoryFailClosed" not in build_script
+    assert "Merging _internal directories" not in build_batch
+    assert "playsound_pathex" not in bot_spec
+    assert "playsound_pathex" not in settings_spec
+    assert "pathex=[os.path.join(project_root, 'src')]" in bot_spec
+    assert "pathex=[]" in settings_spec
 
 
 def test_migrate_config_fills_missing_sections() -> None:

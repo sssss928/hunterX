@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -59,12 +60,14 @@ class _SoftBlockTab:
         self.text = text
         self.get_calls: list[str] = []
         self.reload_count = 0
+        self.target = SimpleNamespace(url="")
 
     async def evaluate(self, _script: str) -> str:
         return self.text
 
     async def get(self, url: str) -> None:
         self.get_calls.append(url)
+        self.target.url = url
 
     async def reload(self) -> None:
         self.reload_count += 1
@@ -114,21 +117,92 @@ async def test_reload_guard_times_out_stalled_reload(monkeypatch) -> None:
     assert tab.reload_count == 0
 
 
+@pytest.mark.asyncio
+async def test_navigation_and_reload_share_per_tab_single_flight(
+    monkeypatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class CoordinatedTab(_Tab):
+        def __init__(self) -> None:
+            super().__init__()
+            self.target.url = "https://tixcraft.com/ticket/area/abc/1"
+
+        async def get(self, url: str) -> None:
+            entered.set()
+            await release.wait()
+            self.target.url = url
+
+    monkeypatch.setattr(runtime_health, "runtime_log", lambda *_args, **_kwargs: None)
+    tab = CoordinatedTab()
+    navigation = asyncio.create_task(
+        runtime_health.guarded_get(
+            tab,
+            "https://tixcraft.com/activity/game/abc",
+            reason="test_navigation",
+        )
+    )
+    await entered.wait()
+
+    assert await ReloadGuard().reload(tab, reason="overlap_reload") is False
+    assert tab.reload_count == 0
+    assert runtime_health.get_active_browser_action_count() == 1
+
+    release.set()
+    assert await navigation is True
+    assert runtime_health.get_active_browser_action_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_canceled_navigation_releases_browser_action_slot(
+    monkeypatch,
+) -> None:
+    entered = asyncio.Event()
+
+    class CancelTab(_Tab):
+        def __init__(self) -> None:
+            super().__init__()
+            self.target.url = "https://tixcraft.com/ticket/area/abc/1"
+
+        async def get(self, _url: str) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(runtime_health, "runtime_log", lambda *_args, **_kwargs: None)
+    tab = CancelTab()
+    navigation = asyncio.create_task(
+        runtime_health.guarded_get(
+            tab,
+            "https://tixcraft.com/activity/game/abc",
+            reason="cancel_navigation",
+        )
+    )
+    await entered.wait()
+    navigation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await navigation
+
+    assert runtime_health.get_active_browser_action_count() == 0
+    assert await ReloadGuard().reload(tab, reason="after_cancel") is True
+    assert tab.reload_count == 1
+
+
 def test_leak_watch_scheduler_pending_and_interval_guards() -> None:
     config = {"advanced": {"run_mode": RunMode.LEAK_WATCH.value, "leak_refresh_interval_seconds": 6.5}}
     url = "https://tixcraft.com/ticket/area/abc/1"
     scheduler = LeakWatchScheduler()
 
     assert scheduler.can_reload(config, url, now=100) == (True, "ready")
-    scheduler.mark_dom_scan_start()
+    scheduler.mark_dom_scan_start(now=100)
     assert scheduler.can_reload(config, url, now=101) == (False, "dom_scan_pending")
-    scheduler.mark_dom_scan_end()
-    scheduler.mark_area_click_pending(url)
-    assert scheduler.can_reload(config, url, now=scheduler.last_area_click_at + 1) == (False, "area_click_pending")
-    assert scheduler.can_reload(config, url, now=scheduler.last_area_click_at + 7) == (True, "ready")
-    scheduler.begin_reload_cycle(url)
-    assert scheduler.can_reload(config, url, now=110) == (False, "reload_pending")
-    scheduler.finish_reload_cycle(config, success=True)
+    scheduler.mark_dom_scan_end(now=101)
+    scheduler.mark_area_click_pending(url, now=102)
+    assert scheduler.can_reload(config, url, now=103) == (False, "area_click_pending")
+    assert scheduler.can_reload(config, url, now=109) == (True, "ready")
+    scheduler.begin_reload_cycle(url, now=110)
+    assert scheduler.can_reload(config, url, now=111) == (False, "reload_pending")
+    scheduler.finish_reload_cycle(config, success=True, now=112)
     assert scheduler.can_reload(config, url, now=scheduler.next_cycle_at - 1) == (False, "interval_wait")
     scheduler.reset_for_recovery()
     assert scheduler.can_reload(config, url, now=120) == (True, "ready")
@@ -224,9 +298,9 @@ def test_tixcraft_soft_block_recovery_url_priority() -> None:
         "https://tixcraft.com/ticket/area/current/1",
     ) == "https://tixcraft.com/ticket/area/current/1"
 
-    assert _get_tixcraft_soft_block_recovery_url({"homepage": "https://tixcraft.com/activity/game/home"}) == (
-        "https://tixcraft.com/activity/game/home"
-    )
+    assert _get_tixcraft_soft_block_recovery_url(
+        {"homepage": "https://tixcraft.com/activity/game/home"}
+    ) == ""
 
 
 @pytest.mark.asyncio
@@ -257,11 +331,37 @@ async def test_tixcraft_soft_block_handler_waits_without_reload_and_resets_state
     async def forbidden_reload(*_args, **_kwargs):  # noqa: ANN002, ANN003
         raise AssertionError("soft-block handler must not reload")
 
+    async def interactive_ready(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return True
+
+    async def healthy_landing(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return {
+            "blocked": False,
+            "readyState": "complete",
+            "hasBody": True,
+            "bodyText": "area content",
+                "title": "",
+                "elementCount": 30,
+                "hasKnownContent": True,
+                "knownAreaContent": True,
+                "knownActivityContent": False,
+                "knownTicketContent": False,
+                "knownOrderContent": False,
+                "whiteOverlay": False,
+                "knownOrderProcessing": False,
+            }
+
     monkeypatch.setattr(tixcraft_platform, "check_and_handle_pause", false_check)
     monkeypatch.setattr(tixcraft_platform, "check_and_handle_quit", false_check)
     monkeypatch.setattr(runtime_health, "sleep_with_heartbeat", fake_sleep_with_heartbeat)
     monkeypatch.setattr(runtime_health, "touch_heartbeat", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runtime_health, "runtime_log", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_health, "wait_for_interactive_ready", interactive_ready)
+    monkeypatch.setattr(
+        tixcraft_platform,
+        "_read_tixcraft_page_health",
+        healthy_landing,
+    )
     monkeypatch.setattr(tixcraft_platform, "guarded_reload", forbidden_reload)
     monkeypatch.setattr(tixcraft_platform, "_resolve_soft_block_wait_seconds", lambda *_args, **_kwargs: (1, True))
 
@@ -279,9 +379,10 @@ async def test_tixcraft_soft_block_handler_waits_without_reload_and_resets_state
     assert tixcraft_state["ocr_completed_url"] == ""
     assert tixcraft_state["captcha_alert_detected"] is False
     assert tixcraft_state["manual_intervention_required"] is False
-    assert tixcraft_state["ticket_assigned_abc"] is False
-    assert tixcraft_state["tixcraft_area_reload_next_at"] == 0
-    assert tixcraft_state["tixcraft_area_reload_url"] == ""
+    assert "ticket_assigned_abc" not in tixcraft_state
+    assert tixcraft_state["tixcraft_area_reload_next_at"] > 0
+    assert tixcraft_state["tixcraft_area_reload_url"] == "https://tixcraft.com/ticket/area/last/1"
+    assert tixcraft_state["soft_block_recovery_scan_pending"] is True
 
 
 def test_tixcraft_area_retry_reset_clears_stale_reload_state() -> None:
@@ -336,6 +437,7 @@ def test_notification_default_template_and_redaction() -> None:
         "排數：\n"
         "1️⃣ 7排17號\n"
         "2️⃣ 7排18號\n"
+        "\n"
         "狀態：已進入結帳畫面，請立即付款！"
     )
     assert "搶票成功" not in message
@@ -362,14 +464,40 @@ def test_runtime_log_redacts_sensitive_values(tmp_path, monkeypatch) -> None:
         "[TEST] sensitive",
         {"advanced": {"run_mode": "leak_watch"}},
         current_url="https://tixcraft.com/ticket/area/x?TIXUISID=secret",
+        redirect_url=(
+            "https://user:password@tixcraft.com/a\r\nFORGED/"
+            + ("x" * 700)
+            + "?token=second-secret"
+        ),
         webhook="https://discord.com/api/webhooks/123/abc",
     )
 
     log_text = (tmp_path / "logs" / "runtime_default.log").read_text(encoding="utf-8")
     assert "secret" not in log_text
+    assert "second-secret" not in log_text
     assert "123/abc" not in log_text
-    assert "TIXUISID=***" in log_text
+    assert "user:password" not in log_text
+    assert "\r" not in log_text
+    assert len(log_text.splitlines()) == 1
+    assert "current_url=https://tixcraft.com/ticket/area/x" in log_text
+    assert "TIXUISID" not in log_text
     assert "https://discord.com/api/webhooks/***" in log_text
+    redirect_value = log_text.split("redirect_url=", 1)[1].split(" webhook=", 1)[0]
+    assert len(redirect_value) <= runtime_health.RUNTIME_DIAGNOSTIC_URL_MAX_LENGTH
+
+
+def test_browser_connection_closed_classifier_is_narrow() -> None:
+    closed = RuntimeError("no close frame received or sent")
+    wrapped = RuntimeError("platform dispatch failed")
+    wrapped.__cause__ = closed
+
+    assert runtime_health.is_browser_connection_closed_error(wrapped)
+    assert runtime_health.is_browser_connection_closed_error(
+        RuntimeError("Executor shutdown has been called")
+    )
+    assert not runtime_health.is_browser_connection_closed_error(
+        RuntimeError("area selector detached")
+    )
 
 
 def test_notification_order_pending_area_and_rows_are_separate() -> None:
@@ -389,6 +517,7 @@ def test_notification_order_pending_area_and_rows_are_separate() -> None:
         "區域： 特A區 (VIP PACKAGE)\n"
         "排數：\n"
         "訂單建立中﹍\n"
+        "\n"
         "狀態：訂單建立中﹍"
     )
 

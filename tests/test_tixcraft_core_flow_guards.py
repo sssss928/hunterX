@@ -27,8 +27,14 @@ def test_tixcraft_captcha_agreement_and_submit_flow_is_still_present() -> None:
     assert "#TicketForm_verifyCode" in source
     assert "#TicketForm_agree" in source
     assert "nodriver_check_checkbox_enhanced(tab, '#TicketForm_agree')" in source
-    assert 'dispatch_key_event("keyDown", code="Enter", key="Enter"' in source
-    assert 'dispatch_key_event("keyUp", code="Enter", key="Enter"' in source
+    submit_helper = source.split(
+        "async def _dispatch_tixcraft_enter_submit", maxsplit=1
+    )[1].split("\nasync def ", maxsplit=1)[0]
+    key_down = submit_helper.index('"keyDown"')
+    submit_guard = submit_helper.index("submit_guard.mark_submitted")
+    attempt_started = submit_helper.index("_mark_tixcraft_submit_started")
+    key_up = submit_helper.index('"keyUp"')
+    assert key_down < submit_guard < attempt_started < key_up
 
 
 def test_tixcraft_submit_still_requires_ticket_captcha_and_agreement_ready() -> None:

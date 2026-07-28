@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import sys
 from pathlib import Path
@@ -49,6 +50,63 @@ def artifact_name(version: str, platform: str = "windows") -> str:
     return f"hunterX_{platform_slug}_{normalized}.zip"
 
 
+def source_archive_prefix(version: str) -> str:
+    """Return the single top-level directory used inside source archives."""
+    return f"hunterX-{validate_semver(version)}/"
+
+
+def project_version(metadata_path: Path) -> str:
+    """Read the literal APP_VERSION assignment without importing project code."""
+    try:
+        source = metadata_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"Unable to read project metadata {metadata_path}: {exc}") from exc
+
+    try:
+        module = ast.parse(source, filename=str(metadata_path))
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid Python syntax in project metadata {metadata_path}: {exc}") from exc
+
+    assignments: list[ast.AST | None] = []
+    for node in module.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "APP_VERSION" for target in node.targets
+        ):
+            assignments.append(node.value)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "APP_VERSION"
+        ):
+            assignments.append(node.value)
+
+    if len(assignments) != 1:
+        raise ValueError(
+            f"Expected exactly one top-level APP_VERSION assignment in {metadata_path}, "
+            f"found {len(assignments)}."
+        )
+
+    value_node = assignments[0]
+    if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, str):
+        raise ValueError(f"APP_VERSION in {metadata_path} must be a literal string.")
+    normalized = validate_semver(value_node.value)
+    if normalized != value_node.value:
+        raise ValueError(f"APP_VERSION in {metadata_path} must not contain surrounding whitespace.")
+    return normalized
+
+
+def validate_project_version(version: str, metadata_path: Path) -> str:
+    """Require a requested release version to match project metadata exactly."""
+    requested = validate_semver(version)
+    declared = project_version(metadata_path)
+    if requested != declared:
+        raise ValueError(
+            f"Release version mismatch: requested {requested}, "
+            f"but {metadata_path} declares APP_VERSION {declared}."
+        )
+    return declared
+
+
 def extract_changelog(version: str, changelog_path: Path) -> str:
     """Extract a matching CHANGELOG.md section, with a non-failing fallback."""
     normalized = validate_semver(version)
@@ -90,6 +148,16 @@ def _build_parser() -> argparse.ArgumentParser:
     artifact_parser.add_argument("--version", required=True)
     artifact_parser.add_argument("--platform", default="windows")
 
+    prefix_parser = subparsers.add_parser("source-prefix")
+    prefix_parser.add_argument("--version", required=True)
+
+    project_version_parser = subparsers.add_parser("project-version")
+    project_version_parser.add_argument("--metadata", default="src/hunter_metadata.py")
+
+    project_check_parser = subparsers.add_parser("validate-project-version")
+    project_check_parser.add_argument("--version", required=True)
+    project_check_parser.add_argument("--metadata", default="src/hunter_metadata.py")
+
     notes_parser = subparsers.add_parser("notes")
     notes_parser.add_argument("--version", required=True)
     notes_parser.add_argument("--changelog", default="CHANGELOG.md")
@@ -108,6 +176,12 @@ def main(argv: list[str] | None = None) -> int:
             print(resolve_version(args.event_name, args.ref_name, args.input_version))
         elif args.command == "artifact-name":
             print(artifact_name(args.version, args.platform))
+        elif args.command == "source-prefix":
+            print(source_archive_prefix(args.version))
+        elif args.command == "project-version":
+            print(project_version(Path(args.metadata)))
+        elif args.command == "validate-project-version":
+            print(validate_project_version(args.version, Path(args.metadata)))
         elif args.command == "notes":
             print(extract_changelog(args.version, Path(args.changelog)))
         else:

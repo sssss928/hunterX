@@ -1,23 +1,40 @@
 # Changelog
 
-## v0.4.2-fixed
+## v0.4.4
 
-- Prevent timed-out Zendriver protocol operations from being cancelled while
-  they are still registered with the CDP listener, and drain them during
-  idempotent browser shutdown.
-- Treat closed WebSocket/CDP transports as a normal lifecycle stop instead of
-  leaking listener, executor-shutdown, or frozen-entry-point errors.
-- Resolve TixCraft event titles from validated page metadata, reject activity
-  slugs, and remove the trailing `@ 多個表演場地` presentation suffix.
-- Preserve only confirmed TixCraft area selections, recover checkout seat
-  details with ordered de-duplication, and suppress incomplete notifications
-  instead of emitting `Unknown Event` or `Unknown Area`.
-- Number every returned seat line consistently through 1️⃣–9️⃣, 🔟, and a
-  deterministic numeric fallback for larger orders.
-- Keep order-pending and checkout notification flags independent so each stage
-  is delivered once per event flow.
-- Make the Windows PyInstaller specs compatible with the stricter import-path
-  handling announced for PyInstaller 7.
+- Freeze event-scoped canonical TixCraft metadata into each purchase-attempt snapshot so later order and checkout pages cannot replace a correct activity title with a route slug, generic heading, or venue suffix.
+- Restrict TixCraft Discord purchase notifications to one `order_pending` event and one `checkout_reached` event per attempt, while allowing every later attempt in the same browser session to emit its own two events.
+- Keep checkout seat rows in the checkout notification itself and format seat positions with deterministic `1️⃣` through `🔟` prefixes, followed by numeric prefixes when more than ten seats are present.
+- Restore bounded clock calibration and monotonic deadline scheduling for the on-sale boundary, add stale first-response recovery, and keep protected purchase pages outside all automatic reload paths.
+- Coordinate timed reload and navigation intents through a single-flight arbiter, prefer cached browser URLs on the hot path, and retain bounded recovery when browser probes fail.
+- Add a soft-lock circuit breaker with bounded probes, one delayed return to the canonical `/ticket/area/` route, and a post-recovery grace window that prevents an immediate second reload.
+- Track Discord delivery independently from attempt emission so local queue pressure and bounded webhook retries cannot suppress later purchase attempts.
+- Revalidate attempt, route, event, and flow-generation identity immediately before notification enqueue to prevent stale asynchronous probes from publishing the wrong event.
+- Commit the submit lifecycle immediately after Enter `keyDown`; keep `keyUp` best-effort so a navigation race cannot erase a real purchase attempt.
+- Centralize runtime ownership and shutdown so cancellation or exceptions close the browser, clock coordinator, and heartbeat while preserving the original failure.
+- Harden the local settings control surface with loopback-only binding, stricter request/path validation, reduced cross-origin exposure, explicit command acknowledgements, and atomic configuration writes.
+- Serialize profile load/run/save/delete ownership so stale browser responses and run/delete races cannot target the wrong profile.
+- Package `nodriver_tixcraft.exe` and `settings.exe` with independent `_nodriver_internal` and `_settings_internal` dependency trees, and reject the legacy shared `_internal` layout.
+- Verify release archives for CRC integrity, traversal/case-collision hazards, forbidden generated or sensitive content, required Windows files, runtime isolation, and exact Source ZIP parity with `git archive`.
+- Add focused lifecycle, timing, arbitration, settings-security, long-run, packaging, and performance regression coverage for the v0.4.4 changes.
+
+## v0.4.3
+
+- Preserve TixCraft leak-watch refresh liveness when the page is still loading, `.zone` is missing, or a bounded DOM read fails, so every eligible safe-page path reaches the same guarded reload scheduler.
+- Separate area/date click dispatch from confirmed navigation: provisional selections no longer create a purchase attempt or confirmed area until the cached browser route reaches a protected ticket, verify, order, checkout, or payment page.
+- Add monotonic, finite watchdogs for reload, DOM-scan, and click-pending states; make click/reload single-flight transitions idempotent; and bound scheduler/reload diagnostic history to 256 recent entries.
+- Resume a timed-out click through the configured reload scheduler without 50 ms re-click loops, while keeping ticket/order/checkout/payment and Queue-it routes protected from leak-watch reloads.
+- Require interactive, canonical `/ticket/area/` landing before arming soft-block recovery scanning; run one recovery scan without an immediate second reload, then resume the normal interval.
+- Fall back to the cached browser target URL after both timeout and general JavaScript URL-read failures without logging URL queries or exception payloads.
+- Rate-limit repetitive hot-loop diagnostics and add offline liveness, navigation-confirmation, URL-fallback, recovery, and 100,000-iteration soak regression coverage.
+- Bound the action ledger to 256 recent entries, rotate per-instance runtime logs, strip query/fragment credentials from URL diagnostics, and suppress successful high-frequency DOM-operation logs while preserving timeout/error records.
+- Fix TixCraft Discord notification lifecycle tracking so every purchase attempt can emit one order-pending notification and one checkout-reached notification in both `onsale` and `leak_watch` modes, while suppressing duplicate notifications within the same attempt.
+- Read checkout seat assignments before sending the checkout notification, preserve the configured ticket count, and format up to ten seat rows with the matching `1️⃣` through `🔟` prefixes.
+- Normalize TixCraft event and selected-area metadata so notifications use the event title without the `@ 多個表演場地` suffix and avoid placeholder event or area values.
+- Route Discord delivery through a bounded, non-blocking dispatcher with observable delivery outcomes and controlled retry behavior, keeping webhook latency off the purchase-flow critical path.
+- Recover stable TixCraft white-screen and soft-block states in both `onsale` and `leak_watch` modes by honoring the configured delay, returning to the real `/ticket/area/` page, and preventing an immediate second reload before area selection resumes.
+- Add regression coverage for repeated purchase attempts, checkout seat extraction and formatting, metadata fallbacks, Discord delivery behavior, and soft-block recovery timing/navigation.
+- Make the Windows release build fail closed when version resolution or either PyInstaller build fails, and include the project license in the packaged archive.
 
 ## v0.2.1
 

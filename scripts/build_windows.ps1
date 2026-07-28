@@ -29,10 +29,52 @@ function Compress-WithRetry {
     }
 }
 
+function Copy-DirectoryFailClosed {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $SourceRoot,
+        [Parameter(Mandatory = $true)]
+        [string] $DestinationRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
+        throw "Expected PyInstaller runtime directory is missing: '$SourceRoot'."
+    }
+    if (Test-Path -LiteralPath $DestinationRoot) {
+        throw "Refusing to overwrite packaged PyInstaller runtime directory: '$DestinationRoot'."
+    }
+
+    Copy-Item -LiteralPath $SourceRoot -Destination $DestinationRoot -Recurse
+    if (-not (Test-Path -LiteralPath $DestinationRoot -PathType Container)) {
+        throw "Failed to package PyInstaller runtime directory: '$DestinationRoot'."
+    }
+}
+
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
 
-$ArtifactName = (& python scripts/release_utils.py artifact-name --version $Version).Trim()
+$DeclaredVersionOutput = & python scripts/release_utils.py validate-project-version `
+    --version $Version `
+    --metadata src/hunter_metadata.py
+if ($LASTEXITCODE -ne 0) {
+    throw "Release version validation failed (python exit code $LASTEXITCODE)."
+}
+$DeclaredVersion = ($DeclaredVersionOutput | Out-String).Trim()
+if ([string]::IsNullOrWhiteSpace($DeclaredVersion)) {
+    throw "Release version validation returned an empty project version."
+}
+if ($Version -cne $DeclaredVersion) {
+    throw "Release version mismatch: requested '$Version', project declares '$DeclaredVersion'."
+}
+
+$ArtifactNameOutput = & python scripts/release_utils.py artifact-name --version $Version
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to resolve the release artifact name (python exit code $LASTEXITCODE)."
+}
+$ArtifactName = ($ArtifactNameOutput | Out-String).Trim()
+if ([string]::IsNullOrWhiteSpace($ArtifactName)) {
+    throw "Release artifact-name resolution returned an empty value."
+}
 $PackageDir = Join-Path $ProjectRoot "dist\hunterX"
 $ReleaseDir = Join-Path $ProjectRoot "dist\release"
 $ArtifactPath = Join-Path $ReleaseDir $ArtifactName
@@ -41,7 +83,13 @@ Write-Host "Building HunterX $Version"
 Write-Host "Artifact: $ArtifactPath"
 
 python -m PyInstaller build_scripts/nodriver_tixcraft.spec --clean --noconfirm
+if ($LASTEXITCODE -ne 0) {
+    throw "nodriver_tixcraft PyInstaller build failed (exit code $LASTEXITCODE)."
+}
 python -m PyInstaller build_scripts/settings.spec --clean --noconfirm
+if ($LASTEXITCODE -ne 0) {
+    throw "settings PyInstaller build failed (exit code $LASTEXITCODE)."
+}
 
 if (Test-Path -LiteralPath $PackageDir) {
     Remove-Item -LiteralPath $PackageDir -Recurse -Force
@@ -52,16 +100,12 @@ New-Item -ItemType Directory -Path $ReleaseDir -Force | Out-Null
 Copy-Item -LiteralPath "dist\nodriver_tixcraft\nodriver_tixcraft.exe" -Destination $PackageDir -Force
 Copy-Item -LiteralPath "dist\settings\settings.exe" -Destination $PackageDir -Force
 
-if (Test-Path -LiteralPath "dist\nodriver_tixcraft\_internal") {
-    Copy-Item -LiteralPath "dist\nodriver_tixcraft\_internal" -Destination (Join-Path $PackageDir "_internal") -Recurse -Force
-}
-
-if (Test-Path -LiteralPath "dist\settings\_internal") {
-    $InternalDir = Join-Path $PackageDir "_internal"
-    New-Item -ItemType Directory -Path $InternalDir -Force | Out-Null
-    Get-ChildItem -LiteralPath "dist\settings\_internal" -Force |
-        Copy-Item -Destination $InternalDir -Recurse -Force
-}
+Copy-DirectoryFailClosed `
+    -SourceRoot "dist\nodriver_tixcraft\_nodriver_internal" `
+    -DestinationRoot (Join-Path $PackageDir "_nodriver_internal")
+Copy-DirectoryFailClosed `
+    -SourceRoot "dist\settings\_settings_internal" `
+    -DestinationRoot (Join-Path $PackageDir "_settings_internal")
 
 Copy-Item -LiteralPath "src\assets" -Destination (Join-Path $PackageDir "assets") -Recurse -Force
 Copy-Item -LiteralPath "src\www" -Destination (Join-Path $PackageDir "www") -Recurse -Force
@@ -78,6 +122,9 @@ if (Test-Path -LiteralPath "CHANGELOG.md") {
 if (Test-Path -LiteralPath "LEGAL_NOTICE.md") {
     Copy-Item -LiteralPath "LEGAL_NOTICE.md" -Destination $PackageDir -Force
 }
+if (Test-Path -LiteralPath "LICENSE") {
+    Copy-Item -LiteralPath "LICENSE" -Destination $PackageDir -Force
+}
 if (Test-Path -LiteralPath "guide") {
     Copy-Item -LiteralPath "guide" -Destination (Join-Path $PackageDir "guide") -Recurse -Force
 }
@@ -87,5 +134,12 @@ if (Test-Path -LiteralPath $ArtifactPath) {
 }
 
 Compress-WithRetry -SourcePath (Join-Path $PackageDir "*") -DestinationPath $ArtifactPath
+
+python scripts/verify_release_archive.py windows `
+    --archive $ArtifactPath `
+    --version $Version
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows release archive verification failed (python exit code $LASTEXITCODE)."
+}
 
 Get-ChildItem -LiteralPath $ArtifactPath | Select-Object FullName, Length
