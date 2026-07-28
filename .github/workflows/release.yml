@@ -7,9 +7,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Strict SemVer release version, for example 0.1.0"
+        description: "Strict SemVer release version without a leading v"
         required: true
-        default: "0.1.0"
 
 permissions:
   contents: read
@@ -21,6 +20,7 @@ jobs:
     outputs:
       version: ${{ steps.release.outputs.version }}
       artifact_name: ${{ steps.release.outputs.artifact_name }}
+      source_artifact_name: ${{ steps.release.outputs.source_artifact_name }}
       notes: ${{ steps.release.outputs.notes }}
 
     steps:
@@ -35,15 +35,26 @@ jobs:
       - name: Resolve release version
         id: release
         shell: bash
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_INPUT_VERSION: ${{ inputs.version }}
         run: |
           VERSION="$(python scripts/release_utils.py resolve-version \
-            --event-name "${{ github.event_name }}" \
-            --ref-name "${{ github.ref_name }}" \
-            --input-version "${{ inputs.version }}")"
+            --event-name "$RELEASE_EVENT_NAME" \
+            --ref-name "$RELEASE_REF_NAME" \
+            --input-version "$RELEASE_INPUT_VERSION")"
+          python scripts/release_utils.py validate-project-version \
+            --version "$VERSION" \
+            --metadata src/hunter_metadata.py
           ARTIFACT_NAME="$(python scripts/release_utils.py artifact-name --version "$VERSION")"
+          SOURCE_ARTIFACT_NAME="$(python scripts/release_utils.py artifact-name \
+            --version "$VERSION" \
+            --platform source)"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "source_artifact_name=$SOURCE_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
           {
             echo "notes<<EOF"
             python scripts/release_utils.py notes --version "$VERSION" --changelog CHANGELOG.md
@@ -116,6 +127,45 @@ jobs:
           path: dist/release/${{ needs.validate.outputs.artifact_name }}
           if-no-files-found: error
 
+  build-source:
+    name: Build prefixed source artifact
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.9"
+
+      - name: Build source package
+        shell: bash
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          SOURCE_PREFIX="$(python scripts/release_utils.py source-prefix --version "$VERSION")"
+          SOURCE_PATH="dist/release/${{ needs.validate.outputs.source_artifact_name }}"
+          mkdir -p dist/release
+          git archive \
+            --format=zip \
+            --prefix="$SOURCE_PREFIX" \
+            --output="$SOURCE_PATH" \
+            "$GITHUB_SHA"
+          python scripts/verify_release_archive.py source \
+            --archive "$SOURCE_PATH" \
+            --version "$VERSION" \
+            --repo-root . \
+            --commit "$GITHUB_SHA"
+
+      - name: Upload source package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.source_artifact_name }}
+          path: dist/release/${{ needs.validate.outputs.source_artifact_name }}
+          if-no-files-found: error
+
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
@@ -123,6 +173,7 @@ jobs:
       - validate
       - test
       - build-windows
+      - build-source
     permissions:
       contents: write
 
@@ -133,6 +184,12 @@ jobs:
           name: ${{ needs.validate.outputs.artifact_name }}
           path: dist/release
 
+      - name: Download source package
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.source_artifact_name }}
+          path: dist/release
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -140,7 +197,9 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: HunterX v${{ needs.validate.outputs.version }}
           body: ${{ needs.validate.outputs.notes }}
-          files: dist/release/${{ needs.validate.outputs.artifact_name }}
+          files: |
+            dist/release/${{ needs.validate.outputs.artifact_name }}
+            dist/release/${{ needs.validate.outputs.source_artifact_name }}
           draft: false
           prerelease: false
         env:
