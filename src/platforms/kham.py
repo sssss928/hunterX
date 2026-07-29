@@ -48,6 +48,7 @@ __all__ = [
     "nodriver_kham_product",
     "nodriver_kham_date_auto_select",
     "nodriver_kham_keyin_captcha_code",
+    "nodriver_kham_fill_user_dictionary_fields",
     "nodriver_kham_area_auto_select",
     "nodriver_kham_auto_ocr",
     "nodriver_kham_captcha",
@@ -80,6 +81,8 @@ def _kham_state_defaults():
         "shown_checkout_message": False,
         "udn_quick_buy_submitted": False,
         "kham_date_reload_next_at": 0,
+        "kham_auto_submit_clicked": False,
+        "kham_last_auto_submit_at": 0,
     }
 
 
@@ -123,6 +126,357 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
         _state[log_key] = now
         debug.log(f"{log_prefix} Waiting {next_at - now:.1f}s until next reload; purchase loop remains active")
     return False
+
+
+def _kham_resolve_user_dictionary_answers(config_dict, question_texts):
+    answer_list = []
+    try:
+        answer_list = util.get_answer_list_from_user_guess_string(config_dict, CONST_MAXBOT_ANSWER_ONLINE_FILE)
+    except Exception:
+        answer_list = []
+
+    if len(answer_list) == 0:
+        try:
+            if config_dict.get("advanced", {}).get("auto_guess_options", False):
+                combined_question = " ".join(question_texts).strip()
+                answer_list = util.get_answer_list_from_question_string(None, combined_question, config_dict)
+        except Exception:
+            answer_list = []
+
+    resolved_answers = []
+    for idx, question_text in enumerate(question_texts):
+        answer = ""
+        if idx < len(answer_list):
+            answer = util.extract_answer_by_question_pattern([answer_list[idx]], question_text) or answer_list[idx]
+        if len(answer) == 0:
+            answer = util.extract_answer_by_question_pattern(answer_list, question_text) or ""
+        if len(answer) == 0 and idx < len(answer_list):
+            answer = answer_list[idx]
+        if len(answer) == 0 and len(answer_list) > 0:
+            answer = answer_list[0]
+        resolved_answers.append(str(answer).strip())
+
+    return resolved_answers
+
+
+async def nodriver_kham_fill_user_dictionary_fields(tab, config_dict):
+    """Fill KHAM/Ticket.com custom member-code style fields from user_guess_string."""
+    debug = util.create_debug_logger(config_dict)
+
+    try:
+        candidates_raw = await tab.evaluate('''
+            (function() {
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' &&
+                        rect.width > 0 && rect.height > 0;
+                }
+
+                function cleanText(text) {
+                    return (text || '').replace(/\\s+/g, ' ').trim();
+                }
+
+                function contextFor(input) {
+                    const parts = [];
+                    ['placeholder', 'aria-label', 'name', 'id', 'title'].forEach(attr => {
+                        const value = input.getAttribute(attr);
+                        if (value) parts.push(value);
+                    });
+
+                    if (input.id) {
+                        document.querySelectorAll('label').forEach(label => {
+                            if (label.htmlFor === input.id) parts.push(label.textContent || '');
+                        });
+                    }
+
+                    const container = input.closest(
+                        'tr, li, dd, .form-group, .control-group, .row, .field, .input-group, .exclusive-code, div'
+                    );
+                    if (container) parts.push(container.innerText || container.textContent || '');
+
+                    return cleanText(parts.join(' ')).slice(0, 240);
+                }
+
+                function shouldCollect(input, context) {
+                    const type = (input.getAttribute('type') || 'text').toLowerCase();
+                    if (['hidden', 'password', 'checkbox', 'radio', 'file', 'submit', 'button', 'image'].includes(type)) {
+                        return false;
+                    }
+                    if (input.disabled || input.readOnly || !isVisible(input)) return false;
+
+                    const currentValue = cleanText(input.value);
+                    const placeholder = cleanText(input.getAttribute('placeholder'));
+                    if (currentValue && currentValue !== placeholder) return false;
+
+                    const idName = cleanText(`${input.id || ''} ${input.name || ''}`).toLowerCase();
+                    if (/captcha|^chk$|_chk$/.test(idName)) return false;
+                    if (/圖片|圖形|符號/.test(context)) return false;
+
+                    const wanted = /會員|會員號|會員編號|卡號|身分證|身份證|證號|序號|代碼|驗證|驗證碼|優惠|折扣|邀請|末\\d*碼|後\\d*碼|最後\\d*碼|前\\d*碼|member|card|serial|code|invite/i;
+                    if (!wanted.test(context)) return false;
+
+                    const blocked = /密碼|登入|帳號|email|e-mail|信箱|電話|手機|地址|姓名|password|login|account|mail|phone|mobile/i;
+                    const allowedBlocked = /會員|卡號|身分|身份|末\\d*碼|後\\d*碼|最後\\d*碼|前\\d*碼|member|card/i;
+                    return !blocked.test(context) || allowedBlocked.test(context);
+                }
+
+                const fields = [];
+                document.querySelectorAll('input, textarea').forEach((input, index) => {
+                    const context = contextFor(input);
+                    if (!shouldCollect(input, context)) return;
+                    fields.push({
+                        index: index,
+                        context: context,
+                        name: input.getAttribute('name') || '',
+                        id: input.id || ''
+                    });
+                });
+                return fields.slice(0, 8);
+            })();
+        ''')
+        candidates = util.parse_nodriver_result(candidates_raw)
+        if not isinstance(candidates, list) or len(candidates) == 0:
+            return 0
+
+        question_texts = []
+        for item in candidates:
+            if isinstance(item, dict):
+                context = str(item.get("context", "")).strip()
+                if len(context) > 0:
+                    question_texts.append(context)
+
+        if len(question_texts) == 0:
+            return 0
+
+        write_question_to_file(" ".join(question_texts))
+        answers = _kham_resolve_user_dictionary_answers(config_dict, question_texts)
+        answers = [answer for answer in answers if len(answer) > 0]
+        if len(answers) == 0:
+            debug.log("[KHAM VERIFY] Custom dictionary fields found, but no configured answer is available")
+            return 0
+
+        answers_json = json.dumps(answers, ensure_ascii=False)
+        fill_script = r'''
+            (function(answers) {
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' &&
+                        rect.width > 0 && rect.height > 0;
+                }
+
+                function cleanText(text) {
+                    return (text || '').replace(/\s+/g, ' ').trim();
+                }
+
+                function contextFor(input) {
+                    const parts = [];
+                    ['placeholder', 'aria-label', 'name', 'id', 'title'].forEach(attr => {
+                        const value = input.getAttribute(attr);
+                        if (value) parts.push(value);
+                    });
+                    if (input.id) {
+                        document.querySelectorAll('label').forEach(label => {
+                            if (label.htmlFor === input.id) parts.push(label.textContent || '');
+                        });
+                    }
+                    const container = input.closest(
+                        'tr, li, dd, .form-group, .control-group, .row, .field, .input-group, .exclusive-code, div'
+                    );
+                    if (container) parts.push(container.innerText || container.textContent || '');
+                    return cleanText(parts.join(' ')).slice(0, 240);
+                }
+
+                function shouldCollect(input, context) {
+                    const type = (input.getAttribute('type') || 'text').toLowerCase();
+                    if (['hidden', 'password', 'checkbox', 'radio', 'file', 'submit', 'button', 'image'].includes(type)) {
+                        return false;
+                    }
+                    if (input.disabled || input.readOnly || !isVisible(input)) return false;
+                    const currentValue = cleanText(input.value);
+                    const placeholder = cleanText(input.getAttribute('placeholder'));
+                    if (currentValue && currentValue !== placeholder) return false;
+                    const idName = cleanText(`${input.id || ''} ${input.name || ''}`).toLowerCase();
+                    if (/captcha|^chk$|_chk$/.test(idName)) return false;
+                    if (/圖片|圖形|符號/.test(context)) return false;
+                    const wanted = /會員|會員號|會員編號|卡號|身分證|身份證|證號|序號|代碼|驗證|驗證碼|優惠|折扣|邀請|末\d*碼|後\d*碼|最後\d*碼|前\d*碼|member|card|serial|code|invite/i;
+                    if (!wanted.test(context)) return false;
+                    const blocked = /密碼|登入|帳號|email|e-mail|信箱|電話|手機|地址|姓名|password|login|account|mail|phone|mobile/i;
+                    const allowedBlocked = /會員|卡號|身分|身份|末\d*碼|後\d*碼|最後\d*碼|前\d*碼|member|card/i;
+                    return !blocked.test(context) || allowedBlocked.test(context);
+                }
+
+                function setValue(input, value) {
+                    input.focus();
+                    const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                    setter.call(input, value);
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+                    input.dispatchEvent(new Event('blur', { bubbles: true }));
+                }
+
+                const fields = [];
+                document.querySelectorAll('input, textarea').forEach(input => {
+                    const context = contextFor(input);
+                    if (shouldCollect(input, context)) fields.push(input);
+                });
+
+                let filledCount = 0;
+                for (let i = 0; i < fields.length && i < answers.length; i++) {
+                    const answer = cleanText(String(answers[i] || ''));
+                    if (!answer) continue;
+                    setValue(fields[i], answer);
+                    filledCount++;
+                }
+                return { filledCount: filledCount, fieldCount: fields.length };
+            })(__ANSWERS__);
+        '''.replace("__ANSWERS__", answers_json)
+        fill_raw = await tab.evaluate(fill_script)
+        fill_result = util.parse_nodriver_result(fill_raw)
+        filled_count = fill_result.get("filledCount", 0) if isinstance(fill_result, dict) else 0
+        if filled_count > 0:
+            debug.log(f"[KHAM VERIFY] Filled {filled_count} custom dictionary field(s)")
+        return filled_count
+    except Exception as exc:
+        debug.log(f"[KHAM VERIFY] Custom dictionary autofill failed: {exc}")
+        return 0
+
+
+async def _kham_can_auto_submit_current_page(tab, config_dict):
+    if config_dict.get("advanced", {}).get("disable_adjacent_seat", False):
+        return False
+
+    target_ticket_number = str(config_dict.get("ticket_number", "1")).strip()
+    target_ticket_number_json = json.dumps(target_ticket_number)
+    try:
+        state_raw = await tab.evaluate(r'''
+            (function(targetTicketNumber) {
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' &&
+                        rect.width > 0 && rect.height > 0;
+                }
+
+                function isEnabled(el) {
+                    return el && !el.disabled && isVisible(el) &&
+                        !String(el.className || '').includes('disabled');
+                }
+
+                const submitSelectors = [
+                    'input[id$="AddShopingCart"]',
+                    'input[id*="AddShopingCart"]',
+                    'a[onclick*="chkCart"]',
+                    'button[onclick*="addShoppingCart"]',
+                    '#addcart button.red',
+                    '#addcart button',
+                    'input[type="submit"]',
+                    'button[type="submit"]'
+                ];
+
+                let hasSubmit = false;
+                for (const selector of submitSelectors) {
+                    const button = Array.from(document.querySelectorAll(selector)).find(isEnabled);
+                    if (button) {
+                        hasSubmit = true;
+                        break;
+                    }
+                }
+
+                const amountFields = Array.from(document.querySelectorAll(
+                    '#AMOUNT, input[name*="AMOUNT"], input[id*="AMOUNT"], select[id*="AMOUNT"], div.qty-select input[type="text"]'
+                )).filter(isVisible);
+                const hasReadyAmount = amountFields.some(input => String(input.value || '').trim() === targetTicketNumber);
+
+                return { hasSubmit: hasSubmit, hasReadyAmount: hasReadyAmount };
+            })(__TARGET__);
+        '''.replace("__TARGET__", target_ticket_number_json))
+        page_state = util.parse_nodriver_result(state_raw)
+        if isinstance(page_state, dict):
+            return bool(page_state.get("hasSubmit") and page_state.get("hasReadyAmount"))
+    except Exception:
+        return False
+
+    return False
+
+
+async def _kham_click_submit_button(tab, config_dict=None):
+    debug = util.create_debug_logger(config_dict) if config_dict is not None else None
+
+    try:
+        clicked_raw = await tab.evaluate('''
+            (function() {
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' &&
+                        rect.width > 0 && rect.height > 0;
+                }
+
+                function isEnabled(el) {
+                    return el && !el.disabled && isVisible(el) &&
+                        !String(el.className || '').includes('disabled') &&
+                        el.getAttribute('aria-disabled') !== 'true';
+                }
+
+                function clickElement(el, source) {
+                    try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+                    el.click();
+                    return {
+                        clicked: true,
+                        source: source,
+                        text: (el.value || el.textContent || el.getAttribute('title') || '').trim().slice(0, 40)
+                    };
+                }
+
+                const selectors = [
+                    'input[id$="AddShopingCart"]',
+                    'input[id*="AddShopingCart"]',
+                    'a[onclick*="chkCart"]',
+                    'button[onclick*="addShoppingCart"]',
+                    '#addcart button.red',
+                    '#addcart button',
+                    'input[type="submit"]',
+                    'button[type="submit"]',
+                    'a.btn.btn-primary.btn-block',
+                    'a.btn.btn-primary',
+                    'button.ui-button'
+                ];
+
+                for (const selector of selectors) {
+                    const button = Array.from(document.querySelectorAll(selector)).find(isEnabled);
+                    if (button) return clickElement(button, selector);
+                }
+
+                const submitTexts = ['加入購物車', '加入购物车', '送出', '確認', '確定', '下一步', '快速訂購'];
+                const elements = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a'));
+                for (const el of elements) {
+                    if (!isEnabled(el)) continue;
+                    const text = (el.value || el.textContent || el.getAttribute('title') || '').trim();
+                    if (submitTexts.some(keyword => text.includes(keyword))) {
+                        return clickElement(el, 'text:' + text.slice(0, 20));
+                    }
+                }
+
+                return { clicked: false, source: '', text: '' };
+            })();
+        ''')
+        clicked_result = util.parse_nodriver_result(clicked_raw)
+        clicked = bool(isinstance(clicked_result, dict) and clicked_result.get("clicked"))
+        if clicked and debug is not None:
+            debug.log(f"[SUBMIT] Submit button clicked via {clicked_result.get('source', '')}")
+        return clicked
+    except Exception as exc:
+        if debug is not None:
+            debug.log(f"[SUBMIT] Robust submit button click failed: {exc}")
+        return False
 
 
 # ====================================================================================
@@ -476,6 +830,50 @@ async def _handle_post_submit_dialog(tab, config_dict):
     debug.log("[SUBMIT] No dialog appeared within 5 seconds")
     return "none"
 
+
+async def _kham_submit_cart_and_handle_dialog(tab, config_dict, debug=None):
+    if debug is None:
+        debug = util.create_debug_logger(config_dict)
+
+    clicked = await _kham_click_submit_button(tab, config_dict)
+    if not clicked:
+        debug.log("[SUBMIT] Add shopping cart button not found")
+        return False
+
+    dialog_result = await _handle_post_submit_dialog(tab, config_dict)
+
+    if dialog_result == "success":
+        debug.log("[SUBMIT] Waiting for page transition after success...")
+        await tab.sleep(1.0)
+
+        current_url = tab.target.url
+        url_changed = False
+        for _ in range(60):  # 60 * 0.5s = 30s
+            await tab.sleep(0.5)
+            new_url = tab.target.url
+            if new_url != current_url:
+                debug.log(f"[SUBMIT] Page transitioned to {new_url}")
+                url_changed = True
+                break
+
+        if not url_changed:
+            debug.log("[SUBMIT] CRITICAL: Success dialog but URL never changed after 30s")
+            await tab.sleep(5.0)
+    elif dialog_result == "error":
+        debug.log("[SUBMIT] Will retry with new captcha")
+        await tab.sleep(2.0)
+    else:
+        current_url = tab.target.url
+        for _ in range(10):  # 10 * 0.5s = 5s
+            await tab.sleep(0.5)
+            new_url = tab.target.url
+            if new_url != current_url:
+                debug.log(f"[SUBMIT] Page transitioned to {new_url}")
+                break
+
+    return True
+
+
 async def nodriver_kham_check_captcha_text_error(tab, config_dict):
     """
     Check captcha error message dialog
@@ -791,16 +1189,21 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
     Reference: chrome_tixcraft.py kham_keyin_captcha_code (line 9359-9424)
     """
     is_verifyCode_editing = False
+    _state["kham_auto_submit_clicked"] = False
 
     # Find captcha input with multiple selectors
     form_verifyCode = None
     selectors = [
         'input#CHK',
+        'input[name="CHK"]',
+        'input[id$="CHK"]',
+        'input[name$="CHK"]',
         '#ctl00_ContentPlaceHolder1_CHK',
         'input[value="驗證碼"]',
         'input[placeholder="驗證碼"]',
         'input[placeholder="請輸入圖片上符號"]',
-        'input[type="text"][maxlength="4"]'
+        'input[type="text"][maxlength="4"]',
+        'input[autocomplete="off"][maxlength="4"]',
     ]
 
     for selector in selectors:
@@ -816,17 +1219,13 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
         if len(answer) > 0:
             # Check current input value
             try:
-                inputed_value = await tab.evaluate(f'''
-                    (function() {{
-                        const input = document.querySelector('{selectors[0]}') ||
-                                    document.querySelector('{selectors[1]}') ||
-                                    document.querySelector('{selectors[2]}') ||
-                                    document.querySelector('{selectors[3]}') ||
-                                    document.querySelector('{selectors[4]}') ||
-                                    document.querySelector('{selectors[5]}');
+                selectors_json = json.dumps(selectors, ensure_ascii=False)
+                inputed_value = await tab.evaluate(r'''
+                    (function(selectors) {
+                        const input = selectors.map(selector => document.querySelector(selector)).find(Boolean);
                         return input ? input.value : null;
-                    }})();
-                ''')
+                    })(__SELECTORS__);
+                '''.replace("__SELECTORS__", selectors_json))
 
                 if inputed_value is None:
                     inputed_value = ""
@@ -848,16 +1247,49 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
         else:
             # Clear input
             try:
-                await form_verifyCode.apply('function(el) { el.value = ""; }')
+                await form_verifyCode.apply('''
+                    function(el) {
+                        el.value = "";
+                        el.dispatchEvent(new Event("input", { bubbles: true }));
+                        el.dispatchEvent(new Event("change", { bubbles: true }));
+                    }
+                ''')
             except Exception:
                 pass
 
     if is_start_to_input_answer:
         fill_started_ns = performance.perf_counter_ns()
+        answer_json = json.dumps(answer, ensure_ascii=False)
         try:
             await form_verifyCode.click()
             await form_verifyCode.apply('function(el) { el.value = ""; }')
             await form_verifyCode.send_keys(answer)
+            await tab.evaluate(r'''
+                (function(answer) {
+                    const selectors = [
+                        'input#CHK',
+                        'input[name="CHK"]',
+                        'input[id$="CHK"]',
+                        'input[name$="CHK"]',
+                        '#ctl00_ContentPlaceHolder1_CHK',
+                        'input[value="驗證碼"]',
+                        'input[placeholder="驗證碼"]',
+                        'input[placeholder="請輸入圖片上符號"]',
+                        'input[type="text"][maxlength="4"]',
+                        'input[autocomplete="off"][maxlength="4"]'
+                    ];
+                    const input = selectors.map(selector => document.querySelector(selector)).find(Boolean);
+                    if (!input) return false;
+                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                    setter.call(input, answer);
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+                    input.dispatchEvent(new Event('blur', { bubbles: true }));
+                    return input.value === answer;
+                })(__ANSWER__);
+            '''.replace("__ANSWER__", answer_json))
+            is_verifyCode_editing = True
         except Exception as exc:
             print("Send keys OCR answer fail:", answer, exc)
         finally:
@@ -867,33 +1299,14 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
     if auto_submit:
         submit_started_ns = performance.perf_counter_ns()
         try:
-            # Find and click submit button using NoDriver CDP
-            # Year Ticket (ticket.com.tw): AddShopingCart button
             print("[AUTO SUBMIT] Searching for submit button...")
-            submit_button = await tab.query_selector('input[id$="AddShopingCart"]')
-
-            if submit_button:
-                print("[AUTO SUBMIT] Submit button found, checking if enabled...")
-                # Check if button is enabled
-                is_enabled = await submit_button.apply('function(el) { return !el.disabled; }')
-
-                if is_enabled:
-                    print("[AUTO SUBMIT] Button enabled, scrolling into view...")
-                    # Scroll button into view first (important for CDP click)
-                    try:
-                        await submit_button.scroll_into_view()
-                        await tab.sleep(0.3)
-                    except Exception:
-                        pass
-
-                    print("[AUTO SUBMIT] Clicking submit button using CDP native click...")
-                    # Use NoDriver CDP native click
-                    await submit_button.click()
-                    print("[AUTO SUBMIT] Submit button clicked successfully!")
-                else:
-                    print("[AUTO SUBMIT] Submit button is disabled")
+            is_clicked = await _kham_click_submit_button(tab)
+            if is_clicked:
+                _state["kham_auto_submit_clicked"] = True
+                _state["kham_last_auto_submit_at"] = time.time()
+                print("[AUTO SUBMIT] Submit button clicked successfully!")
             else:
-                print("[AUTO SUBMIT] Submit button not found (selector: input[id$=\"AddShopingCart\"])")
+                print("[AUTO SUBMIT] Submit button not found")
         except Exception as exc:
             print(f"[AUTO SUBMIT] Error: {exc}")
             import traceback
@@ -1342,9 +1755,10 @@ async def nodriver_kham_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
         if len(ocr_answer) == 4:
             # Valid 4-character answer
             previous_answer = ocr_answer  # Update previous_answer to mark as sent
-            who_care_var = await nodriver_kham_keyin_captcha_code(
+            await nodriver_kham_keyin_captcha_code(
                 tab, answer=ocr_answer, auto_submit=away_from_keyboard_enable, perf_trace=perf_trace
             )
+            is_form_submitted = bool(_state.get("kham_auto_submit_clicked", False))
         else:
             # Invalid length - retry
             if not away_from_keyboard_enable:
@@ -1388,12 +1802,13 @@ async def nodriver_kham_captcha(tab, config_dict, ocr, model_name):
     if await check_and_handle_pause(config_dict):
         return False
 
+    _state["kham_auto_submit_clicked"] = False
     away_from_keyboard_enable = config_dict["ocr_captcha"]["force_submit"]
     if not config_dict["ocr_captcha"]["enable"]:
         away_from_keyboard_enable = False
 
-    # PS: need 'auto assign seat' feature to enable away_from_keyboard
-    away_from_keyboard_enable = False
+    if away_from_keyboard_enable:
+        away_from_keyboard_enable = await _kham_can_auto_submit_current_page(tab, config_dict)
 
     is_captcha_sent = False
     previous_answer = None
@@ -1420,6 +1835,9 @@ async def nodriver_kham_captcha(tab, config_dict, ocr, model_name):
         current_url = tab.target.url
         if current_url != last_url:
             break
+
+    if _state.get("kham_auto_submit_clicked", False):
+        return False
 
     return is_captcha_sent
 
@@ -2460,74 +2878,9 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
 
                 # Submit if captcha sent
                 if is_captcha_sent:
+                    await nodriver_kham_fill_user_dictionary_fields(tab, config_dict)
                     try:
-                        if "ticket.com.tw" in url:
-                            # ticket.com.tw uses <input type="submit"> with id ending in AddShopingCart
-                            debug.log("[SUBMIT] Searching for ticket.com.tw submit button...")
-                            el_btn = await tab.query_selector('input[id$="AddShopingCart"]')
-                            if not el_btn:
-                                # Fallback to <a> tag (for other possible layouts)
-                                el_btn = await tab.query_selector('a[onclick="return chkCart();"]')
-                        elif "orders.ibon.com.tw" in url:
-                            # ibon uses <a> tag with id containing AddShopingCart
-                            debug.log("[SUBMIT] Searching for ibon submit button...")
-                            el_btn = await tab.query_selector('a[id*="AddShopingCart"]')
-                            if not el_btn:
-                                # Fallback to generic button
-                                el_btn = await tab.query_selector('a.btn.btn-primary.btn-block')
-                        else:
-                            # Kham
-                            debug.log("[SUBMIT] Searching for Kham submit button...")
-                            el_btn = await tab.query_selector('button[onclick="addShoppingCart();return false;"]')
-
-                        if el_btn:
-                            debug.log("[SUBMIT] Submit button found, scrolling into view...")
-                            # Scroll button into view first (important for CDP click)
-                            try:
-                                await el_btn.scroll_into_view()
-                                await tab.sleep(0.3)
-                            except Exception:
-                                pass
-
-                            debug.log("[SUBMIT] Clicking using CDP native click...")
-                            # Use NoDriver CDP native click
-                            await el_btn.click()
-                            debug.log("[SUBMIT] Add shopping cart button clicked successfully!")
-
-                            dialog_result = await _handle_post_submit_dialog(tab, config_dict)
-
-                            if dialog_result == "success":
-                                debug.log("[SUBMIT] Waiting for page transition after success...")
-                                await tab.sleep(1.0)
-
-                                current_url = tab.target.url
-                                url_changed = False
-                                for i in range(60):  # 60 * 0.5s = 30s
-                                    await tab.sleep(0.5)
-                                    new_url = tab.target.url
-                                    if new_url != current_url:
-                                        debug.log(f"[SUBMIT] Page transitioned to {new_url}")
-                                        url_changed = True
-                                        break
-
-                                if not url_changed:
-                                    debug.log("[SUBMIT] CRITICAL: Success dialog but URL never changed after 30s")
-                                    await tab.sleep(5.0)
-
-                            elif dialog_result == "error":
-                                debug.log("[SUBMIT] Will retry with new captcha")
-                                await tab.sleep(2.0)
-
-                            else:
-                                current_url = tab.target.url
-                                for i in range(10):  # 10 * 0.5s = 5s
-                                    await tab.sleep(0.5)
-                                    new_url = tab.target.url
-                                    if new_url != current_url:
-                                        debug.log(f"[SUBMIT] Page transitioned to {new_url}")
-                                        break
-                        else:
-                            debug.log("[SUBMIT] Add shopping cart button not found")
+                        await _kham_submit_cart_and_handle_dialog(tab, config_dict, debug)
                     except Exception as exc:
                         debug.log(f"[SUBMIT] Click chkCart/addShoppingCart button fail: {exc}")
 
@@ -2609,21 +2962,13 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                 except Exception as exc:
                     debug.log(f"Set ticket number error: {exc}")
 
+                await nodriver_kham_fill_user_dictionary_fields(tab, config_dict)
+
                 # Click add to cart
                 try:
-                    btn_selector = 'button[onclick="addShoppingCart();return false;"]'
-                    el_btn = await tab.query_selector(btn_selector)
-                    if el_btn:
-                        await el_btn.click()
-                        debug.log("Clicked add to cart button")
-                    else:
-                        # Try alternative selector
-                        el_btn = await tab.query_selector('#addcart button.red')
-                        if el_btn:
-                            await el_btn.click()
-                            debug.log("Clicked add to cart button (alt)")
-                except Exception:
-                    pass
+                    await _kham_submit_cart_and_handle_dialog(tab, config_dict, debug)
+                except Exception as exc:
+                    debug.log(f"[SUBMIT] Click add to cart button fail: {exc}")
 
         # UTK0202/UTK0205 page - Ticket number selection page
         # URL: UTK0202_.aspx?PERFORMANCE_ID=xxx&PERFORMANCE_PRICE_AREA_ID=xxx
@@ -2871,74 +3216,9 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     debug.log("[LOGIN REQUIRED] Skip submit - waiting for login (auto-login or manual)")
                 else:
                     # Normal submit flow
+                    await nodriver_kham_fill_user_dictionary_fields(tab, config_dict)
                     try:
-                        if "ticket.com.tw" in url:
-                            # ticket.com.tw uses <input type="submit"> with id ending in AddShopingCart
-                            debug.log("[SUBMIT] Searching for ticket.com.tw submit button...")
-                            el_btn = await tab.query_selector('input[id$="AddShopingCart"]')
-                            if not el_btn:
-                                # Fallback to <a> tag
-                                el_btn = await tab.query_selector('a[onclick="return chkCart();"]')
-                        elif "orders.ibon.com.tw" in url:
-                            # ibon uses <a> tag with id containing AddShopingCart
-                            debug.log("[SUBMIT] Searching for ibon submit button...")
-                            el_btn = await tab.query_selector('a[id*="AddShopingCart"]')
-                            if not el_btn:
-                                # Fallback to generic button
-                                el_btn = await tab.query_selector('a.btn.btn-primary.btn-block')
-                        else:
-                            # Kham
-                            debug.log("[SUBMIT] Searching for Kham submit button...")
-                            el_btn = await tab.query_selector('button[onclick="addShoppingCart();return false;"]')
-
-                        if el_btn:
-                            debug.log("[SUBMIT] Submit button found, scrolling into view...")
-                            # Scroll button into view first (important for CDP click)
-                            try:
-                                await el_btn.scroll_into_view()
-                                await tab.sleep(0.3)
-                            except Exception:
-                                pass
-
-                            debug.log("[SUBMIT] Clicking using CDP native click...")
-                            # Use NoDriver CDP native click
-                            await el_btn.click()
-                            debug.log("[SUBMIT] Add shopping cart button clicked successfully!")
-
-                            dialog_result = await _handle_post_submit_dialog(tab, config_dict)
-
-                            if dialog_result == "success":
-                                debug.log("[SUBMIT] Waiting for page transition after success...")
-                                await tab.sleep(1.0)
-
-                                current_url = tab.target.url
-                                url_changed = False
-                                for i in range(60):  # 60 * 0.5s = 30s
-                                    await tab.sleep(0.5)
-                                    new_url = tab.target.url
-                                    if new_url != current_url:
-                                        debug.log(f"[SUBMIT] Page transitioned to {new_url}")
-                                        url_changed = True
-                                        break
-
-                                if not url_changed:
-                                    debug.log("[SUBMIT] CRITICAL: Success dialog but URL never changed after 30s")
-                                    await tab.sleep(5.0)
-
-                            elif dialog_result == "error":
-                                debug.log("[SUBMIT] Will retry with new captcha")
-                                await tab.sleep(2.0)
-
-                            else:
-                                current_url = tab.target.url
-                                for i in range(10):  # 10 * 0.5s = 5s
-                                    await tab.sleep(0.5)
-                                    new_url = tab.target.url
-                                    if new_url != current_url:
-                                        debug.log(f"[SUBMIT] Page transitioned to {new_url}")
-                                        break
-                        else:
-                            debug.log("[SUBMIT] Add shopping cart button not found")
+                        await _kham_submit_cart_and_handle_dialog(tab, config_dict, debug)
                     except Exception as exc:
                         if debug.enabled:
                             debug.log(f"[SUBMIT] Click chkCart/addShoppingCart button fail: {exc}")

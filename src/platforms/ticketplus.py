@@ -15,12 +15,14 @@ import util
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
 from nodriver_common import (
+    CONST_MAXBOT_ANSWER_ONLINE_FILE,
     check_and_handle_pause,
     evaluate_with_pause_check,
     play_sound_while_ordering,
     send_discord_notification,
     send_telegram_notification,
     sleep_with_pause_check,
+    write_question_to_file,
 )
 
 
@@ -42,6 +44,7 @@ __all__ = [
     "nodriver_ticketplus_wait_for_vue_ready",
     "nodriver_ticketplus_check_next_button",
     "nodriver_ticketplus_order_exclusive_code",
+    "nodriver_ticketplus_fill_user_dictionary_fields",
     "nodriver_ticketplus_main",
 ]
 
@@ -80,6 +83,218 @@ def _ticketplus_path_segment_count(url):
     parsed = urllib.parse.urlsplit(url)
     segments = [part for part in parsed.path.split('/') if part]
     return 3 + len(segments)
+
+
+def _ticketplus_resolve_user_dictionary_answers(config_dict, question_texts):
+    answer_list = []
+    try:
+        answer_list = util.get_answer_list_from_user_guess_string(config_dict, CONST_MAXBOT_ANSWER_ONLINE_FILE)
+    except Exception:
+        answer_list = []
+
+    if len(answer_list) == 0:
+        try:
+            if config_dict.get("advanced", {}).get("auto_guess_options", False):
+                combined_question = " ".join(question_texts).strip()
+                answer_list = util.get_answer_list_from_question_string(None, combined_question, config_dict)
+        except Exception:
+            answer_list = []
+
+    resolved_answers = []
+    for idx, question_text in enumerate(question_texts):
+        answer = ""
+        if idx < len(answer_list):
+            answer = util.extract_answer_by_question_pattern([answer_list[idx]], question_text) or answer_list[idx]
+        if len(answer) == 0:
+            answer = util.extract_answer_by_question_pattern(answer_list, question_text) or ""
+        if len(answer) == 0 and idx < len(answer_list):
+            answer = answer_list[idx]
+        if len(answer) == 0 and len(answer_list) > 0:
+            answer = answer_list[0]
+        resolved_answers.append(str(answer).strip())
+
+    return resolved_answers
+
+
+async def nodriver_ticketplus_fill_user_dictionary_fields(tab, config_dict):
+    """Fill TicketPlus member-code style fields from the existing custom dictionary."""
+    debug = util.create_debug_logger(config_dict)
+
+    try:
+        candidates_raw = await tab.evaluate('''
+            (function() {
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' &&
+                        rect.width > 0 && rect.height > 0;
+                }
+
+                function cleanText(text) {
+                    return (text || '').replace(/\\s+/g, ' ').trim();
+                }
+
+                function contextFor(input) {
+                    const parts = [];
+                    ['placeholder', 'aria-label', 'name', 'id', 'title'].forEach(attr => {
+                        const value = input.getAttribute(attr);
+                        if (value) parts.push(value);
+                    });
+
+                    if (input.id) {
+                        document.querySelectorAll('label').forEach(label => {
+                            if (label.htmlFor === input.id) parts.push(label.textContent || '');
+                        });
+                    }
+
+                    const container = input.closest(
+                        '.exclusive-code, .v-input, .v-text-field, .v-list-item, .row, .col, .form-group, li, tr, div'
+                    );
+                    if (container) parts.push(container.innerText || container.textContent || '');
+
+                    return cleanText(parts.join(' ')).slice(0, 260);
+                }
+
+                function shouldCollect(input, context) {
+                    const type = (input.getAttribute('type') || 'text').toLowerCase();
+                    if (['hidden', 'password', 'checkbox', 'radio', 'file', 'submit', 'button', 'image'].includes(type)) {
+                        return false;
+                    }
+                    if (input.disabled || input.readOnly || !isVisible(input)) return false;
+
+                    const currentValue = cleanText(input.value);
+                    const placeholder = cleanText(input.getAttribute('placeholder'));
+                    if (currentValue && currentValue !== placeholder) return false;
+
+                    const wanted = /會員|會員號|會員編號|卡號|身分證|身份證|證號|序號|代碼|優惠|折扣|邀請|認證|驗證|驗證碼|末\\d*碼|後\\d*碼|最後\\d*碼|前\\d*碼|member|card|serial|code|invite|verify/i;
+                    if (!wanted.test(context)) return false;
+
+                    const blocked = /密碼|登入|帳號|email|e-mail|信箱|電話|手機|地址|姓名|password|login|account|mail|phone|mobile/i;
+                    const allowedBlocked = /會員|卡號|身分|身份|末\\d*碼|後\\d*碼|最後\\d*碼|前\\d*碼|member|card|verify/i;
+                    return !blocked.test(context) || allowedBlocked.test(context);
+                }
+
+                const fields = [];
+                document.querySelectorAll('input, textarea').forEach((input, index) => {
+                    const context = contextFor(input);
+                    if (!shouldCollect(input, context)) return;
+                    fields.push({
+                        index: index,
+                        context: context,
+                        name: input.getAttribute('name') || '',
+                        id: input.id || ''
+                    });
+                });
+                return fields.slice(0, 8);
+            })();
+        ''')
+        candidates = util.parse_nodriver_result(candidates_raw)
+        if not isinstance(candidates, list) or len(candidates) == 0:
+            return 0
+
+        question_texts = []
+        for item in candidates:
+            if isinstance(item, dict):
+                context = str(item.get("context", "")).strip()
+                if len(context) > 0:
+                    question_texts.append(context)
+
+        if len(question_texts) == 0:
+            return 0
+
+        write_question_to_file(" ".join(question_texts))
+        answers = _ticketplus_resolve_user_dictionary_answers(config_dict, question_texts)
+        answers = [answer for answer in answers if len(answer) > 0]
+        if len(answers) == 0:
+            debug.log("[TICKETPLUS VERIFY] Custom dictionary fields found, but no configured answer is available")
+            return 0
+
+        answers_json = json.dumps(answers, ensure_ascii=False)
+        fill_script = r'''
+            (function(answers) {
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' && style.visibility !== 'hidden' &&
+                        rect.width > 0 && rect.height > 0;
+                }
+
+                function cleanText(text) {
+                    return (text || '').replace(/\s+/g, ' ').trim();
+                }
+
+                function contextFor(input) {
+                    const parts = [];
+                    ['placeholder', 'aria-label', 'name', 'id', 'title'].forEach(attr => {
+                        const value = input.getAttribute(attr);
+                        if (value) parts.push(value);
+                    });
+                    if (input.id) {
+                        document.querySelectorAll('label').forEach(label => {
+                            if (label.htmlFor === input.id) parts.push(label.textContent || '');
+                        });
+                    }
+                    const container = input.closest(
+                        '.exclusive-code, .v-input, .v-text-field, .v-list-item, .row, .col, .form-group, li, tr, div'
+                    );
+                    if (container) parts.push(container.innerText || container.textContent || '');
+                    return cleanText(parts.join(' ')).slice(0, 260);
+                }
+
+                function shouldCollect(input, context) {
+                    const type = (input.getAttribute('type') || 'text').toLowerCase();
+                    if (['hidden', 'password', 'checkbox', 'radio', 'file', 'submit', 'button', 'image'].includes(type)) {
+                        return false;
+                    }
+                    if (input.disabled || input.readOnly || !isVisible(input)) return false;
+                    const currentValue = cleanText(input.value);
+                    const placeholder = cleanText(input.getAttribute('placeholder'));
+                    if (currentValue && currentValue !== placeholder) return false;
+                    const wanted = /會員|會員號|會員編號|卡號|身分證|身份證|證號|序號|代碼|優惠|折扣|邀請|認證|驗證|驗證碼|末\d*碼|後\d*碼|最後\d*碼|前\d*碼|member|card|serial|code|invite|verify/i;
+                    if (!wanted.test(context)) return false;
+                    const blocked = /密碼|登入|帳號|email|e-mail|信箱|電話|手機|地址|姓名|password|login|account|mail|phone|mobile/i;
+                    const allowedBlocked = /會員|卡號|身分|身份|末\d*碼|後\d*碼|最後\d*碼|前\d*碼|member|card|verify/i;
+                    return !blocked.test(context) || allowedBlocked.test(context);
+                }
+
+                function setValue(input, value) {
+                    input.focus();
+                    const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                    setter.call(input, value);
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+                    input.dispatchEvent(new Event('blur', { bubbles: true }));
+                }
+
+                const fields = [];
+                document.querySelectorAll('input, textarea').forEach(input => {
+                    const context = contextFor(input);
+                    if (shouldCollect(input, context)) fields.push(input);
+                });
+
+                let filledCount = 0;
+                for (let i = 0; i < fields.length && i < answers.length; i++) {
+                    const answer = cleanText(String(answers[i] || ''));
+                    if (!answer) continue;
+                    setValue(fields[i], answer);
+                    filledCount++;
+                }
+                return { filledCount: filledCount, fieldCount: fields.length };
+            })(__ANSWERS__);
+        '''.replace("__ANSWERS__", answers_json)
+        fill_raw = await tab.evaluate(fill_script)
+        fill_result = util.parse_nodriver_result(fill_raw)
+        filled_count = fill_result.get("filledCount", 0) if isinstance(fill_result, dict) else 0
+        if filled_count > 0:
+            debug.log(f"[TICKETPLUS VERIFY] Filled {filled_count} custom dictionary field(s)")
+        return filled_count
+    except Exception as exc:
+        debug.log(f"[TICKETPLUS VERIFY] Custom dictionary autofill failed: {exc}")
+        return 0
 
 
 async def nodriver_ticketplus_detect_layout_style(tab, config_dict=None):
@@ -1109,27 +1324,57 @@ async def nodriver_ticketplus_click_next_button_unified(tab, config_dict):
                     });
                 }
 
-                const buttonSelectors = [
-                    'button.nextBtn:not(.disabledBtn):not(.v-btn--disabled)',
-                    '.order-footer button.nextBtn:not(.disabledBtn)',
-                    '.order-footer .v-btn--has-bg:not(.v-btn--disabled):not(.disabledBtn)',
-                    'button:contains("下一步"):not(.disabledBtn)',
-                    'button:contains("Next"):not(.disabledBtn)',
-                    '.nextBtn:not([disabled])'
-                ];
-
-                let nextButton = null;
-                for (let selector of buttonSelectors) {
-                    nextButton = document.querySelector(selector);
-                    if (nextButton && !nextButton.disabled && !nextButton.classList.contains('v-btn--disabled') && !nextButton.classList.contains('disabledBtn')) {
-                        console.log('[SUCCESS] Found enabled next button:', selector);
-                        break;
-                    }
+                function isUsableButton(button) {
+                    if (!button) return false;
+                    const style = window.getComputedStyle(button);
+                    const rect = button.getBoundingClientRect();
+                    return !button.disabled &&
+                        button.getAttribute('aria-disabled') !== 'true' &&
+                        !button.classList.contains('v-btn--disabled') &&
+                        !button.classList.contains('disabledBtn') &&
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        rect.width > 0 &&
+                        rect.height > 0;
                 }
+
+                function findNextButton() {
+                    const buttonSelectors = [
+                        'button.nextBtn:not(.disabledBtn):not(.v-btn--disabled)',
+                        '.order-footer button.nextBtn:not(.disabledBtn)',
+                        '.order-footer .v-btn--has-bg:not(.v-btn--disabled):not(.disabledBtn)',
+                        '.nextBtn:not([disabled])',
+                        'button[type="submit"]',
+                        '.order-footer button'
+                    ];
+
+                    for (let selector of buttonSelectors) {
+                        const button = Array.from(document.querySelectorAll(selector)).find(isUsableButton);
+                        if (button) {
+                            console.log('[SUCCESS] Found enabled next button:', selector);
+                            return button;
+                        }
+                    }
+
+                    const nextTexts = ['下一步', 'Next', '繼續', '確認', '送出'];
+                    const buttons = Array.from(document.querySelectorAll('button, a.v-btn, .v-btn'));
+                    for (let button of buttons) {
+                        if (!isUsableButton(button)) continue;
+                        const text = (button.textContent || button.value || '').trim();
+                        if (nextTexts.some(keyword => text.includes(keyword))) {
+                            console.log('[SUCCESS] Found enabled next button by text:', text);
+                            return button;
+                        }
+                    }
+
+                    return null;
+                }
+
+                let nextButton = findNextButton();
 
                 if (!nextButton) {
                     console.log('[WAITING] Waiting for next button to enable...');
-                    return waitForButtonEnable('button.nextBtn, .nextBtn').then(button => {
+                    return waitForButtonEnable('button.nextBtn, .nextBtn, .order-footer button').then(button => {
                         if (button) {
                             console.log('[SUCCESS] Next button enabled');
                             button.click();
@@ -1235,6 +1480,43 @@ async def nodriver_ticketplus_accept_realname_card(tab):
         if button:
             await button.click()
             is_button_clicked = True
+        else:
+            clicked_raw = await tab.evaluate('''
+                (function() {
+                    function isVisible(el) {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' &&
+                            rect.width > 0 && rect.height > 0;
+                    }
+                    function isEnabled(el) {
+                        return el && !el.disabled && isVisible(el) &&
+                            el.getAttribute('aria-disabled') !== 'true' &&
+                            !String(el.className || '').includes('disabled');
+                    }
+                    const dialogKeywords = ['實名', '实名', '會員', '證件', '提醒', '注意'];
+                    const buttonTexts = ['同意', '確認', '確定', '我知道了', '知道了', 'OK'];
+                    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .v-dialog, .v-dialog__content'));
+                    for (const dialog of dialogs) {
+                        if (!isVisible(dialog)) continue;
+                        const dialogText = (dialog.textContent || '').trim();
+                        if (!dialogKeywords.some(keyword => dialogText.includes(keyword))) continue;
+                        const buttons = Array.from(dialog.querySelectorAll('button, a.v-btn, .v-btn'));
+                        const button = buttons.find(btn => {
+                            if (!isEnabled(btn)) return false;
+                            const text = (btn.textContent || btn.value || '').trim();
+                            return buttonTexts.some(keyword => text.includes(keyword));
+                        }) || buttons.find(isEnabled);
+                        if (button) {
+                            button.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                })();
+            ''')
+            is_button_clicked = bool(util.parse_nodriver_result(clicked_raw))
     except Exception as exc:
         pass
     return is_button_clicked
@@ -1248,6 +1530,43 @@ async def nodriver_ticketplus_accept_other_activity(tab):
         if button:
             await button.click()
             is_button_clicked = True
+        else:
+            clicked_raw = await tab.evaluate('''
+                (function() {
+                    function isVisible(el) {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' &&
+                            rect.width > 0 && rect.height > 0;
+                    }
+                    function isEnabled(el) {
+                        return el && !el.disabled && isVisible(el) &&
+                            el.getAttribute('aria-disabled') !== 'true' &&
+                            !String(el.className || '').includes('disabled');
+                    }
+                    const dialogKeywords = ['其他活動', '不同活動', '提醒', '注意', '確認'];
+                    const buttonTexts = ['同意', '確認', '確定', '我知道了', '知道了', 'OK'];
+                    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], .v-dialog, .v-dialog__content'));
+                    for (const dialog of dialogs) {
+                        if (!isVisible(dialog)) continue;
+                        const dialogText = (dialog.textContent || '').trim();
+                        if (!dialogKeywords.some(keyword => dialogText.includes(keyword))) continue;
+                        const buttons = Array.from(dialog.querySelectorAll('button, a.v-btn, .v-btn'));
+                        const button = buttons.find(btn => {
+                            if (!isEnabled(btn)) return false;
+                            const text = (btn.textContent || btn.value || '').trim();
+                            return buttonTexts.some(keyword => text.includes(keyword));
+                        }) || buttons.find(isEnabled);
+                        if (button) {
+                            button.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                })();
+            ''')
+            is_button_clicked = bool(util.parse_nodriver_result(clicked_raw))
     except Exception as exc:
         pass
     return is_button_clicked
@@ -1392,6 +1711,7 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
 
 async def nodriver_ticketplus_confirm(tab, config_dict):
     """Confirmation page handler."""
+    await nodriver_ticketplus_fill_user_dictionary_fields(tab, config_dict)
     is_checkbox_checked = await nodriver_ticketplus_ticket_agree(tab, config_dict)
 
     is_confirm_clicked = False
@@ -1411,6 +1731,36 @@ async def nodriver_ticketplus_confirm(tab, config_dict):
                 if is_enabled:
                     await confirm_button.click()
                     is_confirm_clicked = True
+            else:
+                clicked_raw = await tab.evaluate('''
+                    (function() {
+                        function isVisible(el) {
+                            if (!el) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return style.display !== 'none' && style.visibility !== 'hidden' &&
+                                rect.width > 0 && rect.height > 0;
+                        }
+                        function isEnabled(el) {
+                            return el && !el.disabled && isVisible(el) &&
+                                el.getAttribute('aria-disabled') !== 'true' &&
+                                !String(el.className || '').includes('disabled');
+                        }
+                        const texts = ['確認', '確定', '送出', '下一步', 'Checkout'];
+                        const buttons = Array.from(document.querySelectorAll('button, a.v-btn, .v-btn'));
+                        for (const button of buttons) {
+                            if (!isEnabled(button)) continue;
+                            const text = (button.textContent || button.value || '').trim();
+                            if (texts.some(keyword => text.includes(keyword))) {
+                                button.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    })();
+                ''')
+                clicked_result = util.parse_nodriver_result(clicked_raw)
+                is_confirm_clicked = bool(clicked_result)
         except Exception as exc:
             pass
 
@@ -1497,6 +1847,7 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
 
         debug.log("Ticket selection successful, processing discount code and submit")
 
+        await nodriver_ticketplus_fill_user_dictionary_fields(tab, config_dict)
         is_answer_sent, _state["fail_list"], is_question_popup = await nodriver_ticketplus_order_exclusive_code(tab, config_dict, _state["fail_list"])
 
         if await sleep_with_pause_check(tab, 0.3, config_dict):
