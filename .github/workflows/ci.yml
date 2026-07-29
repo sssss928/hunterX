@@ -68,6 +68,7 @@ jobs:
           python scripts/render_benchmark_chart.py --input benchmark.json --output benchmark-summary.md
 
       - name: Upload coverage
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -75,8 +76,10 @@ jobs:
             coverage.xml
             htmlcov/
           if-no-files-found: error
+          retention-days: 3
 
       - name: Upload benchmark report
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-report
@@ -84,6 +87,7 @@ jobs:
             benchmark.json
             benchmark-summary.md
           if-no-files-found: error
+          retention-days: 3
 
   windows-build-smoke:
     name: Windows PyInstaller smoke
@@ -129,8 +133,10 @@ jobs:
         run: ./scripts/build_windows.ps1 -Version "${{ steps.project.outputs.version }}"
 
       - name: Upload build smoke artifact
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.project.outputs.artifact_name }}
           path: dist/release/${{ steps.project.outputs.artifact_name }}
           if-no-files-found: error
+          retention-days: 3
