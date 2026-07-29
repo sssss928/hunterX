@@ -14,19 +14,28 @@ def test_release_workflow_has_required_triggers_permissions_and_artifact() -> No
     assert "workflow_dispatch:" in workflow
     assert "contents: read" in workflow
     assert "contents: write" in workflow
-    assert "HunterX v${{ needs.validate.outputs.version }}" in workflow
+    assert '"HunterX v$Version"' in workflow
     assert "artifact-name" in workflow
+    assert "checksum-name" in workflow
     assert "validate-project-version" in workflow
     assert "--platform source" in workflow
-    assert 'SOURCE_PREFIX="$(python scripts/release_utils.py source-prefix' in workflow
-    assert '--prefix="$SOURCE_PREFIX"' in workflow
-    assert "build-source" in workflow
-    assert "verify_release_archive.py source" in workflow
+    assert "publish-release" in workflow
+    assert "fetch-depth: 0" in workflow
+    assert "scripts/build_source_archive.py" in workflow
+    assert "scripts/write_release_checksums.py" in workflow
     assert "needs.validate.outputs.source_artifact_name" in workflow
-    assert "Download source package" in workflow
+    assert "needs.validate.outputs.checksum_name" in workflow
+    assert "gh release create" in workflow
+    assert "gh release upload" in workflow
+    assert "--clobber" in workflow
+    assert "actions/upload-artifact" not in workflow
+    assert "actions/download-artifact" not in workflow
     assert "RELEASE_INPUT_VERSION: ${{ inputs.version }}" in workflow
     assert '--input-version "${{ inputs.version }}"' not in workflow
     assert "0.1.0" not in workflow
+
+    source_builder = (REPO_ROOT / "scripts/build_source_archive.py").read_text(encoding="utf-8")
+    assert "verify_source_archive" in source_builder
 
 
 def test_ci_workflow_covers_required_branch_families() -> None:
@@ -40,6 +49,8 @@ def test_ci_workflow_covers_required_branch_families() -> None:
     assert "project-version --metadata src/hunter_metadata.py" in workflow
     assert 'steps.project.outputs.version' in workflow
     assert 'steps.project.outputs.artifact_name' in workflow
+    assert workflow.count("continue-on-error: true") == 3
+    assert workflow.count("retention-days: 3") == 3
     assert "0.1.0" not in workflow
 
 

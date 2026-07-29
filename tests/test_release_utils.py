@@ -33,6 +33,12 @@ def test_artifact_name_is_safe() -> None:
     assert "-" not in release_utils.artifact_name("0.1.0")
 
 
+def test_checksum_name_is_versioned_and_safe() -> None:
+    assert release_utils.checksum_name("0.1.0") == "SHA256SUMS_v0.1.0.txt"
+    with pytest.raises(ValueError):
+        release_utils.checksum_name("v0.1.0")
+
+
 def test_source_archive_prefix_has_one_versioned_root() -> None:
     assert release_utils.source_archive_prefix("0.4.4") == "hunterX-0.4.4/"
 
