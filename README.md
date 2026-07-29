@@ -89,6 +89,7 @@ For `v0.4.5`, the expected release artifacts are:
 ```text
 hunterX_windows_0.4.5.zip
 hunterX_source_0.4.5.zip
+SHA256SUMS_v0.4.5.txt
 ```
 
 Extract the Windows ZIP on a Windows computer and run `settings.exe` to configure the application.
