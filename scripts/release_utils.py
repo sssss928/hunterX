@@ -50,6 +50,11 @@ def artifact_name(version: str, platform: str = "windows") -> str:
     return f"hunterX_{platform_slug}_{normalized}.zip"
 
 
+def checksum_name(version: str) -> str:
+    """Return the checksum manifest name for a release."""
+    return f"SHA256SUMS_v{validate_semver(version)}.txt"
+
+
 def source_archive_prefix(version: str) -> str:
     """Return the single top-level directory used inside source archives."""
     return f"hunterX-{validate_semver(version)}/"
@@ -148,6 +153,9 @@ def _build_parser() -> argparse.ArgumentParser:
     artifact_parser.add_argument("--version", required=True)
     artifact_parser.add_argument("--platform", default="windows")
 
+    checksum_parser = subparsers.add_parser("checksum-name")
+    checksum_parser.add_argument("--version", required=True)
+
     prefix_parser = subparsers.add_parser("source-prefix")
     prefix_parser.add_argument("--version", required=True)
 
@@ -176,6 +184,8 @@ def main(argv: list[str] | None = None) -> int:
             print(resolve_version(args.event_name, args.ref_name, args.input_version))
         elif args.command == "artifact-name":
             print(artifact_name(args.version, args.platform))
+        elif args.command == "checksum-name":
+            print(checksum_name(args.version))
         elif args.command == "source-prefix":
             print(source_archive_prefix(args.version))
         elif args.command == "project-version":
