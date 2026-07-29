@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.5
+
+- Backfill platform runtime state defaults on every main-loop dispatch so hot reloads, helper registration, or partial state restores cannot leave later direct state reads uninitialized.
+- Harden TixCraft and KKTIX elapsed-time handling on checkout/order pages to avoid `KeyError` crashes that trigger browser cleanup.
+- Add the missing TixCraft reload, cookie, and language state defaults used by timed refresh and page parsing paths.
+- Escape KHAM/UDN login values before injecting them into browser JavaScript so quotes and backslashes in credentials do not break the script.
+- Add regression coverage for partial platform state backfilling and the TixCraft checkout elapsed-time crash.
+
 ## v0.4.4
 
 - Freeze event-scoped canonical TixCraft metadata into each purchase-attempt snapshot so later order and checkout pages cannot replace a correct activity title with a route slug, generic heading, or venue suffix.

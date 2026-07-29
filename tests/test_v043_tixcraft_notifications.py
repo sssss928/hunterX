@@ -1506,6 +1506,79 @@ async def test_main_dispatch_emits_order_and_checkout_for_three_attempts(
 
 
 @pytest.mark.asyncio
+async def test_main_dispatch_backfills_partial_state_before_checkout_elapsed_time(
+    monkeypatch,
+) -> None:
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    async def false_check(*_args, **_kwargs) -> bool:
+        return False
+
+    async def cached_event_name(*_args, **_kwargs):
+        return EVENT_NAME
+
+    async def classify_passthrough(_tab, _url, initial):
+        return initial
+
+    monkeypatch.setattr(tixcraft, "check_and_handle_pause", false_check)
+    monkeypatch.setattr(tixcraft, "nodriver_tixcraft_home_close_window", no_op)
+    monkeypatch.setattr(
+        tixcraft,
+        "nodriver_ticketmaster_check_ip_block",
+        false_check,
+    )
+    monkeypatch.setattr(tixcraft, "_classify_recovery_page", classify_passthrough)
+    monkeypatch.setattr(
+        tixcraft,
+        "_remember_tixcraft_event_name",
+        cached_event_name,
+    )
+    monkeypatch.setattr(
+        tixcraft.runtime_health,
+        "runtime_log",
+        lambda *_args, **_kwargs: None,
+    )
+
+    checkout_url = "https://tixcraft.com/ticket/checkout"
+    tab = _NotificationTab()
+    tab.target = SimpleNamespace(url=checkout_url)
+    tixcraft._state.clear()
+    tixcraft._state.update(
+        {
+            "alert_handler_registered": True,
+            "start_time": 100.0,
+            "done_time": 101.25,
+        }
+    )
+    config = {
+        "homepage": "https://tixcraft.com/activity/detail/26_plave",
+        "ticket_number": 1,
+        "area_auto_select": {"enable": False},
+        "date_auto_select": {"enable": False},
+        "advanced": {
+            "run_mode": "onsale",
+            "auto_reload_page_interval": 3.0,
+            "leak_refresh_interval_seconds": 3.0,
+            "discord_webhook_url": "",
+            "headless": False,
+            "play_sound": {"ticket": False, "order": False},
+        },
+    }
+
+    assert not await tixcraft.nodriver_tixcraft_main(
+        tab,
+        checkout_url,
+        config,
+        None,
+        None,
+    )
+    assert tixcraft._state["elapsed_time"] == pytest.approx(1.25)
+    assert tixcraft._state["is_popup_checkout"] is True
+    assert tixcraft._state["fail_list"] == []
+
+
+@pytest.mark.asyncio
 async def test_confirmed_submit_that_jumps_to_checkout_backfills_order_first(
     monkeypatch,
 ) -> None:
