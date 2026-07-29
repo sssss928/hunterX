@@ -1,32 +1,24 @@
-name: CodeQL
+name: Dependency Review
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
-  schedule:
-    - cron: "24 3 * * 1"
 
 permissions:
   contents: read
-  security-events: write
+  pull-requests: read
 
 jobs:
-  analyze:
-    name: Analyze Python
+  dependency-review:
+    name: Dependency review
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v4
         with:
-          languages: python
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+          fail-on-severity: moderate
