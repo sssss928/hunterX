@@ -57,6 +57,38 @@ __all__ = [
 _state = {}
 
 
+def _kktix_state_defaults():
+    return {
+        "fail_list": [],
+        "start_time": None,
+        "done_time": None,
+        "elapsed_time": None,
+        "is_popup_checkout": False,
+        "played_sound_ticket": False,
+        "played_sound_order": False,
+        "got_ticket_detected": False,
+        "success_actions_done": False,
+        "reg_execution_count": 0,
+        "alert_handler_registered": False,
+        "alert_needs_reload": False,
+        "guest_modal_checked": False,
+        "guest_modal_last_check_time": 0,
+        "guest_modal_status_logged": False,
+        "last_ticket_already_selected_log_value": None,
+        "printed_completed": False,
+        "last_homepage_redirect_time": 0,
+        "kktix_ticket_reload_next_at": 0,
+        "last_auto_next_on_selected_time": 0,
+        "last_signin_redirect_time": 0,
+        "queue_log_time": 0,
+    }
+
+
+def _ensure_kktix_state_defaults():
+    for key, value in _kktix_state_defaults().items():
+        _state.setdefault(key, value)
+
+
 def _get_auto_reload_interval(config_dict):
     return get_auto_reload_interval(config_dict)
 
@@ -1994,27 +2026,7 @@ def check_kktix_got_ticket(url, config_dict):
 async def nodriver_kktix_main(tab, url, config_dict):
     debug = util.create_debug_logger(config_dict)
 
-    if not _state:
-        _state.update({
-            "fail_list": [],
-            "start_time": None,
-            "done_time": None,
-            "elapsed_time": None,
-            "is_popup_checkout": False,
-            "played_sound_ticket": False,
-            "played_sound_order": False,
-            "got_ticket_detected": False,
-            "success_actions_done": False,
-            "reg_execution_count": 0,
-            "alert_handler_registered": False,
-            "alert_needs_reload": False,
-            "guest_modal_checked": False,
-            "guest_modal_last_check_time": 0,
-            "guest_modal_status_logged": False,
-            "last_ticket_already_selected_log_value": None,
-            "printed_completed": False,
-            "last_homepage_redirect_time": 0,
-        })
+    _ensure_kktix_state_defaults()
 
     # Global alert handler - auto-dismiss KKTIX sold-out alerts
     async def handle_kktix_alert(event):
@@ -2304,10 +2316,12 @@ async def nodriver_kktix_main(tab, url, config_dict):
 
         # 只在第一次偵測成功時執行動作
         if not _state["success_actions_done"]:
-            if not _state["start_time"] is None:
-                if not _state["done_time"] is None:
-                    bot_elapsed_time = _state["done_time"] - _state["start_time"]
-                    if _state["elapsed_time"] != bot_elapsed_time:
+            start_time = _state.get("start_time")
+            done_time = _state.get("done_time")
+            if start_time is not None:
+                if done_time is not None:
+                    bot_elapsed_time = done_time - start_time
+                    if _state.get("elapsed_time") != bot_elapsed_time:
                         debug.log("[KKTIX] Ticket purchase completed, elapsed time: {:.3f} seconds".format(bot_elapsed_time))
                     _state["elapsed_time"] = bot_elapsed_time
 

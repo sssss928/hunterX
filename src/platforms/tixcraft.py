@@ -1152,6 +1152,95 @@ _TIXCRAFT_RETRYABLE_ALERT_KEYWORDS = (
 )
 
 
+def _tixcraft_state_defaults():
+    return {
+        "fail_list": [],
+        "fail_promo_list": [],
+        "start_time": None,
+        "done_time": None,
+        "elapsed_time": None,
+        "is_popup_checkout": False,
+        "area_retry_count": 0,
+        "played_sound_ticket": False,
+        "played_sound_order": False,
+        "notified_order_pending": False,
+        "notified_checkout_reached": False,
+        "alert_handler_registered": False,
+        "captcha_alert_detected": False,
+        "captcha_submit_until": 0,
+        "ocr_completed_url": "",
+        "last_valid_area_url": "",
+        "recent_area_route_url": "",
+        "last_selected_area": "",
+        "selected_area_candidate": "",
+        "selected_area_metadata": {},
+        "pending_area_navigation": None,
+        "pending_date_navigation": None,
+        "area_navigation_token": 0,
+        "date_navigation_token": 0,
+        "area_navigation_retry_due": False,
+        "date_navigation_retry_due": False,
+        "current_event_id": "",
+        "current_game_id": "",
+        "current_event_origin": "",
+        "event_name": "",
+        "event_name_quality": 0,
+        "event_snapshot": None,
+        "event_metadata_cache": {},
+        "event_metadata_next_probe_at": 0.0,
+        "last_ticket_count": "",
+        "last_ticket_count_confirmed": False,
+        "notification_flow_generation": 0,
+        "notification_flow_url": "",
+        "last_notification_metadata_warning": None,
+        "notification_session_id": uuid.uuid4().hex,
+        "attempt_sequence": 0,
+        "purchase_attempt": None,
+        "attempt_last_page_class": "",
+        "notification_submit_started_at": 0.0,
+        "notification_order_probe_next_at": 0.0,
+        "notification_retry_at": {},
+        "soft_block_blank_since": 0.0,
+        "soft_block_blank_url": "",
+        "soft_block_probe_failure_since": 0.0,
+        "soft_block_probe_failure_url": "",
+        "soft_block_probe_failure_count": 0,
+        "soft_block_known_good_url": "",
+        "soft_block_known_good_at": 0.0,
+        "soft_block_recovery_in_progress": False,
+        "soft_block_recovery_landing_url": "",
+        "soft_block_recovery_landed_at": 0.0,
+        "soft_block_recovery_scan_pending": False,
+        "soft_block_recovery_scan_deadline": 0.0,
+        "manual_intervention_required": False,
+        "last_homepage_redirect_time": 0,
+        "sold_out_cooldown_until": 0,
+        "printed_completed": False,
+        "ticketmaster_phase": "area_select",
+        "ticketmaster_captcha_processed_url": "",
+        "ticketmaster_area_reload_next_at": 0,
+        "ticketmaster_date_reload_next_at": 0,
+        "tixcraft_area_reload_next_at": 0,
+        "tixcraft_area_reload_url": "",
+        "tixcraft_date_reload_next_at": 0,
+        "tixcraft_ticket_reload_next_at": 0,
+        "cookie_accepted": False,
+        "html_lang": "en-US",
+        "ip_block_until": 0,
+        "ip_block_count": 0,
+        "soft_block_phase": "",
+        "soft_block_backoff_until": 0.0,
+        "soft_block_recovery_retry_at": 0.0,
+        "queue_it_enter_time": None,
+    }
+
+
+def _ensure_tixcraft_state_defaults():
+    for key, value in _tixcraft_state_defaults().items():
+        _state.setdefault(key, value)
+    _ensure_runtime_helpers()
+
+
 def _ensure_runtime_helpers():
     if "action_ledger" not in _state:
         _state["action_ledger"] = ActionLedger()
@@ -6807,79 +6896,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         if is_retryable_alert and dismiss_success:
             await _recover_to_last_valid_area(tab, config_dict, "retryable_alert")
 
-    if not _state:
-        _state.update({
-            "fail_list": [],
-            "fail_promo_list": [],
-            "start_time": None,
-            "done_time": None,
-            "elapsed_time": None,
-            "is_popup_checkout": False,
-            "area_retry_count": 0,
-            "played_sound_ticket": False,
-            "played_sound_order": False,
-            "notified_order_pending": False,
-            "notified_checkout_reached": False,
-            "alert_handler_registered": False,
-            "captcha_alert_detected": False,
-            "captcha_submit_until": 0,
-            "ocr_completed_url": "",
-            "last_valid_area_url": "",
-            "recent_area_route_url": "",
-            "last_selected_area": "",
-            "selected_area_candidate": "",
-            "selected_area_metadata": {},
-            "pending_area_navigation": None,
-            "pending_date_navigation": None,
-            "area_navigation_token": 0,
-            "date_navigation_token": 0,
-            "area_navigation_retry_due": False,
-            "date_navigation_retry_due": False,
-            "current_event_id": "",
-            "current_game_id": "",
-            "current_event_origin": "",
-            "event_name": "",
-            "event_name_quality": 0,
-            "event_snapshot": None,
-            "event_metadata_cache": {},
-            "event_metadata_next_probe_at": 0.0,
-            "last_ticket_count": "",
-            "last_ticket_count_confirmed": False,
-            "notification_flow_generation": 0,
-            "notification_flow_url": "",
-            "last_notification_metadata_warning": None,
-            "notification_session_id": uuid.uuid4().hex,
-            "attempt_sequence": 0,
-            "purchase_attempt": None,
-            "attempt_last_page_class": "",
-            "notification_submit_started_at": 0.0,
-            "notification_order_probe_next_at": 0.0,
-            "notification_retry_at": {},
-            "soft_block_blank_since": 0.0,
-            "soft_block_blank_url": "",
-            "soft_block_probe_failure_since": 0.0,
-            "soft_block_probe_failure_url": "",
-            "soft_block_probe_failure_count": 0,
-            "soft_block_known_good_url": "",
-            "soft_block_known_good_at": 0.0,
-            "soft_block_recovery_in_progress": False,
-            "soft_block_recovery_landing_url": "",
-            "soft_block_recovery_landed_at": 0.0,
-            "soft_block_recovery_scan_pending": False,
-            "soft_block_recovery_scan_deadline": 0.0,
-            "manual_intervention_required": False,
-            "last_homepage_redirect_time": 0,
-            "sold_out_cooldown_until": 0,
-            "printed_completed": False,
-            "ticketmaster_phase": "area_select",
-            "ticketmaster_captcha_processed_url": "",
-            "ip_block_until": 0,
-            "ip_block_count": 0,
-            "soft_block_phase": "",
-            "soft_block_backoff_until": 0.0,
-            "soft_block_recovery_retry_at": 0.0,
-            "queue_it_enter_time": None,
-        })
+    _ensure_tixcraft_state_defaults()
 
     _sync_tixcraft_notification_flow(url)
 
@@ -7121,14 +7138,16 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
     is_quit_bot = False
     if '/ticket/checkout' in url:
-        if not _state["start_time"] is None:
-            if not _state["done_time"] is None:
-                bot_elapsed_time = _state["done_time"] - _state["start_time"]
-                if _state["elapsed_time"] != bot_elapsed_time:
+        start_time = _state.get("start_time")
+        done_time = _state.get("done_time")
+        if start_time is not None:
+            if done_time is not None:
+                bot_elapsed_time = done_time - start_time
+                if _state.get("elapsed_time") != bot_elapsed_time:
                     print("bot elapsed time:", "{:.3f}".format(bot_elapsed_time))
                 _state["elapsed_time"] = bot_elapsed_time
 
-        if not _state["is_popup_checkout"]:
+        if not _state.get("is_popup_checkout", False):
             _state["is_popup_checkout"] = True
             _record_action("checkout_reached", url)
 

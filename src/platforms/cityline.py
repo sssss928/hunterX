@@ -44,6 +44,27 @@ __all__ = [
 _state = {}
 
 
+def _cityline_state_defaults():
+    return {
+        "account_assigned": False,
+        "otp_sent": False,
+        "modal_handled": False,
+        "turnstile_attempted": False,
+        "buy_button_pressed": False,
+        "purchase_button_pressed": False,
+        "performance_processed": False,
+        "played_sound_ticket": False,
+        "played_sound_order": False,
+        "last_homepage_redirect_time": 0,
+        "otp_wait_last_log": 0,
+    }
+
+
+def _ensure_cityline_state_defaults():
+    for key, value in _cityline_state_defaults().items():
+        _state.setdefault(key, value)
+
+
 def is_cityline_login_page(url):
     """True for global and Hong Kong Cityline member login pages."""
     return 'cityline.com' in url and '/Login.html' in url
@@ -937,19 +958,7 @@ async def nodriver_cityline_clean_ads(tab):
 
 async def nodriver_cityline_main(tab, url, config_dict):
 
-    if not _state:
-        _state.update({
-            "account_assigned": False,
-            "otp_sent": False,
-            "modal_handled": False,
-            "turnstile_attempted": False,
-            "buy_button_pressed": False,
-            "purchase_button_pressed": False,
-            "performance_processed": False,
-            "played_sound_ticket": False,
-            "played_sound_order": False,
-            "last_homepage_redirect_time": 0,
-        })
+    _ensure_cityline_state_defaults()
 
     if 'msg.cityline.com' in url or 'event.cityline.com' in url:
         is_dom_ready = False

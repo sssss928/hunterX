@@ -30,6 +30,21 @@ __all__ = [
 _state = {}
 
 
+def _famiticket_state_defaults():
+    return {
+        "fail_list": [],
+        "last_activity": "",
+        "order_notified": False,
+        "payment_logged": False,
+        "payment_notified": False,
+    }
+
+
+def _ensure_famiticket_state_defaults():
+    for key, value in _famiticket_state_defaults().items():
+        _state.setdefault(key, value)
+
+
 async def nodriver_fami_login(tab, config_dict):
     """
     FamiTicket login
@@ -729,14 +744,7 @@ async def nodriver_famiticket_main(tab, url, config_dict):
     """
     FamiTicket main function - URL router
     """
-    if not _state:
-        _state.update({
-            "fail_list": [],
-            "last_activity": "",
-            "order_notified": False,
-            "payment_logged": False,
-            "payment_notified": False,
-        })
+    _ensure_famiticket_state_defaults()
 
     debug = util.create_debug_logger(config_dict)
 

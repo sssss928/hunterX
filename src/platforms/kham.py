@@ -73,6 +73,21 @@ __all__ = [
 _state = {}
 
 
+def _kham_state_defaults():
+    return {
+        "is_popup_checkout": False,
+        "played_sound_order": False,
+        "shown_checkout_message": False,
+        "udn_quick_buy_submitted": False,
+        "kham_date_reload_next_at": 0,
+    }
+
+
+def _ensure_kham_state_defaults():
+    for key, value in _kham_state_defaults().items():
+        _state.setdefault(key, value)
+
+
 def _get_auto_reload_interval(config_dict):
     return get_auto_reload_interval(config_dict)
 
@@ -1520,13 +1535,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
     # 函數開始時檢查暫停
     if await check_and_handle_pause(config_dict):
         return False
-    if not _state:
-        _state.update({
-            "is_popup_checkout": False,
-            "played_sound_order": False,
-            "shown_checkout_message": False,
-            "udn_quick_buy_submitted": False,
-        })
+    _ensure_kham_state_defaults()
 
     domain_name = url.split('/')[2]
     debug = util.create_debug_logger(config_dict)
@@ -1604,11 +1613,12 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
 
                         # Fill account
                         try:
+                            udn_account_js = json.dumps(udn_account)
                             await tab.evaluate(f'''
                                 (() => {{
                                     const emailInput = document.getElementById('ID');
                                     if (emailInput && !emailInput.value) {{
-                                        emailInput.value = "{udn_account}";
+                                        emailInput.value = {udn_account_js};
                                         emailInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                     }}
                                 }})()
@@ -1618,11 +1628,12 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
 
                         # Fill password
                         try:
+                            udn_password_js = json.dumps(udn_password)
                             await tab.evaluate(f'''
                                 (() => {{
                                     const passInput = document.getElementById('password');
                                     if (passInput && !passInput.value) {{
-                                        passInput.value = "{udn_password}";
+                                        passInput.value = {udn_password_js};
                                         passInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                     }}
                                 }})()
@@ -1867,11 +1878,12 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
 
                     # Fill account
                     try:
+                        udn_account_js = json.dumps(udn_account)
                         await tab.evaluate(f'''
                             (() => {{
                                 const emailInput = document.getElementById('ID');
                                 if (emailInput && !emailInput.value) {{
-                                    emailInput.value = "{udn_account}";
+                                    emailInput.value = {udn_account_js};
                                     emailInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                 }}
                             }})()
@@ -1881,11 +1893,12 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
 
                     # Fill password
                     try:
+                        udn_password_js = json.dumps(udn_password)
                         await tab.evaluate(f'''
                             (() => {{
                                 const passInput = document.getElementById('password');
                                 if (passInput && !passInput.value) {{
-                                    passInput.value = "{udn_password}";
+                                    passInput.value = {udn_password_js};
                                     passInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                 }}
                             }})()

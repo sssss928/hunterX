@@ -48,6 +48,47 @@ __all__ = [
 _state = {}
 
 
+def _funone_state_defaults():
+    return {
+        "is_session_selecting": False,
+        "is_ticket_selecting": False,
+        "played_sound_ticket": False,
+        "played_sound_order": False,
+        "fail_list": [],
+        "reload_count": 0,
+        "last_page_type": None,
+        "last_step": None,
+        "last_login_status": None,
+        "last_area_count": None,
+        "last_area_config": None,
+        "last_ticket_qty": None,
+        "qty_selector_notfound": False,
+        "submit_notfound": False,
+        "last_captcha_type": None,
+        "waiting_captcha_printed": False,
+        "captcha_filled_printed": False,
+        "ocr_retry_count": 0,
+        "ocr_exhausted": False,
+        "captcha_attempted": False,
+        "checkout_printed": False,
+        "next_button_clicked": False,
+        "refresh_retry_count": 0,
+        "last_sold_out_logged": False,
+        "max_retry_logged": False,
+        "last_homepage_redirect_time": 0,
+        "waiting_page_logged": False,
+        "refresh_disabled_logged": False,
+        "qty_reload_disabled_logged": False,
+        "qty_sold_out_refreshing": False,
+        "qty_fail_reason": None,
+    }
+
+
+def _ensure_funone_state_defaults():
+    for key, value in _funone_state_defaults().items():
+        _state.setdefault(key, value)
+
+
 async def nodriver_funone_inject_cookie(tab, config_dict):
     """
     Inject FunOne session cookie using CDP network.set_cookie
@@ -1787,38 +1828,7 @@ async def nodriver_funone_main(tab, url, config_dict):
     if await check_and_handle_pause(config_dict):
         return tab
 
-    # Initialize state dictionary
-    if not _state:
-        _state.update({
-            "is_session_selecting": False,
-            "is_ticket_selecting": False,
-            "played_sound_ticket": False,
-            "played_sound_order": False,
-            "fail_list": [],
-            "reload_count": 0,
-            # State tracking for log deduplication
-            "last_page_type": None,
-            "last_step": None,
-            "last_login_status": None,
-            "last_area_count": None,
-            "last_area_config": None,
-            "last_ticket_qty": None,
-            "qty_selector_notfound": False,
-            "submit_notfound": False,
-            "last_captcha_type": None,
-            "waiting_captcha_printed": False,
-            "captcha_filled_printed": False,
-            "ocr_retry_count": 0,
-            "ocr_exhausted": False,
-            "captcha_attempted": False,
-            "checkout_printed": False,
-            "next_button_clicked": False,
-            # Sold-out refresh tracking
-            "refresh_retry_count": 0,
-            "last_sold_out_logged": False,
-            "max_retry_logged": False,
-            "last_homepage_redirect_time": 0,
-        })
+    _ensure_funone_state_defaults()
 
     debug = util.create_debug_logger(config_dict)
 

@@ -47,6 +47,23 @@ __all__ = [
 # Module-level state (replaces global fansigo_dict)
 _state = {}
 
+
+def _fansigo_state_defaults():
+    return {
+        "is_cookie_injected": False,
+        "is_signin_submitted": False,
+        "played_sound_ticket": False,
+        "notified_checkout": False,
+        "last_page_type": None,
+        "qty_set_url": None,
+    }
+
+
+def _ensure_fansigo_state_defaults():
+    for key, value in _fansigo_state_defaults().items():
+        _state.setdefault(key, value)
+
+
 # FANSI GO URL patterns
 FANSIGO_URL_PATTERNS = {
     "domain": r"go\.fansi\.me",
@@ -795,16 +812,7 @@ async def nodriver_fansigo_main(tab, url, config_dict):
     if await check_and_handle_pause(config_dict):
         return tab
 
-    # Initialize state dictionary
-    if not _state:
-        _state.update({
-            "is_cookie_injected": False,
-            "is_signin_submitted": False,
-            "played_sound_ticket": False,
-            "notified_checkout": False,
-            "last_page_type": None,
-            "qty_set_url": None,
-        })
+    _ensure_fansigo_state_defaults()
 
     # Get page type
     page_type = get_fansigo_page_type(url)

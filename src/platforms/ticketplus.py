@@ -48,6 +48,25 @@ __all__ = [
 _state = {}
 
 
+def _ticketplus_state_defaults():
+    return {
+        "fail_list": [],
+        "is_popup_confirm": False,
+        "is_ticket_assigned": False,
+        "start_time": None,
+        "done_time": None,
+        "elapsed_time": None,
+        "signin_form_filled": False,
+        "purchase_completed": False,
+        "order_page_visited": False,
+    }
+
+
+def _ensure_ticketplus_state_defaults():
+    for key, value in _ticketplus_state_defaults().items():
+        _state.setdefault(key, value)
+
+
 def _get_status():
     """Return current ticketplus status for main loop (Approach B)."""
     return {
@@ -1727,15 +1746,7 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
 
     debug = util.create_debug_logger(config_dict)
 
-    if not _state:
-        _state["fail_list"] = []
-        _state["is_popup_confirm"] = False
-        _state["is_ticket_assigned"] = False
-        _state["start_time"] = None
-        _state["done_time"] = None
-        _state["elapsed_time"] = None
-        _state["signin_form_filled"] = False
-        _state["purchase_completed"] = False
+    _ensure_ticketplus_state_defaults()
 
     home_url = 'https://ticketplus.com.tw/'
     is_user_signin = False

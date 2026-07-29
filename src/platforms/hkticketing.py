@@ -69,6 +69,21 @@ __all__ = [
 _state = {}
 
 
+def _hkticketing_state_defaults():
+    return {
+        "is_date_submiting": False,
+        "fail_list": [],
+        "played_sound_ticket": False,
+        "played_sound_order": False,
+        "shown_checkout_message": False,
+    }
+
+
+def _ensure_hkticketing_state_defaults():
+    for key, value in _hkticketing_state_defaults().items():
+        _state.setdefault(key, value)
+
+
 # ====================================================================================
 # HKTicketing Platform (hkticketing.com / galaxymacau.com / ticketek.com.au)
 # ====================================================================================
@@ -2500,14 +2515,7 @@ async def nodriver_hkticketing_main(tab, url, config_dict):
     HKTicketing platform main flow control function
     Reference: chrome_tixcraft.py hkticketing_main logic (line 8400-8461)
     """
-    if not _state:
-        _state.update({
-            "is_date_submiting": False,
-            "fail_list": [],
-            "played_sound_ticket": False,
-            "played_sound_order": False,
-            "shown_checkout_message": False,
-        })
+    _ensure_hkticketing_state_defaults()
 
     debug = util.create_debug_logger(config_dict)
 
