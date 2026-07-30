@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 import nodriver_common
+import runtime_health
 
 
 @dataclass
@@ -65,6 +66,26 @@ async def test_general_js_exception_uses_target_url_fallback(debug: _Debug) -> N
 
     assert url == target_url
     assert is_quit_bot is False
+
+
+@pytest.mark.asyncio
+async def test_definitive_connection_loss_never_uses_stale_target_url(
+    debug: _Debug,
+) -> None:
+    connection_closed_error = type(
+        "ConnectionClosedError",
+        (RuntimeError,),
+        {},
+    )
+    tab = _Tab(
+        [connection_closed_error("closed")],
+        "https://tixcraft.com/ticket/area/26_stale/111",
+    )
+
+    with pytest.raises(runtime_health.BrowserConnectionLost) as captured:
+        await nodriver_common.nodriver_current_url(tab)
+
+    assert captured.value.operation == "current_url"
 
 
 @pytest.mark.asyncio
