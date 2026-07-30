@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import chrome_downloader
+import runtime_health
 import util
 from hunter_metadata import APP_NAME
 
@@ -128,7 +130,16 @@ class BrowserSessionManager:
         self.driver = driver
 
     async def stop_browser(self) -> None:
-        if self.driver is None:
+        driver, self.driver = self.driver, None
+        if driver is None:
             return
-        await self.driver.stop()
-        self.driver = None
+        try:
+            await asyncio.wait_for(driver.stop(), timeout=5.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            runtime_health.runtime_log(
+                "[BROWSER] stop_failed",
+                self.config_dict,
+                error_type=type(exc).__name__,
+            )

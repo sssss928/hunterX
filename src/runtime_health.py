@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from contextlib import suppress
-from typing import Any, Awaitable, cast
+from typing import Any, Awaitable, Callable, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import util
@@ -39,6 +39,22 @@ _BROWSER_CONNECTION_CLOSED_MARKERS = (
     "executor shutdown has been called",
     "browser is already gone",
 )
+_DEFINITIVE_BROWSER_CONNECTION_MARKERS = (
+    "websocket is not connected",
+    "executor shutdown has been called",
+    "browser is already gone",
+)
+
+
+class BrowserConnectionLost(BaseException):
+    """Control signal used to escape platform-level broad exception handlers."""
+
+    def __init__(self, operation: str, error_type: str) -> None:
+        self.operation = str(operation or "browser_operation")
+        self.error_type = str(error_type or "BrowserConnectionError")
+        super().__init__(
+            f"browser connection lost during {self.operation}: {self.error_type}"
+        )
 
 
 def try_begin_browser_action(tab: Any, action: str) -> int | None:
@@ -87,6 +103,101 @@ def is_browser_connection_closed_error(exc: BaseException | None) -> bool:
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def is_definitive_browser_connection_error(
+    exc: BaseException | None,
+) -> bool:
+    """Return True only when the browser control channel is no longer usable."""
+
+    seen: set[int] = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, BrowserConnectionLost):
+            return True
+        error_name = (
+            f"{type(current).__module__}.{type(current).__name__}".casefold()
+        )
+        message = str(current).casefold()
+        if "connectionclosed" in error_name:
+            return True
+        if any(
+            marker in error_name or marker in message
+            for marker in _DEFINITIVE_BROWSER_CONNECTION_MARKERS
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def raise_if_browser_connection_lost(
+    exc: BaseException,
+    operation: str,
+) -> None:
+    if isinstance(exc, BrowserConnectionLost):
+        raise exc
+    if is_definitive_browser_connection_error(exc):
+        raise BrowserConnectionLost(operation, type(exc).__name__) from exc
+
+
+def is_zendriver_listener_failure(context: dict[str, Any]) -> bool:
+    """Recognize the background listener task failure seen after CDP teardown."""
+
+    exc = context.get("exception")
+    if not isinstance(exc, BaseException):
+        return False
+    if not (
+        isinstance(exc, asyncio.InvalidStateError)
+        or is_definitive_browser_connection_error(exc)
+    ):
+        return False
+
+    task = context.get("task") or context.get("future")
+    get_coro = getattr(task, "get_coro", None)
+    if not callable(get_coro):
+        return False
+    try:
+        coro = get_coro()
+        identity = (
+            getattr(coro, "__qualname__", "")
+            or getattr(coro, "__name__", "")
+            or repr(coro)
+        ).casefold()
+    except Exception:
+        return False
+    return "listener" in identity and "listener_loop" in identity
+
+
+def create_browser_loop_exception_handler(
+    config_dict: dict[str, Any] | None,
+    failure_event: asyncio.Event,
+    previous_handler: Callable[
+        [asyncio.AbstractEventLoop, dict[str, Any]], None
+    ]
+    | None = None,
+) -> Callable[[asyncio.AbstractEventLoop, dict[str, Any]], None]:
+    """Convert a dead zendriver listener into a main-loop recovery signal."""
+
+    def handle_loop_exception(
+        loop: asyncio.AbstractEventLoop,
+        context: dict[str, Any],
+    ) -> None:
+        if is_zendriver_listener_failure(context):
+            exc = context.get("exception")
+            runtime_log(
+                "[BROWSER] listener_failed",
+                config_dict,
+                error_type=type(exc).__name__ if exc is not None else "unknown",
+            )
+            failure_event.set()
+            return
+        if previous_handler is not None:
+            previous_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    return handle_loop_exception
 
 
 def _instance_log_path() -> str:
@@ -283,6 +394,9 @@ async def wait_for_operation(
         if raise_on_timeout:
             raise
         return default
+    except Exception as exc:
+        raise_if_browser_connection_lost(exc, action)
+        raise
 
 
 async def guarded_get(

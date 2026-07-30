@@ -22,6 +22,7 @@ import settings
 import chrome_downloader
 import ocr_cache
 import performance
+import runtime_health
 from hunter_metadata import APP_DISPLAY_VERSION
 from browser_session import BrowserSessionManager
 from notification_context import make_notification_context
@@ -612,6 +613,10 @@ async def nodriver_current_url(tab, config_dict=None, *, prefer_cached=False):
             )
             return url, is_quit_bot
         except Exception as exc:
+            runtime_health.raise_if_browser_connection_lost(
+                exc,
+                "current_url",
+            )
             str_exc = ""
             try:
                 str_exc = str(exc)

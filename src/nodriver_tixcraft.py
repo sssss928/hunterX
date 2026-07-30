@@ -102,6 +102,22 @@ REFRESH_TRIGGER_RETRYABLE_REASONS = frozenset(
         "reload_in_flight",
     }
 )
+BROWSER_CONNECTION_EMPTY_URL_GRACE_SECONDS = 10.0
+BROWSER_CONNECTION_RESTART_WINDOW_SECONDS = 120.0
+BROWSER_CONNECTION_MAX_RESTARTS = 3
+BROWSER_CONNECTION_RESTART_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+BROWSER_CONNECTION_SAFE_RESTART_PAGES = frozenset(
+    {
+        PageClass.HOME,
+        PageClass.ACTIVITY,
+        PageClass.DATE,
+        PageClass.AREA,
+        PageClass.SOLD_OUT,
+        PageClass.REJECTED_ERROR,
+        PageClass.CANCELED_ORDER,
+        PageClass.CONTINUE_SHOPPING,
+    }
+)
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -1862,6 +1878,55 @@ async def reload_config(config_dict, last_mtime, config_filepath):
 
     return config_dict, last_mtime
 
+
+def _is_safe_browser_recovery_url(url, configured_homepage=""):
+    value = str(url or "").strip()
+    if classify_page(value) not in BROWSER_CONNECTION_SAFE_RESTART_PAGES:
+        return False
+    try:
+        target = urllib.parse.urlsplit(value)
+        configured = urllib.parse.urlsplit(str(configured_homepage or "").strip())
+    except ValueError:
+        return False
+    if target.scheme not in {"http", "https"} or not target.hostname:
+        return False
+    if configured.hostname and target.hostname != configured.hostname:
+        return False
+    return True
+
+
+def _has_empty_url_watchdog_expired(
+    last_url,
+    empty_since_monotonic,
+    now_monotonic,
+):
+    if not str(last_url or "").strip() or empty_since_monotonic <= 0:
+        return False
+    return (
+        now_monotonic - empty_since_monotonic
+        >= BROWSER_CONNECTION_EMPTY_URL_GRACE_SECONDS
+    )
+
+
+async def _navigate_browser_start(driver, config_dict, recovery_url=""):
+    recovery_url = str(recovery_url or "").strip()
+    if recovery_url:
+        try:
+            return await driver.get(recovery_url)
+        except Exception as exc:
+            runtime_health.raise_if_browser_connection_lost(
+                exc,
+                "recovery_navigation",
+            )
+            runtime_health.runtime_log(
+                "[BROWSER] recovery_navigation_failed",
+                config_dict,
+                error_type=type(exc).__name__,
+                current_url=recovery_url,
+            )
+    return await nodriver_goto_homepage(driver, config_dict)
+
+
 async def _run_main(args, resources):
     instance_id = ""
     if args and getattr(args, "instance", None):
@@ -1881,6 +1946,39 @@ async def _run_main(args, resources):
         heartbeat_filename
     )
     config_dict = get_config_dict(args)
+    resources["config_dict"] = config_dict
+    if config_dict is not None:
+        configured_homepage = str(config_dict.get("homepage", "") or "")
+        resources["configured_homepage"] = configured_homepage
+        resume_url = str(resources.get("resume_url", "") or "")
+        if _is_safe_browser_recovery_url(resume_url, configured_homepage):
+            resources["launch_url"] = resume_url
+            runtime_health.runtime_log(
+                "[BROWSER] recovery_resume_url",
+                config_dict,
+                current_url=resume_url,
+            )
+        if not resources.get("last_url") and _is_safe_browser_recovery_url(
+            configured_homepage,
+            configured_homepage,
+        ):
+            resources["last_url"] = configured_homepage
+
+    loop = asyncio.get_running_loop()
+    browser_failure_event = asyncio.Event()
+    previous_loop_exception_handler = loop.get_exception_handler()
+    loop.set_exception_handler(
+        runtime_health.create_browser_loop_exception_handler(
+            config_dict,
+            browser_failure_event,
+            previous_loop_exception_handler,
+        )
+    )
+    resources["event_loop"] = loop
+    resources["previous_loop_exception_handler"] = (
+        previous_loop_exception_handler
+    )
+    resources["browser_failure_event"] = browser_failure_event
 
     # Prefix logs with timestamp (optional) and instance id (always) so mixed
     # multi-instance stdout remains attributable.
@@ -1942,7 +2040,11 @@ async def _run_main(args, resources):
             initial_tab = driver.main_tab
             if initial_tab:
                 await nodrver_block_urls(initial_tab, config_dict)
-            tab = await nodriver_goto_homepage(driver, config_dict)
+            tab = await _navigate_browser_start(
+                driver,
+                config_dict,
+                resources.get("launch_url", ""),
+            )
             if tab is None:
                 print("[ERROR] Homepage navigation failed. Cannot continue.")
                 return
@@ -1982,6 +2084,7 @@ async def _run_main(args, resources):
     last_heartbeat_time = 0.0
     last_runtime_alive_log = 0.0
     last_empty_url_log = 0.0
+    empty_url_since_monotonic = 0.0
     is_quit_bot = False
     ticketplus_purchase_done = False  # Guard: stop polling after purchase completed
 
@@ -2012,6 +2115,12 @@ async def _run_main(args, resources):
                 last_runtime_alive_log = heartbeat_now
                 runtime_health.runtime_log("[LOOP] alive", config_dict)
 
+        if browser_failure_event.is_set():
+            raise runtime_health.BrowserConnectionLost(
+                "zendriver_listener",
+                "InvalidStateError",
+            )
+
         # pass if driver not loaded.
         if driver is None:
             _close_runtime_ntp_coordinator(refresh_datetime_state)
@@ -2038,18 +2147,35 @@ async def _run_main(args, resources):
             util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_AUTOMATION_STOP_FILE))
             break
 
-        if url is None:
+        if not url:
+            now_mono = time.monotonic()
+            if empty_url_since_monotonic <= 0:
+                empty_url_since_monotonic = now_mono
+            empty_elapsed = now_mono - empty_url_since_monotonic
+            if now_mono - last_empty_url_log >= 2.0:
+                last_empty_url_log = now_mono
+                util.create_debug_logger(config_dict).log(
+                    "[URL DIAG] empty url, skipping dispatch; "
+                    f"{format_cached_target_url_diagnostic(tab)}"
+                )
+            if _has_empty_url_watchdog_expired(
+                resources.get("last_url", ""),
+                empty_url_since_monotonic,
+                now_mono,
+            ):
+                runtime_health.runtime_log(
+                    "[BROWSER] empty_url_watchdog",
+                    config_dict,
+                    elapsed_ms=int(empty_elapsed * 1000),
+                    current_url=resources.get("last_url", ""),
+                )
+                raise runtime_health.BrowserConnectionLost(
+                    "empty_url_watchdog",
+                    "EmptyBrowserUrl",
+                )
             continue
-        else:
-            if len(url) == 0:
-                now_mono = time.time()
-                if now_mono - last_empty_url_log >= 2.0:
-                    last_empty_url_log = now_mono
-                    util.create_debug_logger(config_dict).log(
-                        "[URL DIAG] empty url, skipping dispatch; "
-                        f"{format_cached_target_url_diagnostic(tab)}"
-                    )
-                continue
+        empty_url_since_monotonic = 0.0
+        resources["last_url"] = url
 
         is_maxbot_paused = await check_and_handle_pause(config_dict)
 
@@ -2252,6 +2378,16 @@ async def _cleanup_main_resources(resources):
         except BaseException as exc:
             cleanup_errors.append(exc)
 
+    event_loop = resources.get("event_loop")
+    if event_loop is not None:
+        try:
+            if not event_loop.is_closed():
+                event_loop.set_exception_handler(
+                    resources.get("previous_loop_exception_handler")
+                )
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
     heartbeat_path = resources.get("heartbeat_path")
     if heartbeat_path:
         try:
@@ -2272,14 +2408,25 @@ async def _cleanup_main_resources(resources):
     return cleanup_errors[0] if cleanup_errors else None
 
 
-async def main(args):
-    resources = {
+def _new_main_resources(resume_url=""):
+    return {
         "session_manager": None,
         "refresh_datetime_state": None,
         "heartbeat_path": "",
         "original_print": None,
+        "config_dict": None,
+        "configured_homepage": "",
+        "last_url": str(resume_url or ""),
+        "launch_url": "",
+        "resume_url": str(resume_url or ""),
+        "event_loop": None,
+        "previous_loop_exception_handler": None,
+        "browser_failure_event": None,
         "cleanup_complete": False,
     }
+
+
+async def _run_main_once(args, resources):
     try:
         return await _run_main(args, resources)
     finally:
@@ -2287,6 +2434,83 @@ async def main(args):
         cleanup_exception = await _cleanup_main_resources(resources)
         if primary_exception is None and cleanup_exception is not None:
             raise cleanup_exception
+
+
+async def main(args):
+    restart_times = []
+    resume_url = ""
+    while True:
+        resources = _new_main_resources(resume_url)
+        try:
+            return await _run_main_once(args, resources)
+        except runtime_health.BrowserConnectionLost as exc:
+            last_url = str(resources.get("last_url", "") or "")
+            page_class = classify_page(last_url)
+            config_dict = resources.get("config_dict")
+            configured_homepage = str(
+                resources.get("configured_homepage", "")
+                or (
+                    config_dict.get("homepage", "")
+                    if isinstance(config_dict, dict)
+                    else ""
+                )
+                or ""
+            )
+            if not _is_safe_browser_recovery_url(
+                last_url,
+                configured_homepage,
+            ):
+                runtime_health.runtime_log(
+                    "[BROWSER] recovery_blocked",
+                    config_dict,
+                    reason="protected_or_unknown_page",
+                    page_class=page_class.value,
+                    current_url=last_url,
+                    operation=exc.operation,
+                )
+                raise
+
+            now = time.monotonic()
+            restart_times = [
+                timestamp
+                for timestamp in restart_times
+                if now - timestamp
+                <= BROWSER_CONNECTION_RESTART_WINDOW_SECONDS
+            ]
+            if len(restart_times) >= BROWSER_CONNECTION_MAX_RESTARTS:
+                runtime_health.runtime_log(
+                    "[BROWSER] recovery_exhausted",
+                    config_dict,
+                    attempts=len(restart_times),
+                    current_url=last_url,
+                    operation=exc.operation,
+                )
+                raise
+
+            restart_times.append(now)
+            attempt = len(restart_times)
+            delay = BROWSER_CONNECTION_RESTART_BACKOFF_SECONDS[
+                min(
+                    attempt - 1,
+                    len(BROWSER_CONNECTION_RESTART_BACKOFF_SECONDS) - 1,
+                )
+            ]
+            resume_url = last_url
+            runtime_health.runtime_log(
+                "[BROWSER] recovery_scheduled",
+                config_dict,
+                attempt=attempt,
+                delay_seconds=delay,
+                current_url=last_url,
+                operation=exc.operation,
+                error_type=exc.error_type,
+            )
+            print(
+                "[BROWSER] Browser control connection lost; "
+                f"restarting safe session ({attempt}/"
+                f"{BROWSER_CONNECTION_MAX_RESTARTS})..."
+            )
+            await asyncio.sleep(delay)
 
 
 def cli():
