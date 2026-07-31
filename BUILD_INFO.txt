@@ -1,8 +1,8 @@
 Project: HunterX
 Repository: https://github.com/sssss928/hunterX
-Artifact version: v0.4.5
+Artifact version: v0.4.6
 Base version: v0.4.4
-Git branch: local/v0.4.5-state-defaults
+Git branch: local/v0.4.6-state-defaults
 Git commit SHA: local source archive commit generated during packaging
 Base commit SHA: not available in extracted source archive
 Build date/time: 2026-07-29T10:47:00+08:00
@@ -14,7 +14,7 @@ Zendriver: 0.15.3
 websockets: 16.0
 requirement.txt SHA-256: 5538B2210831C0602FBE1866157FE1C71D072E9E243ACA6AD3F8CBCBFC8CD7B9
 Operating system: Windows 10.0.26200 (64-bit)
-Build command: manual equivalent of scripts\build_windows.ps1 -Version 0.4.5
+Build command: manual equivalent of scripts\build_windows.ps1 -Version 0.4.6
 Source ZIP SHA-256: recorded in the external BUILD_INFO.txt and SHA256SUMS.txt
 Windows ZIP SHA-256: recorded in the external BUILD_INFO.txt and SHA256SUMS.txt
 

@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.4.6
+
+- Add a shared `PlatformAdapter` contract, fail-closed route policies and
+  per-tab runtime state for every supported ticketing family.
+- Route non-TixCraft leak-watch reloads through the common monotonic,
+  single-flight scheduler and central bounded `ReloadGuard`.
+- Preserve existing per-platform DOM/API selection and purchase flows; the
+  unified layer owns lifecycle, watchdog, state backfill and refresh safety.
+- Add cross-platform contract, route-spoofing, state-isolation and scheduler
+  regression tests.
+- Add an authoritative hostname-based platform registry for every supported
+  family, including IndieVox, and route the main browser dispatch through it.
+- Reject substring-spoofed and ambiguous platform URLs instead of selecting a
+  handler from loose domain fragments.
+- Separate platform ownership from capability claims with explicit source,
+  fixture, and public-page validation levels.
+- Add registry contract coverage for TixCraft/IndieVox/Ticketmaster, KKTIX,
+  iBon, KHAM/ticket.com.tw/UDN, TicketPlus, Cityline, HKTicketing/Ticketek,
+  FamiTicket, FunOne, and FANSI GO.
+- Validate current public IndieVox activity/detail to activity/game routing and
+  preserve the existing protected purchase-page reload guards.
+- Stop the automation when the user closes its active browser tab, while still
+  allowing transient close-frame errors with a live CDP target during normal
+  navigation. This prevents a headless main loop from surviving the closed tab
+  and triggering repeated browser recovery launches.
+
 ## v0.4.5
 
 - Backfill platform runtime state defaults on every main-loop dispatch so hot reloads, helper registration, or partial state restores cannot leave later direct state reads uninitialized.
