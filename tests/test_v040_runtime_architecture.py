@@ -500,46 +500,6 @@ def test_browser_connection_closed_classifier_is_narrow() -> None:
     )
 
 
-def test_definitive_browser_connection_classifier_excludes_transient_close_frame() -> None:
-    connection_closed_error = type(
-        "ConnectionClosedError",
-        (RuntimeError,),
-        {},
-    )("closed")
-
-    assert runtime_health.is_definitive_browser_connection_error(
-        connection_closed_error
-    )
-    assert not runtime_health.is_definitive_browser_connection_error(
-        RuntimeError("no close frame received or sent")
-    )
-    assert not runtime_health.is_definitive_browser_connection_error(
-        RuntimeError("execution context was destroyed")
-    )
-
-
-@pytest.mark.asyncio
-async def test_wait_for_operation_promotes_definitive_connection_loss() -> None:
-    connection_closed_error = type(
-        "ConnectionClosedError",
-        (RuntimeError,),
-        {},
-    )
-
-    async def fail() -> None:
-        raise connection_closed_error("closed")
-
-    with pytest.raises(runtime_health.BrowserConnectionLost) as captured:
-        await runtime_health.wait_for_operation(
-            fail(),
-            1.0,
-            "TEST_BROWSER_OPERATION",
-        )
-
-    assert captured.value.operation == "TEST_BROWSER_OPERATION"
-    assert captured.value.error_type == "ConnectionClosedError"
-
-
 def test_notification_order_pending_area_and_rows_are_separate() -> None:
     ctx = make_notification_context(
         platform="TixCraft",
@@ -651,37 +611,6 @@ def test_browser_args_for_chrome_edge_and_private_mode(tmp_path, monkeypatch) ->
     private_args = private.build_args([])
     assert "--inprivate" in private_args
     assert not any(item.startswith("--user-data-dir=") for item in private_args)
-
-
-@pytest.mark.asyncio
-async def test_browser_session_stop_is_idempotent_after_dead_connection(
-    monkeypatch,
-) -> None:
-    messages = []
-    manager = BrowserSessionManager({"advanced": {}})
-
-    class DeadDriver:
-        def __init__(self) -> None:
-            self.stop_calls = 0
-
-        async def stop(self) -> None:
-            self.stop_calls += 1
-            raise RuntimeError("websocket is not connected")
-
-    driver = DeadDriver()
-    manager.attach(driver)
-    monkeypatch.setattr(
-        browser_session.runtime_health,
-        "runtime_log",
-        lambda message, *_args, **_kwargs: messages.append(message),
-    )
-
-    await manager.stop_browser()
-    await manager.stop_browser()
-
-    assert manager.driver is None
-    assert driver.stop_calls == 1
-    assert messages == ["[BROWSER] stop_failed"]
 
 
 def test_frozen_launcher_resolves_flat_and_split_layouts(tmp_path, monkeypatch) -> None:

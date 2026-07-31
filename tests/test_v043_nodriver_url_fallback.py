@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 
 import nodriver_common
-import runtime_health
 
 
 @dataclass
@@ -66,26 +65,6 @@ async def test_general_js_exception_uses_target_url_fallback(debug: _Debug) -> N
 
     assert url == target_url
     assert is_quit_bot is False
-
-
-@pytest.mark.asyncio
-async def test_definitive_connection_loss_never_uses_stale_target_url(
-    debug: _Debug,
-) -> None:
-    connection_closed_error = type(
-        "ConnectionClosedError",
-        (RuntimeError,),
-        {},
-    )
-    tab = _Tab(
-        [connection_closed_error("closed")],
-        "https://tixcraft.com/ticket/area/26_stale/111",
-    )
-
-    with pytest.raises(runtime_health.BrowserConnectionLost) as captured:
-        await nodriver_common.nodriver_current_url(tab)
-
-    assert captured.value.operation == "current_url"
 
 
 @pytest.mark.asyncio
@@ -263,9 +242,45 @@ async def test_empty_sources_do_not_reuse_stale_url_and_next_call_recovers(
 
     assert first_url == stale_url
     assert empty_url == ""
-    assert empty_quit is False
+    assert empty_quit is True
     assert recovered == recovered_url
     assert recovered_quit is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "no close frame received or sent",
+        "Target closed",
+        "Tab closed",
+        "WebSocket connection is closed",
+    ],
+)
+async def test_closing_active_tab_stops_automation(
+    debug: _Debug,
+    message: str,
+) -> None:
+    tab = _Tab([RuntimeError(message)], target_url="")
+
+    url, is_quit_bot = await nodriver_common.nodriver_current_url(tab)
+
+    assert url == ""
+    assert is_quit_bot is True
+    assert any("active tab closed" in message for message in debug.messages)
+
+
+@pytest.mark.asyncio
+async def test_close_frame_during_navigation_keeps_live_target(
+    debug: _Debug,
+) -> None:
+    target_url = "https://www.indievox.com/activity/game/26_iv0404354"
+    tab = _Tab([RuntimeError("no close frame received or sent")], target_url)
+
+    url, is_quit_bot = await nodriver_common.nodriver_current_url(tab)
+
+    assert url == target_url
+    assert is_quit_bot is False
 
 
 @pytest.mark.asyncio

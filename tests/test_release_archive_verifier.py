@@ -9,7 +9,7 @@ import pytest
 from verify_release_archive import verify_source_archive, verify_windows_archive
 
 
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 REQUIRED_WINDOWS_FILES = {
     "CHANGELOG.md": b"changes",
     "LICENSE": b"license",
