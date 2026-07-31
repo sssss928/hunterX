@@ -100,10 +100,63 @@ async def guarded_reload(
     timeout_seconds: float = DEFAULT_RELOAD_TIMEOUT_SECONDS,
     config_dict: dict[str, Any] | None = None,
 ) -> bool:
-    return await reload_guard.reload(
-        tab,
-        reason=reason,
-        recovery=recovery,
-        timeout_seconds=timeout_seconds,
-        config_dict=config_dict,
-    )
+    scheduler = None
+    scheduler_started = False
+    # Import lazily: the platform contract owns a ReloadGuard instance and
+    # importing the adapter registry at module load time would be circular.
+    from platform_adapters import adapter_for_url
+    from platform_engine import platform_engine
+    from run_modes import is_leak_watch_mode
+
+    url = getattr(getattr(tab, "target", None), "url", "") or ""
+    adapter = adapter_for_url(url)
+    leak_mode = is_leak_watch_mode(config_dict)
+    if leak_mode and adapter is None:
+        runtime_log(
+            "[LEAK WATCH] reload_blocked",
+            config_dict,
+            reason="unknown_platform_or_route",
+            current_url=url,
+        )
+        return False
+    if adapter is not None and adapter.key != "tixcraft" and leak_mode:
+        try:
+            state = platform_engine.state_for(tab, adapter)
+            scheduler = state.leak_scheduler
+            can_reload, scheduler_reason = scheduler.can_reload(config_dict, url)
+            if not can_reload:
+                runtime_log(
+                    "[LEAK WATCH] reload_blocked",
+                    config_dict,
+                    platform=adapter.key,
+                    reason=scheduler_reason,
+                    current_url=url,
+                )
+                return False
+            scheduler_started = scheduler.begin_reload_cycle(url)
+            if not scheduler_started:
+                return False
+        except (AttributeError, TypeError, ValueError) as exc:
+            runtime_log(
+                "[LEAK WATCH] reload_blocked",
+                config_dict,
+                platform=adapter.key,
+                reason="scheduler_state_invalid",
+                error_type=type(exc).__name__,
+                current_url=url,
+            )
+            return False
+
+    success = False
+    try:
+        success = await reload_guard.reload(
+            tab,
+            reason=reason,
+            recovery=recovery,
+            timeout_seconds=timeout_seconds,
+            config_dict=config_dict,
+        )
+        return success
+    finally:
+        if scheduler is not None and scheduler_started:
+            scheduler.finish_reload_cycle(config_dict, success)

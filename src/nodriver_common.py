@@ -22,7 +22,6 @@ import settings
 import chrome_downloader
 import ocr_cache
 import performance
-import runtime_health
 from hunter_metadata import APP_DISPLAY_VERSION
 from browser_session import BrowserSessionManager
 from notification_context import make_notification_context
@@ -547,6 +546,13 @@ async def nodriver_current_url(tab, config_dict=None, *, prefer_cached=False):
         "no close frame sent",
         "no close frame received",
     ]
+    closed_target_error_strings = [
+        "target closed",
+        "tab closed",
+        "session closed",
+        "websocket connection is closed",
+        "connection closed",
+    ]
 
     def read_target_url():
         try:
@@ -613,10 +619,6 @@ async def nodriver_current_url(tab, config_dict=None, *, prefer_cached=False):
             )
             return url, is_quit_bot
         except Exception as exc:
-            runtime_health.raise_if_browser_connection_lost(
-                exc,
-                "current_url",
-            )
             str_exc = ""
             try:
                 str_exc = str(exc)
@@ -630,6 +632,19 @@ async def nodriver_current_url(tab, config_dict=None, *, prefer_cached=False):
                     if each_error_string in str_exc:
                         is_quit_bot = True
             url = read_target_url()
+            # A close-frame error can also happen briefly while Chrome swaps
+            # execution contexts during navigation.  It is terminal only when
+            # CDP no longer has a target URL.  This distinction lets a normal
+            # navigation recover from the cached URL, while closing the last
+            # user tab stops the automation instead of leaving a live process
+            # that launchers may mistake for a browser needing recovery.
+            lowered_exc = str_exc.lower()
+            target_is_closed = is_silent or any(
+                marker in lowered_exc for marker in closed_target_error_strings
+            )
+            if target_is_closed and not url:
+                is_quit_bot = True
+                debug.log("[BROWSER] active tab closed; stopping automation")
             if not is_silent:
                 debug.log(
                     "[URL DIAG] js_dumps error; "

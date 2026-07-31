@@ -5,6 +5,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Iterable
+from urllib.parse import urlsplit
 
 from page_classifier import PageClass, classify_page, is_protected_after_ticket
 from run_modes import get_leak_refresh_interval, is_leak_watch_mode
@@ -50,14 +51,32 @@ def iter_policies() -> Iterable[LeakWatchPolicy]:
 
 
 def get_policy_for_url(url: str) -> LeakWatchPolicy | None:
-    url_lower = (url or "").lower()
+    try:
+        hostname = (urlsplit(url).hostname or "").casefold().rstrip(".")
+    except ValueError:
+        return None
+    if not hostname:
+        return None
     for policy in LEAK_WATCH_POLICIES:
-        if any(host.lower() in url_lower for host in policy.hosts):
-            return policy
+        for raw_host in policy.hosts:
+            host = raw_host.casefold().strip(".")
+            if raw_host.endswith("."):
+                if hostname.startswith(host):
+                    return policy
+            elif hostname == host or hostname.endswith(f".{host}"):
+                return policy
     return None
 
 
 def is_protected_url(url: str) -> bool:
+    try:
+        from platform_adapters import adapter_for_url
+
+        adapter = adapter_for_url(url)
+        if adapter is not None:
+            return adapter.is_protected_page(url)
+    except ImportError:
+        pass
     page_class = classify_page(url)
     if page_class == PageClass.QUEUE:
         return True
@@ -71,6 +90,14 @@ def is_protected_url(url: str) -> bool:
 
 
 def is_safe_page(url: str) -> bool:
+    try:
+        from platform_adapters import adapter_for_url
+
+        adapter = adapter_for_url(url)
+        if adapter is not None:
+            return adapter.is_safe_watch_page(url)
+    except ImportError:
+        pass
     if is_protected_url(url):
         return False
     url_lower = (url or "").lower()
