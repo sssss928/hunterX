@@ -293,6 +293,20 @@ async def guarded_get(
     timeout_seconds: float = DEFAULT_NAVIGATION_TIMEOUT_SECONDS,
     reason: str = "navigation",
 ) -> bool:
+    from page_classifier import classify_page
+
+    source_url = getattr(getattr(tab, "target", None), "url", "") or ""
+    runtime_log(
+        "[NAVIGATION] intent",
+        config_dict,
+        reason=reason,
+        source_url=source_url,
+        target_url=url,
+        page_class=classify_page(source_url).value,
+        attempt_id=None,
+        generation=None,
+        token=None,
+    )
     action_token = try_begin_browser_action(tab, reason)
     if action_token is None:
         runtime_log(
@@ -315,6 +329,50 @@ async def guarded_get(
         return False
     finally:
         finish_browser_action(tab, action_token)
+
+
+async def guarded_driver_get(
+    driver: Any,
+    url: str,
+    config_dict: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: float = DEFAULT_NAVIGATION_TIMEOUT_SECONDS,
+    reason: str = "initial_navigation",
+) -> Any | None:
+    """Single-flight browser startup navigation that returns the created tab."""
+
+    runtime_log(
+        "[NAVIGATION] intent",
+        config_dict,
+        reason=reason,
+        source_url="",
+        target_url=url,
+        page_class="unknown",
+        attempt_id=None,
+        generation=None,
+        token=None,
+    )
+    action_token = try_begin_browser_action(driver, reason)
+    if action_token is None:
+        runtime_log(
+            "[NAVIGATION] skipped",
+            config_dict,
+            reason="browser_action_in_flight",
+            target_url=url,
+        )
+        return None
+    try:
+        return await wait_for_operation(
+            driver.get(url),
+            timeout_seconds,
+            reason,
+            config_dict,
+            raise_on_timeout=True,
+        )
+    except TimeoutError:
+        return None
+    finally:
+        finish_browser_action(driver, action_token)
 
 
 async def evaluate_with_timeout(

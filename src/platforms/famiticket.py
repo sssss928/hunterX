@@ -7,6 +7,8 @@ import json
 import random
 
 import util
+from platform_contract import PlatformStateProxy
+from runtime_health import guarded_get
 from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     CONST_FROM_TOP_TO_BOTTOM,
@@ -27,7 +29,7 @@ __all__ = [
     "nodriver_famiticket_main",
 ]
 
-_state = {}
+_state = PlatformStateProxy("famiticket")
 
 
 def _famiticket_state_defaults():
@@ -378,7 +380,12 @@ async def nodriver_fami_date_auto_select(tab, config_dict, last_activity_url):
                 if auto_reload_page_interval > 0 and last_activity_url:
                     debug.log("[FAMI DATE] Date list is empty, triggering auto-reload")
                     await asyncio.sleep(auto_reload_page_interval)
-                    await tab.get(last_activity_url)
+                    await guarded_get(
+                        tab,
+                        last_activity_url,
+                        config_dict,
+                        reason="famiticket_empty_date_refresh",
+                    )
                     await asyncio.sleep(0.3)
                 else:
                     debug.log("[FAMI DATE] Auto reload disabled or no activity URL; waiting")
@@ -794,8 +801,12 @@ async def nodriver_famiticket_main(tab, url, config_dict):
             homepage = config_dict.get("homepage", "")
             if homepage and '/Home/Activity/Info/' in homepage:
                 debug.log(f"[FAMITICKET MAIN] Redirecting to activity: {homepage[:60]}...")
-                await tab.get(homepage)
-                result = True
+                result = await guarded_get(
+                    tab,
+                    homepage,
+                    config_dict,
+                    reason="famiticket_homepage_to_activity",
+                )
             else:
                 debug.log("[FAMITICKET MAIN] On homepage, no redirect needed")
 

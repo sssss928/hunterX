@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import asyncio
+import inspect
 import math
 import os
 import pathlib
@@ -110,10 +111,17 @@ async def nodriver_goto_homepage(driver, config_dict):
     debug = util.create_debug_logger(config_dict)
     tab = None
     homepage = config_dict["homepage"]
-    if 'kktix.c' in homepage:
+    homepage_platform = platform_key_for_url(homepage)
+    homepage_host = (urllib.parse.urlsplit(homepage).hostname or "").casefold().rstrip(".")
+    if homepage_platform == "kktix":
         # for like human.
         try:
-            tab = await driver.get(homepage)
+            tab = await runtime_health.guarded_driver_get(
+                driver,
+                homepage,
+                config_dict,
+                reason="kktix_initial_homepage",
+            )
             await asyncio.sleep(random.uniform(1.0, 2.5))
         except Exception as e:
             print(f"[ERROR] Failed to navigate to kktix homepage: {e}")
@@ -122,36 +130,38 @@ async def nodriver_goto_homepage(driver, config_dict):
             if not 'https://kktix.com/users/sign_in?' in homepage:
                 homepage = CONST_KKTIX_SIGN_IN_URL % (homepage)
 
-    if 'famiticket.com' in homepage:
+    if homepage_platform == "famiticket":
         if len(config_dict["accounts"]["fami_account"])>0:
             homepage = CONST_FAMI_SIGN_IN_URL
 
-    if 'kham.com' in homepage:
+    if homepage_host == "kham.com.tw" or homepage_host.endswith(".kham.com.tw"):
         if len(config_dict["accounts"]["kham_account"])>0:
             homepage = CONST_KHAM_SIGN_IN_URL
 
-    if 'ticket.com.tw' in homepage:
+    if homepage_host == "ticket.com.tw" or homepage_host.endswith(".ticket.com.tw"):
         if len(config_dict["accounts"]["ticket_account"])>0:
             homepage = CONST_TICKET_SIGN_IN_URL
 
-    if 'udnfunlife.com' in homepage:
+    if homepage_host == "tickets.udnfunlife.com" or homepage_host.endswith(".tickets.udnfunlife.com"):
         if len(config_dict["accounts"]["udn_account"])>0:
             homepage = CONST_UDN_SIGN_IN_URL
 
-    if 'urbtix.hk' in homepage:
+    if homepage_host == "urbtix.hk" or homepage_host.endswith(".urbtix.hk"):
         if len(config_dict["accounts"]["urbtix_account"])>0:
             homepage = CONST_URBTIX_SIGN_IN_URL
 
-    if 'cityline.com' in homepage:
+    if homepage_platform == "cityline":
         if len(config_dict["accounts"]["cityline_account"])>0:
-            if 'cityline.com.hk' in homepage:
+            if homepage_host == "cityline.com.hk" or homepage_host.endswith(".cityline.com.hk"):
                 homepage = CONST_CITYLINE_HK_SIGN_IN_URL % urllib.parse.quote(config_dict["homepage"], safe='')
             else:
                 homepage = CONST_CITYLINE_SIGN_IN_URL
 
-    if 'hkticketing.com' in homepage:
+    if homepage_platform == "hkticketing" and (
+        homepage_host == "hkticketing.com" or homepage_host.endswith(".hkticketing.com")
+    ):
         if len(config_dict["accounts"]["hkticketing_account"])>0:
-            if 'hkt.hkticketing.com' in homepage:
+            if homepage_host == "hkt.hkticketing.com":
                 # Type02: hkt.hkticketing.com SPA
                 homepage = CONST_HKTICKETING_TYPE02_SIGN_IN_URL
             else:
@@ -159,36 +169,33 @@ async def nodriver_goto_homepage(driver, config_dict):
                 homepage = CONST_HKTICKETING_SIGN_IN_URL
 
     # https://ticketplus.com.tw/*
-    if 'ticketplus.com.tw' in homepage:
+    if homepage_platform == "ticketplus":
         if len(config_dict["accounts"]["ticketplus_account"]) > 1:
             homepage = "https://ticketplus.com.tw/"
 
     try:
-        tab = await driver.get(homepage)
+        tab = await runtime_health.guarded_driver_get(
+            driver,
+            homepage,
+            config_dict,
+            reason="configured_homepage",
+        )
         await asyncio.sleep(random.uniform(1.0, 2.5))
     except Exception as e:
         print(f"[ERROR] Failed to navigate to homepage: {e}")
 
-    tixcraft_family = False
-    if 'tixcraft.com' in homepage:
-        tixcraft_family = True
-
-    if 'indievox.com' in homepage:
-        tixcraft_family = True
-
-    if 'ticketmaster.' in homepage:
-        tixcraft_family = True
+    tixcraft_family = homepage_platform == "tixcraft"
 
     if tixcraft_family:
         # Determine correct cookie domain and name based on homepage
         # Each site uses different session cookie names (Issue #207)
-        if 'ticketmaster.sg' in homepage:
+        if homepage_host == "ticketmaster.sg" or homepage_host.endswith(".ticketmaster.sg"):
             cookie_domain = "ticketmaster.sg"
             cookie_name = "TIXPUISID"
-        elif 'ticketmaster.com' in homepage:
+        elif homepage_host == "ticketmaster.com" or homepage_host.endswith(".ticketmaster.com"):
             cookie_domain = ".ticketmaster.com"
             cookie_name = "TIXUISID"
-        elif 'indievox.com' in homepage:
+        elif homepage_host == "indievox.com" or homepage_host.endswith(".indievox.com"):
             cookie_domain = "www.indievox.com"
             cookie_name = "IVUISID"
         else:
@@ -211,12 +218,12 @@ async def nodriver_goto_homepage(driver, config_dict):
                         domain=cookie_domain
                     ))
                     # Delete cookies from alternate domain to avoid conflicts
-                    if 'indievox.com' in homepage:
+                    if homepage_host == "indievox.com" or homepage_host.endswith(".indievox.com"):
                         await tab.send(cdp.network.delete_cookies(
                             name=cookie_name,
                             domain=".indievox.com"
                         ))
-                    if 'ticketmaster.sg' in homepage:
+                    if homepage_host == "ticketmaster.sg" or homepage_host.endswith(".ticketmaster.sg"):
                         await tab.send(cdp.network.delete_cookies(
                             name=cookie_name,
                             domain=".ticketmaster.sg"
@@ -270,7 +277,7 @@ async def nodriver_goto_homepage(driver, config_dict):
 
                 debug.log(f"[TIXCRAFT] {cookie_name} cookie set successfully (fallback method)")
 
-    if 'ibon.com' in homepage:
+    if homepage_platform == "ibon":
         # ibon fires a window.alert() on homepage load ("會員登入方式調整").
         # Register the global handler now so any future alert is auto-dismissed,
         # then clear the dialog that already opened during the driver.get() above
@@ -280,7 +287,7 @@ async def nodriver_goto_homepage(driver, config_dict):
 
         # Special handling for tour.ibon.com.tw:
         # Need to visit ticket.ibon.com.tw first to complete OAuth and get _at_e token
-        is_tour_ibon = 'tour.ibon.com.tw' in homepage
+        is_tour_ibon = homepage_host == "tour.ibon.com.tw"
         original_homepage = homepage
 
         if is_tour_ibon:
@@ -289,7 +296,12 @@ async def nodriver_goto_homepage(driver, config_dict):
 
             # Step 1: Visit ticket.ibon.com.tw homepage first
             try:
-                tab = await driver.get("https://ticket.ibon.com.tw/")
+                tab = await runtime_health.guarded_driver_get(
+                    driver,
+                    "https://ticket.ibon.com.tw/",
+                    config_dict,
+                    reason="tour_ibon_oauth_bootstrap",
+                )
                 await asyncio.sleep(random.uniform(1.5, 2.5))
                 # ticket.ibon homepage re-fires the same onload notice
                 await dismiss_pending_ibon_dialog(tab, config_dict)
@@ -322,7 +334,12 @@ async def nodriver_goto_homepage(driver, config_dict):
             debug.log(f"[TOUR IBON] Step 2: Navigating to tour.ibon homepage: {original_homepage}")
 
             try:
-                tab = await driver.get(original_homepage)
+                tab = await runtime_health.guarded_driver_get(
+                    driver,
+                    original_homepage,
+                    config_dict,
+                    reason="tour_ibon_return",
+                )
                 await asyncio.sleep(random.uniform(1.5, 2.5))
                 # Clear any onload dialog from tour.ibon homepage (no-op if none)
                 await dismiss_pending_ibon_dialog(tab, config_dict)
@@ -333,7 +350,7 @@ async def nodriver_goto_homepage(driver, config_dict):
         # 這樣可以避免完全中斷搶票流程
 
     # FunOne cookie injection (same pattern as TixCraft/iBon)
-    if 'tickets.funone.io' in homepage:
+    if homepage_platform == "funone":
         funone_cookie = config_dict["accounts"].get("funone_session_cookie", "").strip()
         if len(funone_cookie) > 1:
             debug.log(f"[FUNONE] Setting ticket_session cookie, length: {len(funone_cookie)}")
@@ -597,13 +614,30 @@ def _is_tixcraft_dom_url(current_url) -> bool:
     )
 
 
-def _get_trigger_runtime_state(current_url: str):
+def _get_trigger_runtime_state(current_url: str, tab=None):
     """Expose only the live TixCraft state needed by the refresh arbiter."""
 
     if not _is_tixcraft_family_url(current_url):
         return {}
     state = getattr(tixcraft_platform, "_state", None)
+    has_active_binding = getattr(state, "has_active_binding", None)
+    if tab is not None and callable(has_active_binding) and has_active_binding():
+        return tixcraft_platform._state_for_tab(tab)
+    current_state = getattr(state, "current", None)
+    if callable(current_state):
+        return current_state()
     return state if isinstance(state, dict) else {}
+
+
+def _call_trigger_runtime_state_provider(current_url: str, tab):
+    """Call legacy one-argument test/hot-reload providers compatibly."""
+
+    provider = _get_trigger_runtime_state
+    try:
+        inspect.signature(provider).bind(current_url, tab)
+    except (TypeError, ValueError):
+        return provider(current_url)
+    return provider(current_url, tab)
 
 
 def _get_runtime_ntp_coordinator(
@@ -693,7 +727,7 @@ def _maintain_tixcraft_refresh_runtime(
 
     if not _is_tixcraft_family_url(current_url):
         return ()
-    runtime_state = _get_trigger_runtime_state(current_url)
+    runtime_state = _call_trigger_runtime_state_provider(current_url, tab)
     if not runtime_state:
         return ()
     try:
@@ -877,11 +911,12 @@ def _mark_tixcraft_scheduled_reload_landed(
     current_url,
     config_dict,
     *,
+    tab=None,
     now_monotonic=None,
 ) -> None:
     """Advance leak/area cooldown after the refresh coordinator reloads."""
 
-    runtime_state = _get_trigger_runtime_state(current_url)
+    runtime_state = _call_trigger_runtime_state_provider(current_url, tab)
     if not runtime_state:
         return
     try:
@@ -1068,16 +1103,20 @@ async def _run_refresh_gate_health_watchdog(
         return False
 
     state["refresh_gate_health_next_probe_at"] = now + max(0.5, interval)
-    detection = await tixcraft_platform._detect_tixcraft_soft_block(
-        tab,
-        current_url,
-        config_dict,
-    )
+    platform_state = _call_trigger_runtime_state_provider(current_url, tab)
+    token = tixcraft_platform._state.bind(platform_state)
+    try:
+        detection = await tixcraft_platform._detect_tixcraft_soft_block(
+            tab,
+            current_url,
+            config_dict,
+        )
+    finally:
+        tixcraft_platform._state.reset_binding(token)
     blocked = bool(detection.get("blocked", False))
     if blocked:
         state["refresh_recovery_dispatch_required"] = True
         state["last_refresh_reload_decision"] = "soft_block_detected"
-    platform_state = getattr(tixcraft_platform, "_state", {})
     route_key = _refresh_route_key(current_url)
     health_confirmed = bool(
         not blocked
@@ -1280,7 +1319,7 @@ async def _request_refresh_datetime_reload(
     decision = await _get_trigger_arbiter(state).request_reload(
         tab,
         current_url=current_url,
-        runtime_state=_get_trigger_runtime_state(current_url),
+        runtime_state=_call_trigger_runtime_state_provider(current_url, tab),
         reason=reason,
         reload_callable=guarded_reload,
         config_dict=config_dict,
@@ -1292,6 +1331,7 @@ async def _request_refresh_datetime_reload(
         _mark_tixcraft_scheduled_reload_landed(
             current_url,
             config_dict,
+            tab=tab,
             now_monotonic=time.monotonic(),
         )
     return decision
@@ -1478,7 +1518,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
                 # a third scheduled request.
                 state["post_boundary_retry_pending"] = False
                 arbiter = _get_trigger_arbiter(state)
-                runtime_state = _get_trigger_runtime_state(current_url)
+                runtime_state = _call_trigger_runtime_state_provider(current_url, tab)
                 preflight = arbiter.can_reload(
                     tab,
                     current_url=current_url,
@@ -1979,7 +2019,7 @@ async def _run_main(args, resources):
         debug = util.create_debug_logger(config_dict)
         debug.log(f"[OCR INIT] Failed to initialize OCR: {exc}")
 
-    maxbot_last_reset_time = time.time()
+    maxbot_last_reset_time = time.monotonic()
     heartbeat_interval_sec = 5
     last_heartbeat_time = 0.0
     last_runtime_alive_log = 0.0
@@ -2006,7 +2046,7 @@ async def _run_main(args, resources):
             last_config_reload_check = loop_mono
             config_dict, config_mtime = await reload_config(config_dict, config_mtime, config_filepath)
 
-        heartbeat_now = time.time()
+        heartbeat_now = time.monotonic()
         if heartbeat_now - last_heartbeat_time >= heartbeat_interval_sec:
             last_heartbeat_time = heartbeat_now
             runtime_health.touch_heartbeat(heartbeat_filename)
@@ -2044,7 +2084,7 @@ async def _run_main(args, resources):
             continue
         else:
             if len(url) == 0:
-                now_mono = time.time()
+                now_mono = time.monotonic()
                 if now_mono - last_empty_url_log >= 2.0:
                     last_empty_url_log = now_mono
                     util.create_debug_logger(config_dict).log(
@@ -2069,8 +2109,25 @@ async def _run_main(args, resources):
                 cloudflare_fail_count = 0
             last_url = url
 
+        # Establish task-local, per-tab platform state before any paused,
+        # scheduled or recovery callback can dispatch platform helpers.
+        platform_key = platform_key_for_url(url)
+        platform_decision = platform_engine.before_dispatch(tab, url, config_dict)
+        if (
+            platform_decision.adapter is not None
+            and not platform_decision.allowed
+        ):
+            runtime_health.runtime_log(
+                "[PLATFORM] capability_gate",
+                config_dict,
+                platform=platform_decision.adapter.key,
+                reason=platform_decision.reason,
+                page_class=platform_decision.page_class.value,
+                current_url=url,
+            )
+
         if is_maxbot_paused:
-            if 'kktix.c' in url:
+            if platform_key == "kktix":
                 await nodriver_kktix_paused_main(tab, url, config_dict)
             # sleep more when paused.
             await asyncio.sleep(0.1)
@@ -2110,21 +2167,6 @@ async def _run_main(args, resources):
                     cloudflare_checked = False  # Allow retry on next loop iteration
                     if cloudflare_fail_count >= 3:
                         print("[CLOUDFLARE] Max failures reached, waiting for URL change to retry")
-
-        platform_key = platform_key_for_url(url)
-        platform_decision = platform_engine.before_dispatch(tab, url, config_dict)
-        if (
-            platform_decision.adapter is not None
-            and not platform_decision.allowed
-        ):
-            runtime_health.runtime_log(
-                "[PLATFORM] capability_gate",
-                config_dict,
-                platform=platform_decision.adapter.key,
-                reason=platform_decision.reason,
-                page_class=platform_decision.page_class.value,
-                current_url=url,
-            )
 
         # for kktix.cc and kktix.com
         if platform_key == "kktix":
@@ -2201,7 +2243,11 @@ async def _run_main(args, resources):
             tab = await nodriver_fansigo_main(tab, url, config_dict)
 
         # FANSI GO Cognito login
-        if FANSIGO_COGNITO_DOMAIN in url:
+        try:
+            current_hostname = (urllib.parse.urlsplit(url).hostname or "").casefold().rstrip(".")
+        except ValueError:
+            current_hostname = ""
+        if platform_key == "fansigo" and current_hostname == FANSIGO_COGNITO_DOMAIN:
             await nodriver_fansigo_signin(tab, url, config_dict)
 
         # for facebook

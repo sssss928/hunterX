@@ -518,8 +518,8 @@ def get_related_instance_ids(profile_name):
 
 
 def wait_for_instances_to_stop(instance_ids, timeout_sec=CONST_INSTANCE_STOP_WAIT_SEC):
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
         alive_ids = [instance_id for instance_id in instance_ids if is_instance_alive(instance_id)]
         if not alive_ids:
             return []

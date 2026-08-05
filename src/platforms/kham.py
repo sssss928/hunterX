@@ -20,8 +20,10 @@ from zendriver import cdp
 
 import util
 import performance
+from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
+from runtime_health import guarded_get
 from nodriver_common import (
     asyncio_sleep_with_pause_check,
     check_and_handle_pause,
@@ -71,7 +73,7 @@ __all__ = [
 ]
 
 # Module-level state (replaces global kham_dict)
-_state = {}
+_state = PlatformStateProxy("kham")
 
 
 def _kham_state_defaults():
@@ -98,7 +100,7 @@ def _get_auto_reload_interval(config_dict):
 async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
     debug = util.create_debug_logger(config_dict)
     interval = _get_auto_reload_interval(config_dict)
-    now = time.time()
+    now = time.monotonic()
     current_url = getattr(getattr(tab, "target", None), "url", "") or ""
     url_key = f"{state_key}_url"
     next_key = f"{state_key}_next_at"
@@ -539,7 +541,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
         try:
             debug.log("[KHAM LOGIN] Starting OCR captcha processing...")
 
-            ocr_start_time = time.time()
+            ocr_start_time = time.monotonic()
 
             # Get captcha image using canvas
             img_base64 = None
@@ -569,7 +571,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
             if img_base64:
                 try:
                     ocr_answer = ocr.classification(img_base64)
-                    ocr_done_time = time.time()
+                    ocr_done_time = time.monotonic()
                     ocr_elapsed_time = ocr_done_time - ocr_start_time
                     debug.log(f"[KHAM LOGIN] OCR elapsed time: {ocr_elapsed_time:.3f}s")
                 except Exception as exc:
@@ -616,7 +618,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
 
     return ret
 
-async def nodriver_kham_go_buy_redirect(tab, domain_name):
+async def nodriver_kham_go_buy_redirect(tab, domain_name, config_dict=None):
     """
     Click the "Go Buy" button on product page
     Reference: chrome_tixcraft.py kham_go_buy_redirect (line 8449-8461)
@@ -651,8 +653,12 @@ async def nodriver_kham_go_buy_redirect(tab, domain_name):
             ''')
 
             if next_url:
-                await tab.get(next_url)
-                return True
+                return await guarded_get(
+                    tab,
+                    next_url,
+                    config_dict,
+                    reason="kham_purchase_redirect",
+                )
         except Exception:
             pass
 
@@ -1303,7 +1309,7 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
             is_clicked = await _kham_click_submit_button(tab)
             if is_clicked:
                 _state["kham_auto_submit_clicked"] = True
-                _state["kham_last_auto_submit_at"] = time.time()
+                _state["kham_last_auto_submit_at"] = time.monotonic()
                 print("[AUTO SUBMIT] Submit button clicked successfully!")
             else:
                 print("[AUTO SUBMIT] Submit button not found")
@@ -1729,7 +1735,7 @@ async def nodriver_kham_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
     if ocr:
         import time
         perf_trace = performance.PerformanceTrace("kham_captcha")
-        ocr_start_time = time.time()
+        ocr_start_time = time.monotonic()
 
         # Get captcha image using DOMSnapshot (shared with ibon)
         img_base64 = await nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict, perf_trace=perf_trace)
@@ -1742,7 +1748,7 @@ async def nodriver_kham_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
             except Exception as exc:
                 debug.log("OCR classification error:", exc)
 
-        ocr_done_time = time.time()
+        ocr_done_time = time.monotonic()
         ocr_elapsed_time = ocr_done_time - ocr_start_time
         debug.log(f"OCR elapsed time: {ocr_elapsed_time:.3f}s")
     else:
@@ -2119,8 +2125,14 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
             if config_homepage and not is_config_homepage_also_home and config_homepage.lower() != url.lower():
                 debug.log(f"[KHAM LOGIN] Redirecting to target: {config_homepage}")
                 try:
-                    await tab.get(config_homepage)
-                    return tab
+                    navigated = await guarded_get(
+                        tab,
+                        config_homepage,
+                        config_dict,
+                        reason="kham_login_homepage_recovery",
+                    )
+                    if navigated:
+                        return tab
                 except Exception as e:
                     debug.log(f"[KHAM LOGIN] Redirect failed: {e}")
             break
@@ -2165,7 +2177,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
         await nodriver_kham_check_realname_dialog(tab, config_dict)
 
         # Click buy button
-        await nodriver_kham_go_buy_redirect(tab, domain_name)
+        await nodriver_kham_go_buy_redirect(tab, domain_name, config_dict)
 
     # Activity Group Item page (UTK0201_041.aspx?AGID=)
     # This page is a standard table.eventTABLE listing multiple performances /
@@ -2195,7 +2207,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
             await nodriver_kham_check_realname_dialog(tab, config_dict)
 
             # Click buy button
-            await nodriver_kham_go_buy_redirect(tab, domain_name)
+            await nodriver_kham_go_buy_redirect(tab, domain_name, config_dict)
             await tab.sleep(1.0)
 
             # Check if page changed after clicking buy button

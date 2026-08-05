@@ -6,10 +6,13 @@ import asyncio
 import json
 import random
 import time
+from urllib.parse import urlsplit
 
 import util
+from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
+from runtime_health import guarded_get
 from nodriver_common import (
     check_and_handle_pause,
     handle_cloudflare_challenge,
@@ -41,7 +44,7 @@ __all__ = [
     "is_cityline_login_page",
 ]
 
-_state = {}
+_state = PlatformStateProxy("cityline")
 
 
 def _cityline_state_defaults():
@@ -67,7 +70,14 @@ def _ensure_cityline_state_defaults():
 
 def is_cityline_login_page(url):
     """True for global and Hong Kong Cityline member login pages."""
-    return 'cityline.com' in url and '/Login.html' in url
+    try:
+        hostname = (urlsplit(url).hostname or "").casefold().rstrip(".")
+    except ValueError:
+        return False
+    is_cityline = hostname in {"cityline.com", "cityline.com.hk"} or any(
+        hostname.endswith(f".{host}") for host in ("cityline.com", "cityline.com.hk")
+    )
+    return is_cityline and "/login.html" in (urlsplit(url).path or "").casefold()
 
 
 async def nodriver_cityline_auto_retry_access(tab, url, config_dict):
@@ -113,7 +123,7 @@ async def nodriver_cityline_login(tab, cityline_account, config_dict):
         # Step 2: Solve Turnstile if needed, then auto-click login button (email submit)
         # Once OTP is sent, wait for URL change (login success) - do not click again
         if _state.get("otp_sent", False):
-            now = time.time()
+            now = time.monotonic()
             last_log = _state.get("otp_wait_last_log", 0)
             if now - last_log >= 10:
                 debug.log("[CITYLINE LOGIN] Waiting for OTP entry (URL will change on success)...")
@@ -993,7 +1003,7 @@ async def nodriver_cityline_main(tab, url, config_dict):
         ]
         if not homepage_is_root:
             debug = util.create_debug_logger(config_dict)
-            current_time = time.time()
+            current_time = time.monotonic()
             last_redirect_time = _state.get("last_homepage_redirect_time", 0)
             redirect_interval = get_auto_reload_interval(config_dict, default=3)
             if redirect_interval <= 0:
@@ -1002,10 +1012,16 @@ async def nodriver_cityline_main(tab, url, config_dict):
                 debug.log(f"[CITYLINE] Redirecting to target page: {target_url}")
                 try:
                     _state["last_homepage_redirect_time"] = current_time
-                    await tab.get(target_url)
-                    await asyncio.sleep(random.uniform(1.5, 2.5))
-                    # Update URL after redirect
-                    url = await tab.evaluate('window.location.href')
+                    navigated = await guarded_get(
+                        tab,
+                        target_url,
+                        config_dict,
+                        reason="cityline_homepage_recovery",
+                    )
+                    if navigated:
+                        await asyncio.sleep(random.uniform(1.5, 2.5))
+                        # Update URL after redirect
+                        url = await tab.evaluate('window.location.href')
                 except Exception as exc:
                     debug.log(f"[CITYLINE ERROR] Redirect failed: {exc}")
 

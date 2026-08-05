@@ -18,8 +18,11 @@ from zendriver import cdp
 
 import util
 import performance
+from platform_contract import PlatformStateProxy, platform_state_for_tab
+from platform_registry import platform_key_for_url
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
+from runtime_health import guarded_get
 from nodriver_common import (
     asyncio_sleep_with_pause_check,
     check_and_handle_pause,
@@ -74,7 +77,7 @@ __all__ = [
 ]
 
 # Module-level state (replaces global ibon_dict)
-_state = {}
+_state = PlatformStateProxy("ibon")
 
 
 def _ibon_filter_enabled_purchase_buttons(purchase_buttons, config_dict, debug=None, log_prefix="[IBON DATE]"):
@@ -126,7 +129,7 @@ def _get_ibon_ocr_instance(config_dict, debug=None):
     )
 
 
-async def register_ibon_alert_handler(tab, config_dict):
+async def _register_ibon_alert_handler_impl(tab, config_dict):
     """
     Register the global JavaScriptDialogOpening handler for ibon native alerts.
 
@@ -145,14 +148,19 @@ async def register_ibon_alert_handler(tab, config_dict):
     if _state["alert_handler_registered"]:
         return
 
-    async def handle_ibon_alert(event):
+    bound_state = _state.current()
+
+    async def _handle_ibon_alert(event):
         # Skip alert handling when bot is paused (let user handle manually)
         if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_FILE)):
             return
 
+        current_url = tab.target.url if (tab and hasattr(tab, 'target') and tab.target) else ""
+        if platform_key_for_url(current_url) != "ibon":
+            return
+
         # On checkout page, only auto-dismiss known sold-out/failure alerts.
         # Payment confirmations and other critical prompts require user action.
-        current_url = tab.target.url if (tab and hasattr(tab, 'target') and tab.target) else ""
         if '/utk02/utk0206_' in current_url.lower():
             checkout_safe_keywords = [
                 "已售完", "售完", "別人搶先一步", "已無可配座位",
@@ -183,6 +191,13 @@ async def register_ibon_alert_handler(tab, config_dict):
                 else:
                     debug.log(f"[IBON ALERT] Failed to dismiss alert: {dismiss_exc}")
 
+    async def handle_ibon_alert(event):
+        token = _state.bind(bound_state)
+        try:
+            return await _handle_ibon_alert(event)
+        finally:
+            _state.reset_binding(token)
+
     try:
         tab.add_handler(cdp.page.JavascriptDialogOpening, handle_ibon_alert)
         _state["alert_handler_registered"] = True
@@ -190,6 +205,16 @@ async def register_ibon_alert_handler(tab, config_dict):
     except Exception as handler_exc:
         debug.log(f"[IBON ALERT][DEGRADED] Failed to register alert handler: {handler_exc}")
         debug.log("[IBON ALERT][DEGRADED] ibon homepage alerts will NOT be auto-dismissed until next retry")
+
+
+async def register_ibon_alert_handler(tab, config_dict):
+    """Register the handler against the tab's isolated runtime mapping."""
+
+    token = _state.bind(platform_state_for_tab(tab, "ibon"))
+    try:
+        return await _register_ibon_alert_handler_impl(tab, config_dict)
+    finally:
+        _state.reset_binding(token)
 
 
 async def dismiss_pending_ibon_dialog(tab, config_dict):
@@ -311,10 +336,10 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
     import time
     max_wait = 3  # Maximum wait (safety limit)
     check_interval = 0.1  # Fast polling for quick response
-    start_time = time.time()
+    start_time = time.monotonic()
     button_found = False
 
-    while (time.time() - start_time) < max_wait:
+    while (time.monotonic() - start_time) < max_wait:
         try:
             # Use CDP search to check button presence (penetrates Shadow DOM)
             search_id, result_count = await tab.send(cdp.dom.perform_search(
@@ -330,7 +355,7 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
 
             if result_count > 0:
                 button_found = True
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - start_time
                 debug.log(f"[IBON DATE PIERCE] Found {result_count} button(s) after {elapsed:.2f}s")
                 break
         except Exception:
@@ -339,7 +364,7 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
         await tab.sleep(check_interval)
 
     if not button_found:
-        elapsed = time.time() - start_time
+        elapsed = time.monotonic() - start_time
         debug.log(f"[IBON DATE PIERCE] No buttons found after {elapsed:.1f}s, proceeding with search anyway...")
 
     # Step 4: Get document with pierce=True to enable Shadow DOM traversal
@@ -641,12 +666,12 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
     import time
     max_wait = 3  # Maximum wait (safety limit)
     check_interval = 0.1  # Fast polling for quick response
-    start_time = time.time()
+    start_time = time.monotonic()
     content_appeared = False
 
     debug.log("[IBON DATE] Auto-detecting purchase buttons...")
 
-    while (time.time() - start_time) < max_wait:
+    while (time.monotonic() - start_time) < max_wait:
         try:
             # Use CDP search to check button presence (penetrates Shadow DOM, same as pierce method)
             search_id, result_count = await tab.send(cdp.dom.perform_search(
@@ -662,7 +687,7 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
 
             if result_count > 0:
                 content_appeared = True
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - start_time
                 debug.log(f"[IBON DATE] Found {result_count} purchase button(s) after {elapsed:.2f}s")
                 break
         except Exception:
@@ -670,7 +695,7 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
         await tab.sleep(check_interval)
 
     if not content_appeared:
-        elapsed = time.time() - start_time
+        elapsed = time.monotonic() - start_time
         debug.log(f"[IBON DATE] No buttons found after {elapsed:.1f}s, proceeding with snapshot anyway...")
 
     # Capture DOM snapshot to penetrate closed Shadow DOM and search for purchase buttons
@@ -1533,7 +1558,7 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
         # #322: 0.05 polling so detection reacts to render as soon as the table settles.
         # Keep the stability guard below to avoid reading a half-rendered area table.
         check_interval = 0.05  # Polling interval
-        start_time = time.time()
+        start_time = time.monotonic()
         min_tr_count = 3  # Minimum TR elements to consider page loaded (header + at least 1 data row)
 
         debug.log("[IBON AREA] Auto-detecting area table...")
@@ -1541,7 +1566,7 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
         last_tr_count = 0
         stable_count = 0  # Track if TR count is stable (page finished loading)
 
-        while (time.time() - start_time) < max_wait:
+        while (time.monotonic() - start_time) < max_wait:
             # Check if URL changed to verification page (UTK0201_0.aspx)
             try:
                 current_url = tab.target.url
@@ -1574,7 +1599,7 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
 
                 # Page loaded: minimum TR count reached AND stable for 2 consecutive checks
                 if tr_count >= min_tr_count and stable_count >= 1:
-                    elapsed = time.time() - start_time
+                    elapsed = time.monotonic() - start_time
                     debug.log(f"[IBON AREA] Found {tr_count} TR elements after {elapsed:.2f}s")
                     break
             except Exception:
@@ -2653,7 +2678,7 @@ async def nodriver_ibon_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
             await asyncio.sleep(random.uniform(0.15, 0.25))
 
     # Get captcha image and do OCR
-    ocr_start_time = time.time()
+    ocr_start_time = time.monotonic()
 
     img_base64 = await nodriver_ibon_get_captcha_image_from_shadow_dom(tab, config_dict, perf_trace=perf_trace)
 
@@ -2677,7 +2702,7 @@ async def nodriver_ibon_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
         except Exception as exc:
             debug.log(f"[CAPTCHA OCR] OCR classification failed: {exc}")
 
-    ocr_done_time = time.time()
+    ocr_done_time = time.monotonic()
     ocr_elapsed_time = ocr_done_time - ocr_start_time
 
     debug.log(f"[CAPTCHA OCR] Processing time: {ocr_elapsed_time:.3f}s")
@@ -2950,9 +2975,9 @@ async def nodriver_ibon_wait_for_select_elements(tab, config_dict, max_wait_time
     """
     debug = util.create_debug_logger(config_dict)
     wait_interval = 0.2
-    start_time = time.time()
+    start_time = time.monotonic()
 
-    while time.time() - start_time < max_wait_time:
+    while time.monotonic() - start_time < max_wait_time:
         try:
             select_count = await tab.evaluate('''
                 (function() {
@@ -2968,7 +2993,7 @@ async def nodriver_ibon_wait_for_select_elements(tab, config_dict, max_wait_time
             ''')
             if select_count and select_count > 0:
                 if debug.enabled:
-                    elapsed = time.time() - start_time
+                    elapsed = time.monotonic() - start_time
                     debug.log(f"[IBON] Page loaded, found {select_count} select element(s) after {elapsed:.2f}s")
                 return select_count
         except Exception:
@@ -3136,8 +3161,12 @@ async def nodriver_ibon_navigate_on_sold_out(tab, config_dict):
                 # Navigate to Event page (area selection)
                 event_url = '/'.join(parts[:3] + ['Event', parts[4], parts[5]])
                 debug.log(f"[IBON] Sold out - navigating to area selection: {event_url}")
-                await tab.get(event_url)
-                navigation_success = True
+                navigation_success = await guarded_get(
+                    tab,
+                    event_url,
+                    config_dict,
+                    reason="ibon_confirmed_sold_out_recovery",
+                )
 
         # Old format: orders.ibon.com.tw/application/UTK02/UTK0202_.aspx?PERFORMANCE_PRICE_AREA_ID=xxx
         # Note: Old .aspx pages require PRODUCT_ID and other parameters that are hard to reconstruct.
@@ -3913,13 +3942,13 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
     if 'queue-it.net' in url_lower:
         if _state.get("queue_it_enter_time") is None:
             import time as _time
-            _state["queue_it_enter_time"] = _time.time()
+            _state["queue_it_enter_time"] = _time.monotonic()
             debug.log("[IBON] Queue-IT entered, waiting...")
         return False
     else:
         if _state.get("queue_it_enter_time") is not None:
             import time as _time
-            elapsed = _time.time() - _state["queue_it_enter_time"]
+            elapsed = _time.monotonic() - _state["queue_it_enter_time"]
             debug.log(f"[IBON] Queue-IT passed (waited {elapsed:.1f}s)")
             _state["queue_it_enter_time"] = None
 
@@ -3966,9 +3995,15 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
         ibon_base = "https://ticket.ibon.com.tw/"
         debug.log(f"[IBON LOGIN] Navigating to ibon base URL to activate cookie session")
         try:
-            await tab.get(ibon_base)
-            await asyncio.sleep(random.uniform(1.5, 2.0))
-            await dismiss_pending_ibon_dialog(tab, config_dict)
+            navigated = await guarded_get(
+                tab,
+                ibon_base,
+                config_dict,
+                reason="ibon_cookie_session_activation",
+            )
+            if navigated:
+                await asyncio.sleep(random.uniform(1.5, 2.0))
+                await dismiss_pending_ibon_dialog(tab, config_dict)
         except Exception as e:
             debug.log(f"[IBON LOGIN] Navigation to ibon base failed: {e}")
 
@@ -4006,7 +4041,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
         should_redirect = not is_homepage_same_as_current
 
         if should_redirect:
-            current_time = time.time()
+            current_time = time.monotonic()
             last_redirect_time = _state.get("last_homepage_redirect_time", 0)
             redirect_interval = get_auto_reload_interval(config_dict, default=3)
             if redirect_interval <= 0:
@@ -4017,9 +4052,15 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                 debug.log(f"[IBON] Redirecting to config homepage: {config_homepage}")
                 try:
                     _state["last_homepage_redirect_time"] = current_time
-                    await tab.get(config_homepage)
-                    await asyncio.sleep(2)
-                    debug.log(f"[IBON] Successfully redirected to: {config_homepage}")
+                    navigated = await guarded_get(
+                        tab,
+                        config_homepage,
+                        config_dict,
+                        reason="ibon_homepage_recovery",
+                    )
+                    if navigated:
+                        await asyncio.sleep(2)
+                        debug.log(f"[IBON] Successfully redirected to: {config_homepage}")
                 except Exception as redirect_exc:
                     debug.log(f"[IBON] Redirect failed: {redirect_exc}")
 
@@ -4198,7 +4239,12 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                                     "area_id": livemap_selected['area_id'],
                                     "area_name": livemap_selected['area_name'],
                                 }
-                                await tab.get(skip_url)
+                                await guarded_get(
+                                    tab,
+                                    skip_url,
+                                    config_dict,
+                                    reason="ibon_livemap_area_selection",
+                                )
                                 return False
                             else:
                                 livemap_debug.log("[IBON LIVEMAP] No matching area after filtering, falling back to DOM flow")

@@ -10,6 +10,7 @@ from urllib.parse import quote, unquote
 from zendriver import cdp
 
 import util
+from platform_contract import PlatformStateProxy
 from nodriver_common import (
     check_and_handle_pause,
     play_sound_while_ordering,
@@ -18,6 +19,7 @@ from nodriver_common import (
 )
 from nodriver_common import CONST_FROM_TOP_TO_BOTTOM
 from reload_guard import guarded_reload
+from runtime_health import guarded_get
 
 # =============================================================================
 # FANSI GO Platform Support
@@ -45,7 +47,7 @@ __all__ = [
 ]
 
 # Module-level state (replaces global fansigo_dict)
-_state = {}
+_state = PlatformStateProxy("fansigo")
 
 
 def _fansigo_state_defaults():
@@ -410,7 +412,12 @@ async def nodriver_fansigo_click_show(tab, show_dict, config_dict):
 
     debug.log(f"[FANSIGO] Navigating to show: {href}")
 
-    await tab.get(href)
+    await guarded_get(
+        tab,
+        href,
+        config_dict,
+        reason="fansigo_show_selection",
+    )
 
 def fansigo_match_by_keyword(items: list, keyword_string: str, text_key: str = "text") -> dict:
     """Match item by keyword string

@@ -7,6 +7,7 @@ page safety, capability evidence and per-instance leak-watch state.
 
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass, field
 from enum import Enum
 import inspect
@@ -16,6 +17,107 @@ from urllib.parse import urlsplit
 from leak_watch import LeakWatchScheduler
 from page_classifier import PageClass
 from reload_guard import ReloadGuard
+
+
+_platform_state_context = contextvars.ContextVar("platform_runtime_state", default=None)
+_default_platform_states: dict[str, dict[str, Any]] = {}
+
+
+def activate_platform_state(platform_key: str, state: dict[str, Any]) -> None:
+    """Bind a PlatformEngine-owned mapping to the current dispatch task."""
+
+    _platform_state_context.set((str(platform_key), state))
+
+
+def clear_active_platform_state() -> None:
+    """Fail closed when dispatch leaves every registered platform family."""
+
+    _platform_state_context.set(None)
+
+
+def platform_state_for_tab(tab: Any, platform_key: str) -> dict[str, Any]:
+    """Resolve the same per-tab mapping used by normal PlatformEngine dispatch."""
+
+    from platform_adapters import adapter_for_key
+    from platform_engine import platform_engine
+
+    adapter = adapter_for_key(platform_key)
+    if adapter is None:
+        raise RuntimeError(f"Platform adapter is unavailable: {platform_key}")
+    return platform_engine.state_for(tab, adapter).platform_data
+
+
+class PlatformStateProxy(dict):
+    """Dict-compatible view of per-tab platform state.
+
+    Existing platform helpers intentionally keep their small ``_state`` API.
+    Production dispatch resolves that API to PlatformEngine-owned storage,
+    while direct helper tests and hot-reload callers retain an isolated
+    per-platform fallback mapping.
+    """
+
+    def __init__(self, platform_key: str) -> None:
+        super().__init__()
+        self.platform_key = str(platform_key)
+
+    def current(self) -> dict[str, Any]:
+        binding = _platform_state_context.get()
+        if binding is not None and binding[0] == self.platform_key:
+            return binding[1]
+        return _default_platform_states.setdefault(self.platform_key, {})
+
+    def has_active_binding(self) -> bool:
+        binding = _platform_state_context.get()
+        return binding is not None and binding[0] == self.platform_key
+
+    def bind(self, state: dict[str, Any]):
+        return _platform_state_context.set((self.platform_key, state))
+
+    @staticmethod
+    def reset_binding(token) -> None:
+        _platform_state_context.reset(token)
+
+    def __getitem__(self, key):
+        return self.current()[key]
+
+    def __setitem__(self, key, value) -> None:
+        self.current()[key] = value
+
+    def __delitem__(self, key) -> None:
+        del self.current()[key]
+
+    def __iter__(self):
+        return iter(self.current())
+
+    def __len__(self) -> int:
+        return len(self.current())
+
+    def __contains__(self, key) -> bool:
+        return key in self.current()
+
+    def get(self, key, default=None):
+        return self.current().get(key, default)
+
+    def setdefault(self, key, default=None):
+        return self.current().setdefault(key, default)
+
+    def pop(self, key, *default):
+        return self.current().pop(key, *default)
+
+    def clear(self) -> None:
+        self.current().clear()
+
+    def update(self, *args, **kwargs) -> None:
+        self.current().update(*args, **kwargs)
+
+    def keys(self):
+        return self.current().keys()
+
+    def items(self):
+        return self.current().items()
+
+    def values(self):
+        return self.current().values()
 
 
 class CapabilityStatus(str, Enum):
@@ -53,6 +155,7 @@ class PlatformRuntimeState:
     previous_url: str = ""
     cycle_count: int = 0
     recovery_count: int = 0
+    platform_data: dict[str, Any] = field(default_factory=dict)
 
     def backfill(self) -> None:
         """Repair state restored by hot reload without replacing live owners."""
@@ -69,11 +172,14 @@ class PlatformRuntimeState:
         self.previous_url = str(self.previous_url or "")
         self.cycle_count = max(0, int(self.cycle_count or 0))
         self.recovery_count = max(0, int(self.recovery_count or 0))
+        if not isinstance(self.platform_data, dict):
+            self.platform_data = {}
 
     def reset_attempt(self) -> None:
         self.leak_scheduler.reset_for_recovery()
         self.current_page = PageClass.UNKNOWN
         self.previous_url = ""
+        self.platform_data.clear()
         self.recovery_count += 1
 
 

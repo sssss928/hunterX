@@ -18,8 +18,11 @@ import webbrowser
 from zendriver import cdp
 
 import util
+from platform_contract import PlatformStateProxy
+from platform_registry import platform_key_for_url
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
+from runtime_health import guarded_get
 from nodriver_common import (
     check_and_handle_pause,
     nodriver_check_checkbox,
@@ -54,7 +57,7 @@ __all__ = [
 ]
 
 # Module-level state (replaces global kktix_dict)
-_state = {}
+_state = PlatformStateProxy("kktix")
 
 
 def _kktix_state_defaults():
@@ -96,7 +99,7 @@ def _get_auto_reload_interval(config_dict):
 async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
     debug = util.create_debug_logger(config_dict)
     interval = _get_auto_reload_interval(config_dict)
-    now = time.time()
+    now = time.monotonic()
     current_url = getattr(getattr(tab, "target", None), "url", "") or ""
     url_key = f"{state_key}_url"
     next_key = f"{state_key}_next_at"
@@ -161,7 +164,7 @@ async def nodriver_kktix_check_queue_page(tab, config_dict):
         pass
 
     if is_queue_page:
-        current_time = time.time()
+        current_time = time.monotonic()
         if current_time - _state.get("queue_log_time", 0) > 10:
             _state["queue_log_time"] = current_time
             debug.log(f"[KKTIX QUEUE] In waiting room, page auto-refreshes, do not reload. {wait_text}".rstrip())
@@ -257,9 +260,14 @@ async def nodriver_kktix_signin(tab, url, config_dict):
                     elif (current_url.endswith('/') or '/users/' in current_url) and target_url != current_url:
                         # If on homepage or user page, manually redirect to back_to URL
                         debug.log(f"[KKTIX SIGNIN] Currently on homepage/user page, redirecting to: {target_url}")
-                        await tab.get(target_url)
-                        await asyncio.sleep(random.uniform(1.2, 2.3))
-                        has_redirected = True
+                        has_redirected = await guarded_get(
+                            tab,
+                            target_url,
+                            config_dict,
+                            reason="kktix_signin_return",
+                        )
+                        if has_redirected:
+                            await asyncio.sleep(random.uniform(1.2, 2.3))
                     else:
                         debug.log(f"[KKTIX SIGNIN] Already on target page: {current_url}")
             except Exception as redirect_error:
@@ -297,7 +305,7 @@ async def nodriver_kktix_redirect_to_signin_if_guest(tab, url, config_dict):
     if not is_guest:
         return False
 
-    current_time = time.time()
+    current_time = time.monotonic()
     redirect_interval = get_auto_reload_interval(config_dict, default=3)
     if redirect_interval <= 0:
         redirect_interval = 3
@@ -306,7 +314,12 @@ async def nodriver_kktix_redirect_to_signin_if_guest(tab, url, config_dict):
         sign_in_url = "https://kktix.com/users/sign_in?back_to=" + urllib.parse.quote(url, safe='')
         debug.log("[KKTIX] Guest session on registration page, redirecting to sign_in")
         try:
-            await tab.get(sign_in_url)
+            await guarded_get(
+                tab,
+                sign_in_url,
+                config_dict,
+                reason="kktix_guest_signin",
+            )
         except Exception as exc:
             debug.log(f"[KKTIX] Redirect to sign_in failed: {exc}")
 
@@ -1182,7 +1195,7 @@ async def nodriver_kktix_check_guest_modal(tab, config_dict, force_check=False):
 
     # Track if we've already checked for guest modal (skip wait on subsequent checks)
     is_first_check = not _state.get("guest_modal_checked", False) if _state else True
-    current_time = time.time()
+    current_time = time.monotonic()
     if _state and not force_check and not is_first_check:
         last_check_time = _state.get("guest_modal_last_check_time", 0)
         if current_time - last_check_time < 3:
@@ -2027,11 +2040,15 @@ async def nodriver_kktix_main(tab, url, config_dict):
     debug = util.create_debug_logger(config_dict)
 
     _ensure_kktix_state_defaults()
+    bound_state = _state.current()
 
     # Global alert handler - auto-dismiss KKTIX sold-out alerts
-    async def handle_kktix_alert(event):
+    async def _handle_kktix_alert(event):
         # Skip alert handling when bot is paused (let user handle manually)
         if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_FILE)):
+            return
+        current_url = getattr(getattr(tab, "target", None), "url", "") or ""
+        if platform_key_for_url(current_url) != "kktix":
             return
 
         debug.log(f"[KKTIX ALERT] Alert detected: '{event.message}'")
@@ -2074,6 +2091,13 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 else:
                     debug.log(f"[KKTIX ALERT] Failed to dismiss alert: {dismiss_exc}")
 
+    async def handle_kktix_alert(event):
+        token = _state.bind(bound_state)
+        try:
+            return await _handle_kktix_alert(event)
+        finally:
+            _state.reset_binding(token)
+
     # Register global alert handler (only once per session)
     if not _state.get("alert_handler_registered", False):
         try:
@@ -2102,7 +2126,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
             homepage = config_dict["homepage"]
             homepage_is_root = homepage.rstrip('/') in ['https://kktix.com', 'https://kktix.cc']
             if not homepage_is_root:
-                current_time = time.time()
+                current_time = time.monotonic()
                 last_redirect_time = _state.get("last_homepage_redirect_time", 0)
                 redirect_interval = get_auto_reload_interval(config_dict, default=3)
                 if redirect_interval <= 0:
@@ -2110,7 +2134,12 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 if current_time - last_redirect_time > redirect_interval:
                     try:
                         _state["last_homepage_redirect_time"] = current_time
-                        await tab.get(homepage)
+                        await guarded_get(
+                            tab,
+                            homepage,
+                            config_dict,
+                            reason="kktix_homepage_recovery",
+                        )
                     except Exception:
                         pass
 
@@ -2145,7 +2174,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                     debug.log(f"[KKTIX] Post-modal reload failed: {reload_exc}")
                 return False
 
-            _state["start_time"] = time.time()
+            _state["start_time"] = time.monotonic()
 
             is_dom_ready = False
             try:
@@ -2257,14 +2286,14 @@ async def nodriver_kktix_main(tab, url, config_dict):
                     debug.log(f"[KKTIX CHECK] is_ticket_already_selected: {is_ticket_already_selected}")
 
                 if is_ticket_already_selected and config_dict["kktix"].get("auto_press_next_step_button", False):
-                    now = time.time()
+                    now = time.monotonic()
                     if now - _state.get("last_auto_next_on_selected_time", 0) >= 0.6:
                         _state["last_auto_next_on_selected_time"] = now
                         debug.log("[KKTIX] Ticket quantity already selected, pressing next button")
                         try:
                             await nodriver_kktix_check_guest_modal(tab, config_dict, force_check=True)
                             await nodriver_kktix_press_next_button(tab, config_dict)
-                            _state["done_time"] = time.time()
+                            _state["done_time"] = time.monotonic()
                         except Exception as exc:
                             debug.log(f"[KKTIX] Auto next after selected ticket failed: {exc}")
 
@@ -2272,7 +2301,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 if config_dict["kktix"]["auto_fill_ticket_number"] and not is_ticket_already_selected:
                     debug.log("[KKTIX] Executing ticket selection logic...")
                     _state["fail_list"], _state["played_sound_ticket"] = await nodriver_kktix_reg_new_main(tab, config_dict, _state["fail_list"], _state["played_sound_ticket"])
-                    _state["done_time"] = time.time()
+                    _state["done_time"] = time.monotonic()
         else:
             is_event_page = False
             if '/events/' in url:

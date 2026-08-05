@@ -12,8 +12,10 @@ import urllib.parse
 from zendriver import cdp
 
 import util
+from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
+from runtime_health import guarded_get
 from nodriver_common import (
     CONST_MAXBOT_ANSWER_ONLINE_FILE,
     check_and_handle_pause,
@@ -48,7 +50,7 @@ __all__ = [
     "nodriver_ticketplus_main",
 ]
 
-_state = {}
+_state = PlatformStateProxy("ticketplus")
 
 
 def _ticketplus_state_defaults():
@@ -736,8 +738,12 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                         event_id = current_url.split('/activity/')[-1].split('/')[0].split('?')[0]
                         order_url = 'https://ticketplus.com.tw/order/' + event_id + '/' + session_id
                         debug.log(f"[TicketPlus DATE] Vue data: date={target_session.get('date', '')} sessionId={session_id}")
-                        await tab.get(order_url)
-                        is_date_clicked = True
+                        is_date_clicked = await guarded_get(
+                            tab,
+                            order_url,
+                            config_dict,
+                            reason="ticketplus_date_selection",
+                        )
 
         except Exception as exc:
             debug.log(f"[TicketPlus DATE] Vue data navigation failed: {exc}")
@@ -950,11 +956,11 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
         auto_reload_interval = get_auto_reload_interval(config_dict, default=5)
         max_vue_wait = max(6.0, min(15.0, auto_reload_interval * 2))
         vue_check_interval = 0.15
-        vue_wait_start = time.time()
+        vue_wait_start = time.monotonic()
         vue_elements_found = False
         last_log_time = 0
 
-        while time.time() - vue_wait_start < max_vue_wait:
+        while time.monotonic() - vue_wait_start < max_vue_wait:
             if await check_and_handle_pause(config_dict):
                 return False
 
@@ -976,7 +982,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                 if isinstance(vue_check, list):
                     vue_check = {item[0]: item[1].get('value') if isinstance(item[1], dict) else item[1] for item in vue_check}
 
-                elapsed = time.time() - vue_wait_start
+                elapsed = time.monotonic() - vue_wait_start
                 if elapsed - last_log_time >= 1.0:
                     debug.log(f"[VUE WAIT] {elapsed:.1f}s - panels:{vue_check.get('panels', 0)}, countBtn:{vue_check.get('countBtn', 0)}, rowTickets:{vue_check.get('rowTickets', 0)}")
                     last_log_time = elapsed
@@ -2114,7 +2120,12 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
         is_homepage_target = config_homepage in ['https://ticketplus.com.tw', 'ticketplus.com.tw']
         if not is_homepage_target and url.lower() != config_dict["homepage"].lower():
             try:
-                await tab.get(config_dict["homepage"])
+                await guarded_get(
+                    tab,
+                    config_dict["homepage"],
+                    config_dict,
+                    reason="ticketplus_homepage_recovery",
+                )
             except Exception as e:
                 pass
 
@@ -2144,7 +2155,7 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
             is_event_page = True
 
         if is_event_page:
-            _state["start_time"] = time.time()
+            _state["start_time"] = time.monotonic()
 
             is_first_visit = not _state.get("order_page_visited", False)
             if is_first_visit:
@@ -2203,7 +2214,7 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
                 _state["is_popup_confirm"] = True
 
                 if _state["start_time"]:
-                    _state["done_time"] = time.time()
+                    _state["done_time"] = time.monotonic()
                     _state["elapsed_time"] = _state["done_time"] - _state["start_time"]
                     debug.log(f"[TICKETPLUS] NoDriver TicketPlus booking time: {_state['elapsed_time']:.3f} seconds")
 

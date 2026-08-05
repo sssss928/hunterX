@@ -7,6 +7,8 @@
 
 import asyncio
 import base64
+import contextvars
+from contextlib import contextmanager
 import inspect
 import json
 import os
@@ -36,6 +38,7 @@ from platforms.common_async import get_auto_reload_interval
 from action_ledger import ActionLedger
 from notification_context import clean_event_name, make_notification_context
 from page_classifier import PageClass, classify_page
+from platform_registry import platform_key_for_url
 from reload_guard import guarded_reload
 from run_modes import get_effective_reload_interval, is_leak_watch_mode
 from submit_guard import SubmitGuard
@@ -90,16 +93,138 @@ __all__ = [
     "nodriver_ticketmaster_check_ip_block",
 ]
 
-# Module-level state (replaces global tixcraft_dict)
-_state = {}
+# Direct helper tests use the default mapping. Production dispatch binds this
+# proxy to PlatformEngine-owned per-tab data for the lifetime of each task.
+_default_state = {}
+_state_context = contextvars.ContextVar("tixcraft_runtime_state", default=None)
+
+
+class _TixCraftStateProxy(dict):
+    def current(self):
+        state = _state_context.get()
+        return _default_state if state is None else state
+
+    def has_active_binding(self):
+        return _state_context.get() is not None
+
+    def bind(self, state):
+        return _state_context.set(state)
+
+    def reset_binding(self, token):
+        _state_context.reset(token)
+
+    def __getitem__(self, key):
+        return self.current()[key]
+
+    def __setitem__(self, key, value):
+        self.current()[key] = value
+
+    def __delitem__(self, key):
+        del self.current()[key]
+
+    def __iter__(self):
+        return iter(self.current())
+
+    def __len__(self):
+        return len(self.current())
+
+    def __contains__(self, key):
+        return key in self.current()
+
+    def get(self, key, default=None):
+        return self.current().get(key, default)
+
+    def setdefault(self, key, default=None):
+        return self.current().setdefault(key, default)
+
+    def pop(self, key, *default):
+        return self.current().pop(key, *default)
+
+    def clear(self):
+        self.current().clear()
+
+    def update(self, *args, **kwargs):
+        self.current().update(*args, **kwargs)
+
+    def keys(self):
+        return self.current().keys()
+
+    def items(self):
+        return self.current().items()
+
+    def values(self):
+        return self.current().values()
+
+
+_state = _TixCraftStateProxy()
+
+
+def _state_for_tab(tab):
+    from platform_adapters import adapter_for_key
+    from platform_engine import platform_engine
+
+    adapter = adapter_for_key("tixcraft")
+    if adapter is None:
+        raise RuntimeError("TixCraft adapter is unavailable")
+    return platform_engine.state_for(tab, adapter).platform_data
+
+
+async def _guarded_tixcraft_get(
+    tab,
+    target_url,
+    config_dict=None,
+    *,
+    reason="navigation",
+):
+    source_url = _get_cached_tab_url(tab)
+    context = _state.get("submit_in_flight")
+    runtime_health.runtime_log(
+        "[TIXCRAFT] navigation_intent",
+        config_dict,
+        reason=reason,
+        source_url=source_url,
+        target_url=target_url,
+        page_class=classify_page(source_url).value,
+        attempt_id=getattr(_get_tixcraft_purchase_attempt(), "attempt_id", None),
+        generation=int(_state.get("notification_flow_generation", 0) or 0),
+        token=getattr(context, "token", None),
+    )
+    return await runtime_health.guarded_get(
+        tab,
+        target_url,
+        config_dict,
+        reason=reason,
+    )
+
+
+def _dispatch_state_for_tab(tab):
+    bound = _state_context.get()
+    if bound is not None:
+        return bound
+    # Preserve compatibility with a pre-v0.4.7 in-process state during a hot
+    # reload. Normal production entrypoints leave the default mapping empty.
+    if _default_state:
+        return _default_state
+    return _state_for_tab(tab)
+
+
+@contextmanager
+def _bind_tixcraft_tab_state(tab):
+    token = _state.bind(_state_for_tab(tab))
+    try:
+        yield _state
+    finally:
+        _state.reset_binding(token)
 
 
 class TixCraftAttemptPhase(str, Enum):
     AREA_READY = "area_ready"
     AREA_SELECTED = "area_selected"
     TICKET_FORM_ACTIVE = "ticket_form_active"
+    SUBMIT_IN_FLIGHT = "submit_in_flight"
     ORDER_PENDING = "order_pending"
     CHECKOUT_REACHED = "checkout_reached"
+    PAYMENT_REACHED = "payment_reached"
     RECOVERING_TO_AREA = "recovering_to_area"
     CLOSED = "closed"
 
@@ -175,6 +300,16 @@ class TixCraftPendingNavigation:
     deadline: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class TixCraftSubmitInFlight:
+    attempt_id: int
+    flow_generation: int
+    token: int
+    tab_identity: int
+    source_url: str
+    started_at_monotonic: float
+
+
 _TIXCRAFT_CHECKOUT_SEAT_FALLBACK = "未能讀取座位資料，請立即查看結帳頁"
 _TIXCRAFT_SEAT_READ_ATTEMPTS = 6
 _TIXCRAFT_SEAT_READ_INTERVAL_SECONDS = 0.12
@@ -195,6 +330,7 @@ _TIXCRAFT_SOFT_BLOCK_NORMAL_PROBE_INTERVAL_SECONDS = 0.25
 _TIXCRAFT_CLICK_DISPATCH_TIMEOUT_SECONDS = 1.0
 _TIXCRAFT_SEAT_EVALUATE_TIMEOUT_SECONDS = 0.4
 _TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS = 20.0
+_TIXCRAFT_SOFT_BLOCK_EVIDENCE_WINDOW_SECONDS = 5.0
 _TIXCRAFT_NAVIGATION_CONFIRMATION_DEFAULT_SECONDS = 3.0
 _TIXCRAFT_NAVIGATION_CONFIRMATION_MIN_SECONDS = 1.0
 _TIXCRAFT_NAVIGATION_CONFIRMATION_MAX_SECONDS = 10.0
@@ -726,6 +862,33 @@ def _resolve_soft_block_wait_seconds(config_dict, scope_url, default_wait_second
     return default_wait_seconds, False
 
 
+def _confirm_tixcraft_soft_block_evidence(url, kind, now=None):
+    current = time.monotonic() if now is None else float(now)
+    signature = f"{_tixcraft_route_key(url)}:{kind}"
+    previous = str(_state.get("soft_block_evidence_signature", "") or "")
+    first_at = float(_state.get("soft_block_evidence_first_at", 0.0) or 0.0)
+    count = int(_state.get("soft_block_evidence_count", 0) or 0)
+    if (
+        signature != previous
+        or first_at <= 0
+        or current - first_at > _TIXCRAFT_SOFT_BLOCK_EVIDENCE_WINDOW_SECONDS
+    ):
+        first_at = current
+        count = 1
+    else:
+        count += 1
+    _state["soft_block_evidence_signature"] = signature
+    _state["soft_block_evidence_first_at"] = first_at
+    _state["soft_block_evidence_count"] = count
+    return count >= 2
+
+
+def _clear_tixcraft_soft_block_evidence():
+    _state["soft_block_evidence_signature"] = ""
+    _state["soft_block_evidence_first_at"] = 0.0
+    _state["soft_block_evidence_count"] = 0
+
+
 async def _detect_tixcraft_soft_block(tab, url, config_dict=None):
     """Detect TixCraft-family soft-block pages without taking recovery action."""
     if not _is_tixcraft_soft_block_scope(url):
@@ -746,25 +909,31 @@ async def _detect_tixcraft_soft_block(tab, url, config_dict=None):
         return {"blocked": False, "health_confirmed": True}
 
     snapshot = await _read_tixcraft_page_health(tab, config_dict)
+    if snapshot.get("knownOrderProcessing", False):
+        _clear_tixcraft_soft_block_evidence()
+        return {
+            "blocked": False,
+            "health_confirmed": False,
+            "inconclusive": True,
+            "kind": "order_processing",
+        }
     if snapshot.get("blocked", False):
         _state["soft_block_known_good_url"] = ""
         _state["soft_block_known_good_at"] = 0.0
+        kind = snapshot.get("kind") or "eps_js"
+        confirmed = _confirm_tixcraft_soft_block_evidence(url, kind, now)
         return {
-            "blocked": True,
-            "kind": snapshot.get("kind") or "eps_js",
+            "blocked": confirmed,
+            "health_confirmed": False,
+            "inconclusive": not confirmed,
+            "kind": kind,
             "original_url": snapshot.get("rr", "") or "",
             "client_ip": snapshot.get("client_ip", "") or "unknown",
         }
     if snapshot.get("probeFailed", False):
         _state["soft_block_known_good_url"] = ""
         _state["soft_block_known_good_at"] = 0.0
-        if _update_tixcraft_probe_failure_state(url, True):
-            return {
-                "blocked": True,
-                "kind": "health_probe_timeout",
-                "original_url": "",
-                "client_ip": "unknown",
-            }
+        _update_tixcraft_probe_failure_state(url, True)
         return {
             "blocked": False,
             "health_confirmed": False,
@@ -785,8 +954,11 @@ async def _detect_tixcraft_soft_block(tab, url, config_dict=None):
         _state["soft_block_known_good_at"] = 0.0
         _state["soft_block_blank_since"] = 0.0
         _state["soft_block_blank_url"] = ""
+        confirmed = _confirm_tixcraft_soft_block_evidence(url, "text_marker", now)
         return {
-            "blocked": True,
+            "blocked": confirmed,
+            "health_confirmed": False,
+            "inconclusive": not confirmed,
             "kind": "text_marker",
             "original_url": "",
             "client_ip": "unknown",
@@ -796,10 +968,10 @@ async def _detect_tixcraft_soft_block(tab, url, config_dict=None):
         _state["soft_block_known_good_url"] = ""
         _state["soft_block_known_good_at"] = 0.0
         return {
-            "blocked": True,
+            "blocked": False,
             "kind": "stable_blank",
-            "original_url": "",
-            "client_ip": "unknown",
+            "health_confirmed": False,
+            "inconclusive": True,
         }
     if blank_candidate:
         return {
@@ -809,6 +981,7 @@ async def _detect_tixcraft_soft_block(tab, url, config_dict=None):
         }
 
     if snapshot.get("hasKnownContent", False) and route_key:
+        _clear_tixcraft_soft_block_evidence()
         _state["soft_block_known_good_url"] = route_key
         _state["soft_block_known_good_at"] = now
     else:
@@ -993,7 +1166,7 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
                 "activity route"
             )
             try:
-                routed = await runtime_health.guarded_get(
+                routed = await _guarded_tixcraft_get(
                     tab,
                     routing_url,
                     config_dict,
@@ -1041,7 +1214,7 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
 
         debug.log(f"[EPS BLOCK] Soft-block wait finished, navigating once to area: {recovery_url}")
         try:
-            navigated = await runtime_health.guarded_get(
+            navigated = await _guarded_tixcraft_get(
                 tab,
                 recovery_url,
                 config_dict,
@@ -1198,6 +1371,8 @@ def _tixcraft_state_defaults():
         "purchase_attempt": None,
         "attempt_last_page_class": "",
         "notification_submit_started_at": 0.0,
+        "submit_in_flight": None,
+        "submit_generation": 0,
         "notification_order_probe_next_at": 0.0,
         "notification_retry_at": {},
         "soft_block_blank_since": 0.0,
@@ -1205,6 +1380,9 @@ def _tixcraft_state_defaults():
         "soft_block_probe_failure_since": 0.0,
         "soft_block_probe_failure_url": "",
         "soft_block_probe_failure_count": 0,
+        "soft_block_evidence_signature": "",
+        "soft_block_evidence_first_at": 0.0,
+        "soft_block_evidence_count": 0,
         "soft_block_known_good_url": "",
         "soft_block_known_good_at": 0.0,
         "soft_block_recovery_in_progress": False,
@@ -1274,6 +1452,7 @@ def _close_tixcraft_purchase_attempt(reason="closed"):
         return
     attempt.phase = TixCraftAttemptPhase.CLOSED
     _record_action("attempt_closed", f"{attempt.attempt_id}:{reason}")
+    _clear_tixcraft_submit_in_flight(reason)
     _state["purchase_attempt"] = None
     _state["last_ticket_count"] = ""
     _state["last_ticket_count_confirmed"] = False
@@ -1352,21 +1531,35 @@ def _track_tixcraft_attempt_page(page_class, url):
     current = PageClass(page_class)
     if current != PageClass.AREA:
         _clear_tixcraft_recovery_scan_guard()
-    if current == PageClass.AREA and previous and previous != PageClass.AREA.value:
+    submit_in_flight = _is_tixcraft_submit_in_flight()
+    if (
+        current == PageClass.AREA
+        and previous
+        and previous != PageClass.AREA.value
+        and not submit_in_flight
+    ):
         _close_tixcraft_purchase_attempt("returned_to_area")
         _state["last_selected_area"] = ""
         _state["selected_area_candidate"] = ""
         _state["selected_area_metadata"] = {}
     elif current == PageClass.TICKET:
         attempt = _begin_tixcraft_purchase_attempt("ticket_page", url)
-        attempt.phase = TixCraftAttemptPhase.TICKET_FORM_ACTIVE
+        if not submit_in_flight:
+            attempt.phase = TixCraftAttemptPhase.TICKET_FORM_ACTIVE
     elif current == PageClass.ORDER:
         attempt = _begin_tixcraft_purchase_attempt("order_page", url)
+        _clear_tixcraft_submit_in_flight("order_route")
         attempt.phase = TixCraftAttemptPhase.ORDER_PENDING
     elif current == PageClass.CHECKOUT:
+        _clear_tixcraft_submit_in_flight("checkout_route")
         attempt = _get_tixcraft_purchase_attempt()
         if attempt is not None:
             attempt.phase = TixCraftAttemptPhase.CHECKOUT_REACHED
+    elif current == PageClass.PAYMENT:
+        _clear_tixcraft_submit_in_flight("payment_route")
+        attempt = _get_tixcraft_purchase_attempt()
+        if attempt is not None:
+            attempt.phase = TixCraftAttemptPhase.PAYMENT_REACHED
     _state["attempt_last_page_class"] = current.value
 
 
@@ -1551,7 +1744,7 @@ def _reconcile_tixcraft_pending_navigation(tab, url, page_class, config_dict):
     return False
 
 
-def _mark_tixcraft_submit_started(url=""):
+def _mark_tixcraft_submit_started(url="", tab=None):
     current = _get_tixcraft_purchase_attempt()
     completed_attempt = bool(
         current is not None
@@ -1590,13 +1783,72 @@ def _mark_tixcraft_submit_started(url=""):
         attempt.ticket_count_confirmed = True
         _state["last_ticket_count"] = previous_ticket_count
         _state["last_ticket_count_confirmed"] = True
-    attempt.phase = TixCraftAttemptPhase.TICKET_FORM_ACTIVE
-    _state["notification_submit_started_at"] = time.monotonic()
+    started_at = time.monotonic()
+    token = int(_state.get("submit_generation", 0) or 0) + 1
+    _state["submit_generation"] = token
+    attempt.phase = TixCraftAttemptPhase.SUBMIT_IN_FLIGHT
+    _state["submit_in_flight"] = TixCraftSubmitInFlight(
+        attempt_id=attempt.attempt_id,
+        flow_generation=int(_state.get("notification_flow_generation", 0) or 0),
+        token=token,
+        tab_identity=id(tab) if tab is not None else 0,
+        source_url=_tixcraft_route_key(url),
+        started_at_monotonic=started_at,
+    )
+    _state["notification_submit_started_at"] = started_at
     _state["notification_order_probe_next_at"] = 0.0
+    scheduler = _state.get("leak_scheduler")
+    if scheduler is not None:
+        scheduler.submit_pending = True
+        scheduler.ticket_form_pending = True
+    _record_action("submit_armed", f"{attempt.attempt_id}:{token}")
+
+
+def _is_tixcraft_submit_in_flight(tab=None):
+    context = _state.get("submit_in_flight")
+    attempt = _get_tixcraft_purchase_attempt()
+    if not isinstance(context, TixCraftSubmitInFlight) or attempt is None:
+        return False
+    return bool(
+        attempt.attempt_id == context.attempt_id
+        and attempt.phase
+        in {
+            TixCraftAttemptPhase.SUBMIT_IN_FLIGHT,
+            TixCraftAttemptPhase.ORDER_PENDING,
+        }
+        and context.flow_generation
+        == int(_state.get("notification_flow_generation", 0) or 0)
+        and context.token == int(_state.get("submit_generation", 0) or 0)
+        and (
+            tab is None
+            or not context.tab_identity
+            or context.tab_identity == id(tab)
+        )
+    )
+
+
+def _clear_tixcraft_submit_in_flight(reason=""):
+    context = _state.pop("submit_in_flight", None)
+    _state["notification_submit_started_at"] = 0.0
+    _state["notification_order_probe_next_at"] = 0.0
+    guard = _state.get("submit_guard")
+    if guard is not None:
+        guard.reset()
+    scheduler = _state.get("leak_scheduler")
+    if scheduler is not None:
+        scheduler.submit_pending = False
+        scheduler.ticket_form_pending = False
+    if context is not None:
+        _record_action(
+            "submit_cleared",
+            f"{getattr(context, 'attempt_id', '')}:{reason or 'unspecified'}",
+        )
 
 
 def _has_confirmed_tixcraft_submit_context(now=None):
     """Return True only while a real, recent form submission can backfill order."""
+    if _is_tixcraft_submit_in_flight():
+        return True
     attempt = _get_tixcraft_purchase_attempt()
     started_at = float(_state.get("notification_submit_started_at", 0.0) or 0.0)
     if attempt is None or started_at <= 0:
@@ -1952,11 +2204,7 @@ def _reset_tixcraft_submit_state():
     _state["ocr_completed_url"] = ""
     _state["captcha_alert_detected"] = False
     _state["manual_intervention_required"] = False
-    if "submit_guard" in _state:
-        _state["submit_guard"].reset()
-    if "leak_scheduler" in _state:
-        _state["leak_scheduler"].submit_pending = False
-        _state["leak_scheduler"].ticket_form_pending = False
+    _clear_tixcraft_submit_in_flight("reset")
     for key in list(_state.keys()):
         if str(key).startswith("ticket_assigned_"):
             _state.pop(key, None)
@@ -2978,6 +3226,25 @@ async def _maybe_emit_tixcraft_seat_supplement(tab, config_dict, url):
 
 async def _recover_to_last_valid_area(tab, config_dict, reason):
     debug = util.create_debug_logger(config_dict)
+    if _is_tixcraft_submit_in_flight(tab) and reason not in {
+        "confirmed_rejected_error",
+        "confirmed_canceled_order",
+        "confirmed_continue_shopping",
+        "retryable_alert",
+    }:
+        source_url = _get_cached_tab_url(tab)
+        runtime_health.runtime_log(
+            "[TIXCRAFT RECOVERY] blocked_submit_in_flight",
+            config_dict,
+            reason=reason,
+            source_url=source_url,
+            target_url=_state.get("last_valid_area_url", ""),
+            page_class=classify_page(source_url).value,
+            attempt_id=getattr(_get_tixcraft_purchase_attempt(), "attempt_id", None),
+            generation=int(_state.get("notification_flow_generation", 0) or 0),
+            token=int(_state.get("submit_generation", 0) or 0),
+        )
+        return False
     last_area_url = _normalize_tixcraft_area_url(_state.get("last_valid_area_url", ""))
     if not last_area_url:
         debug.log(f"[TIXCRAFT RECOVERY] No last_valid_area_url for {reason}")
@@ -2989,7 +3256,7 @@ async def _recover_to_last_valid_area(tab, config_dict, reason):
     _reset_tixcraft_area_retry_state()
     debug.log(f"[TIXCRAFT RECOVERY] {reason}; navigating back to area: {last_area_url}")
     try:
-        navigated = await runtime_health.guarded_get(
+        navigated = await _guarded_tixcraft_get(
             tab,
             last_area_url,
             config_dict,
@@ -3053,6 +3320,15 @@ async def _classify_recovery_page(tab, url, initial_page_class):
         return PageClass.CONTINUE_SHOPPING
     if _is_retryable_alert(text):
         return PageClass.REJECTED_ERROR
+    if _is_tixcraft_submit_in_flight() and initial_page_class in {
+        PageClass.HOME,
+        PageClass.ACTIVITY,
+        PageClass.DATE,
+        PageClass.AREA,
+        PageClass.TICKET,
+        PageClass.UNKNOWN,
+    }:
+        return PageClass.UNKNOWN
     return initial_page_class
 
 
@@ -3247,7 +3523,7 @@ async def nodriver_tixcraft_redirect(tab, url):
             entry_url = url.replace("/activity/detail/","/activity/game/").split("#")[0].split("?")[0]
             print("redirec to new url:", entry_url)
             try:
-                await runtime_health.guarded_get(tab, entry_url, reason="TIXCRAFT_DETAIL_REDIRECT")
+                await _guarded_tixcraft_get(tab, entry_url, reason="TIXCRAFT_DETAIL_REDIRECT")
                 # 等待日期列表出現，確保頁面載入完成
                 try:
                     await tab.wait_for('#gameList > table > tbody > tr', timeout=5)
@@ -4580,10 +4856,11 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
             return False
 
     # Issue #188: Check sold out cooldown before proceeding
-    if _state and _state.get("sold_out_cooldown_until", 0) > time.time():
-        remaining = _state["sold_out_cooldown_until"] - time.time()
+    now_monotonic = time.monotonic()
+    if _state and _state.get("sold_out_cooldown_until", 0) > now_monotonic:
+        remaining = _state["sold_out_cooldown_until"] - now_monotonic
         cooldown_log_key = "sold_out_cooldown_last_log"
-        now = time.time()
+        now = now_monotonic
         if now - _state.get(cooldown_log_key, 0) >= 1:
             _state[cooldown_log_key] = now
             debug.log(f"[DATE SELECT] Sold out cooldown active for {remaining:.1f}s; purchase loop remains active")
@@ -4903,7 +5180,7 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                     data_href_attempted = True
                     debug.log("[DATE SELECT] Navigating via button[data-href]...")
                     try:
-                        navigated = await runtime_health.guarded_get(
+                        navigated = await _guarded_tixcraft_get(
                             tab,
                             data_href,
                             config_dict,
@@ -6171,19 +6448,39 @@ async def nodriver_tixcraft_ticket_main_agree(tab, config_dict):
 
 
 async def _dispatch_tixcraft_enter_submit(tab, current_url, submit_guard) -> bool:
-    """Commit submit state immediately after Enter keyDown triggers the form."""
+    """Arm the attempt before Enter; a dispatch error is an ambiguous outcome."""
 
-    await tab.send(
-        cdp.input_.dispatch_key_event(
-            "keyDown",
-            code="Enter",
-            key="Enter",
-            text="\r",
-            windows_virtual_key_code=13,
-        )
+    # No await occurs between these writes and keyDown, so competing schedulers
+    # cannot observe an unprotected submitted document.
+    submit_guard.mark_submitted(
+        current_url,
+        pending_seconds=_TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS,
     )
-    submit_guard.mark_submitted(current_url, pending_seconds=1.5)
-    _mark_tixcraft_submit_started(current_url)
+    _mark_tixcraft_submit_started(current_url, tab=tab)
+    try:
+        await tab.send(
+            cdp.input_.dispatch_key_event(
+                "keyDown",
+                code="Enter",
+                key="Enter",
+                text="\r",
+                windows_virtual_key_code=13,
+            )
+        )
+    except asyncio.CancelledError:
+        # Cancellation can race with a browser-side key event. Preserve the
+        # protected state and propagate cancellation to the runtime owner.
+        raise
+    except Exception as exc:
+        runtime_health.runtime_log(
+            "[TIXCRAFT CAPTCHA] Enter keyDown outcome_inconclusive",
+            None,
+            error_type=type(exc).__name__,
+            source_url=_tixcraft_route_key(current_url),
+            attempt_id=getattr(_get_tixcraft_purchase_attempt(), "attempt_id", None),
+            generation=int(_state.get("notification_flow_generation", 0) or 0),
+            token=int(_state.get("submit_generation", 0) or 0),
+        )
     _record_action("submit_clicked")
     try:
         await tab.send(
@@ -6207,6 +6504,37 @@ async def _dispatch_tixcraft_enter_submit(tab, current_url, submit_guard) -> boo
     return True
 
 
+def _arm_tixcraft_manual_submit_pending(tab, current_url, config_dict=None) -> None:
+    """Protect a valid ticket form while the user completes manual submit.
+
+    Manual captcha mode has no Python-owned key event to observe. Arming when
+    the visible captcha field is handed to the user closes the otherwise
+    unavoidable race between a human Enter key and the next 50 ms main-loop
+    dispatch. A confirmed captcha error clears this state for another try.
+    """
+
+    if _is_tixcraft_submit_in_flight(tab):
+        return
+    _ensure_runtime_helpers()
+    _state["submit_guard"].mark_submitted(
+        current_url,
+        pending_seconds=_TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS,
+    )
+    _mark_tixcraft_submit_started(current_url, tab=tab)
+    _record_action("manual_submit_armed")
+    context = _state.get("submit_in_flight")
+    runtime_health.runtime_log(
+        "[TIXCRAFT CAPTCHA] manual_submit_armed",
+        config_dict,
+        source_url=_tixcraft_route_key(current_url),
+        target_url="",
+        page_class=PageClass.TICKET.value,
+        attempt_id=getattr(_get_tixcraft_purchase_attempt(), "attempt_id", None),
+        generation=int(_state.get("notification_flow_generation", 0) or 0),
+        token=getattr(context, "token", None),
+    )
+
+
 async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, domain_name):
     # 函數開始時檢查暫停
     if await check_and_handle_pause(config_dict):
@@ -6216,6 +6544,18 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
     # 檢查是否已經設定過票券數量（方案 B：狀態標記）
     current_url, _ = await nodriver_current_url(tab)
     _record_action("entered_ticket_page", current_url)
+    if _is_tixcraft_submit_in_flight(tab):
+        runtime_health.runtime_log(
+            "[TIXCRAFT] ticket_handler_blocked_submit_in_flight",
+            config_dict,
+            source_url=_tixcraft_route_key(current_url),
+            target_url="",
+            page_class=PageClass.TICKET.value,
+            attempt_id=getattr(_get_tixcraft_purchase_attempt(), "attempt_id", None),
+            generation=int(_state.get("notification_flow_generation", 0) or 0),
+            token=int(_state.get("submit_generation", 0) or 0),
+        )
+        return
     ticket_number = str(config_dict["ticket_number"])
     allow_less_tickets = config_dict.get("tixcraft", {}).get("allow_less_tickets", False)
     ticket_state_key = f"ticket_assigned_{current_url}_{ticket_number}_{int(allow_less_tickets)}"
@@ -6227,7 +6567,7 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
             _state.pop(stale_key, None)
 
     # Skip this iteration while a captcha submit is in flight (awaiting navigation).
-    if _state.get("captcha_submit_until", 0) > time.time():
+    if _state.get("captcha_submit_until", 0) > time.monotonic():
         debug.log("[TIXCRAFT OCR] Submit in progress, waiting for navigation")
         return
 
@@ -6315,6 +6655,10 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
             pass
 
         if is_visible:
+            if not auto_submit:
+                current_url = getattr(getattr(tab, "target", None), "url", "") or ""
+                _arm_tixcraft_manual_submit_pending(tab, current_url, config_dict)
+
             # 取得當前輸入值
             inputed_value = ""
             try:
@@ -6469,7 +6813,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                             is_form_submitted = True
                             # Short submit-in-progress guard: stop the main loop from
                             # re-clicking the captcha input while navigation is pending.
-                            _state["captcha_submit_until"] = time.time() + 1.5
+                            _state["captcha_submit_until"] = time.monotonic() + 1.5
                         else:
                             debug.log(f"[TIXCRAFT CAPTCHA] Form not ready - Ticket:{form_ready.get('ticket')} Select:{form_ready.get('ticket_select')} Captcha:{form_ready.get('verify')} Agreement:{form_ready.get('agree')}")
                         performance.record_elapsed(perf_trace, performance.SUBMIT_STAGE, submit_started_ns)
@@ -6637,11 +6981,11 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
         debug.log("[TIXCRAFT OCR] previous_answer:", previous_answer)
         debug.log("[TIXCRAFT OCR] ocr_captcha_image_source:", ocr_captcha_image_source)
 
-        ocr_start_time = time.time()
+        ocr_start_time = time.monotonic()
         ocr_answer = await nodriver_tixcraft_get_ocr_answer(
             tab, ocr, ocr_captcha_image_source, Captcha_Browser, domain_name, perf_trace=perf_trace
         )
-        ocr_done_time = time.time()
+        ocr_done_time = time.monotonic()
         ocr_elapsed_time = ocr_done_time - ocr_start_time
         debug.log("[TIXCRAFT OCR] Processing time:", "{:.3f}".format(ocr_elapsed_time))
 
@@ -6780,7 +7124,7 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
         if is_form_submitted:
             _state["ocr_completed_url"] = current_url
 
-async def nodriver_ticketmaster_check_ip_block(tab, config_dict, current_url=""):
+async def _nodriver_ticketmaster_check_ip_block_impl(tab, config_dict, current_url=""):
     """Detect PerimeterX EPS block page on tixcraft/ticketmaster domains.
 
     When blocked, waits 4-7 minutes (random) then navigates back to original URL.
@@ -6828,7 +7172,19 @@ async def nodriver_ticketmaster_check_ip_block(tab, config_dict, current_url="")
         return False
 
 
-async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
+async def nodriver_ticketmaster_check_ip_block(tab, config_dict, current_url=""):
+    token = _state.bind(_dispatch_state_for_tab(tab))
+    try:
+        return await _nodriver_ticketmaster_check_ip_block_impl(
+            tab,
+            config_dict,
+            current_url,
+        )
+    finally:
+        _state.reset_binding(token)
+
+
+async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Browser):
     # 函數開始時檢查暫停
     if await check_and_handle_pause(config_dict):
         return False
@@ -6837,13 +7193,17 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
     # Global alert handler: only accept known retryable alerts. Unknown alerts
     # stay visible for manual intervention and the browser remains open.
-    async def handle_global_alert(event):
+    bound_state = _state.current()
+
+    async def _handle_global_alert(event):
         # Skip alert handling when bot is paused (let user handle manually)
         if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_FILE)):
             return
         # IMPORTANT: Use tab.target.url (cached) instead of nodriver_current_url (js_dumps)
         # When alert dialog is open, JavaScript execution is blocked, causing js_dumps to hang
         current_url = tab.target.url if hasattr(tab, 'target') and tab.target else ""
+        if platform_key_for_url(current_url) != "tixcraft":
+            return
 
         if '/ticket/checkout' in current_url:
             debug.log(f"[GLOBAL ALERT] Alert on checkout page, NOT auto-dismissing: '{event.message}'")
@@ -6896,6 +7256,13 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         if is_retryable_alert and dismiss_success:
             await _recover_to_last_valid_area(tab, config_dict, "retryable_alert")
 
+    async def handle_global_alert(event):
+        token = _state.bind(bound_state)
+        try:
+            return await _handle_global_alert(event)
+        finally:
+            _state.reset_binding(token)
+
     _ensure_tixcraft_state_defaults()
 
     _sync_tixcraft_notification_flow(url)
@@ -6918,7 +7285,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     # Pattern: ported from platforms/ibon.py — URL-based, customerId-agnostic.
     # Both family platforms route high-traffic users to *.queue-it.net before EPS evaluates.
     was_in_queue = _state.get("queue_it_enter_time") is not None
-    should_pause, elapsed = _process_queue_it_state(url, _state, time.time())
+    should_pause, elapsed = _process_queue_it_state(url, _state, time.monotonic())
     if should_pause:
         if not was_in_queue:
             debug.log("[TIXCRAFT] Queue-IT entered, waiting...")
@@ -6928,9 +7295,64 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
     await nodriver_tixcraft_home_close_window(tab)
 
+    page_class = classify_page(url)
+    submit_was_active = _is_tixcraft_submit_in_flight(tab)
+    protected_submit_transition = bool(
+        submit_was_active
+        and page_class in {PageClass.ORDER, PageClass.CHECKOUT, PageClass.PAYMENT}
+    )
+    if protected_submit_transition:
+        # A confirmed protected route invalidates every stale ticket/area task.
+        _track_tixcraft_attempt_page(page_class, url)
+    elif submit_was_active:
+        evidence_page = await _classify_recovery_page(tab, url, page_class)
+        positive_failure_reasons = {
+            PageClass.REJECTED_ERROR: "confirmed_rejected_error",
+            PageClass.CANCELED_ORDER: "confirmed_canceled_order",
+            PageClass.CONTINUE_SHOPPING: "confirmed_continue_shopping",
+        }
+        recovery_reason = positive_failure_reasons.get(evidence_page)
+        if recovery_reason:
+            await _recover_to_last_valid_area(
+                tab,
+                config_dict,
+                recovery_reason,
+            )
+            return False
+        order_processing = await _detect_tixcraft_order_pending(
+            tab,
+            url,
+            force=True,
+        )
+        if order_processing:
+            attempt = _get_tixcraft_purchase_attempt()
+            if attempt is not None:
+                attempt.phase = TixCraftAttemptPhase.ORDER_PENDING
+            _record_action("order_pending", url)
+            await _emit_tixcraft_attempt_notification(
+                tab,
+                config_dict,
+                "order_pending",
+                url,
+            )
+        runtime_health.runtime_log(
+            "[TIXCRAFT] submit_navigation_protected",
+            config_dict,
+            reason="order_processing" if order_processing else "outcome_inconclusive",
+            source_url=_tixcraft_route_key(url),
+            target_url="",
+            page_class=page_class.value,
+            attempt_id=getattr(_get_tixcraft_purchase_attempt(), "attempt_id", None),
+            generation=int(_state.get("notification_flow_generation", 0) or 0),
+            token=int(_state.get("submit_generation", 0) or 0),
+        )
+        return False
+
     # EPS / soft-block detection must run before normal page dispatching so a
     # pause page that keeps an /area/ URL is not treated as a selectable area.
-    if _is_tixcraft_soft_block_scope(url) or 'ticketmaster' in url:
+    if not protected_submit_transition and (
+        _is_tixcraft_soft_block_scope(url) or 'ticketmaster' in url
+    ):
         if await nodriver_ticketmaster_check_ip_block(tab, config_dict, current_url=url):
             return False
 
@@ -6973,15 +7395,13 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         await _remember_tixcraft_event_name(tab, url)
     if _state.get("last_valid_area_url"):
         page_class = await _classify_recovery_page(tab, url, page_class)
-    if _state.get("last_valid_area_url") and page_class in {
-        PageClass.HOME,
-        PageClass.ACTIVITY,
-        PageClass.DATE,
-        PageClass.CANCELED_ORDER,
-        PageClass.CONTINUE_SHOPPING,
-        PageClass.REJECTED_ERROR,
-    }:
-        recovery_reason = "manual_cancel" if page_class == PageClass.CANCELED_ORDER else "manual_navigation_or_redirect"
+    positive_recovery_reasons = {
+        PageClass.CANCELED_ORDER: "confirmed_canceled_order",
+        PageClass.CONTINUE_SHOPPING: "confirmed_continue_shopping",
+        PageClass.REJECTED_ERROR: "confirmed_rejected_error",
+    }
+    if _state.get("last_valid_area_url") and page_class in positive_recovery_reasons:
+        recovery_reason = positive_recovery_reasons[page_class]
         recovered = await _recover_to_last_valid_area(tab, config_dict, recovery_reason)
         if recovered:
             return False
@@ -6995,7 +7415,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         # Only redirect if homepage is not the platform root itself (avoid infinite loop)
         homepage_is_root = homepage.rstrip('/') in ['https://tixcraft.com', 'https://tixcraft.com/activity']
         if not homepage_is_root:
-            current_time = time.time()
+            current_time = time.monotonic()
             last_redirect_time = _state.get("last_homepage_redirect_time", 0)
             # Use active safe-page reload interval from settings, default to 3 seconds.
             redirect_interval = get_auto_reload_interval(config_dict, default=3)
@@ -7005,18 +7425,18 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             if current_time - last_redirect_time > redirect_interval:
                 try:
                     _state["last_homepage_redirect_time"] = current_time
-                    await runtime_health.guarded_get(tab, homepage, config_dict, reason="HOMEPAGE_RECOVERY")
+                    await _guarded_tixcraft_get(tab, homepage, config_dict, reason="HOMEPAGE_RECOVERY")
                 except Exception:
                     pass
 
     if "/activity/detail/" in url:
-        _state["start_time"] = time.time()
+        _state["start_time"] = time.monotonic()
         is_redirected = await nodriver_tixcraft_redirect(tab, url)
 
     is_date_selected = False
     # Check if this is a Ticketmaster page before using TixCraft logic
     if "/activity/game/" in url and 'ticketmaster' not in url:
-        _state["start_time"] = time.time()
+        _state["start_time"] = time.monotonic()
         if config_dict["date_auto_select"]["enable"]:
             domain_name = url.split('/')[2]
             is_date_selected = await nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
@@ -7032,7 +7452,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     )
 
     if is_ticketmaster_date_page:
-        _state["start_time"] = time.time()
+        _state["start_time"] = time.monotonic()
         if config_dict["date_auto_select"]["enable"]:
             debug.log("[TICKETMASTER] Detected Ticketmaster date page, calling date auto select")
             domain_name = url.split('/')[2]
@@ -7119,7 +7539,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     if '/ticket/ticket/' in url:
         domain_name = url.split('/')[2]
         await nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, domain_name)
-        _state["done_time"] = time.time()
+        _state["done_time"] = time.monotonic()
 
         if not _state["played_sound_ticket"]:
             if config_dict["advanced"]["play_sound"]["ticket"]:
@@ -7132,7 +7552,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     if not order_pending_observed and page_class == PageClass.TICKET:
         order_pending_observed = await _detect_tixcraft_order_pending(tab, url)
     if order_pending_observed:
-        _state["done_time"] = time.time()
+        _state["done_time"] = time.monotonic()
         _record_action("order_pending", url)
         await _emit_tixcraft_attempt_notification(tab, config_dict, "order_pending", url)
 
@@ -7190,3 +7610,17 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             _state["printed_completed"] = True
 
     return is_quit_bot
+
+
+async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
+    token = _state.bind(_dispatch_state_for_tab(tab))
+    try:
+        return await _nodriver_tixcraft_main_impl(
+            tab,
+            url,
+            config_dict,
+            ocr,
+            Captcha_Browser,
+        )
+    finally:
+        _state.reset_binding(token)

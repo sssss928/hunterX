@@ -14,8 +14,10 @@ import time
 from zendriver import cdp
 
 import util
+from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
+from runtime_health import guarded_get
 from nodriver_common import (
     nodriver_check_modal_dialog_popup,
     play_sound_while_ordering,
@@ -66,7 +68,7 @@ __all__ = [
 ]
 
 # Module-level state (replaces global hkticketing_dict)
-_state = {}
+_state = PlatformStateProxy("hkticketing")
 
 
 def _hkticketing_state_defaults():
@@ -1353,10 +1355,10 @@ async def nodriver_hkticketing_type02_login(tab, config_dict):
     # Step 4: Wait for login to complete - simply check URL change
     import time
     timeout = 180  # 3 minutes
-    start_time = time.time()
+    start_time = time.monotonic()
     check_interval = 2
 
-    while (time.time() - start_time) < timeout:
+    while (time.monotonic() - start_time) < timeout:
         try:
             # Check URL change (no longer on login page)
             current_url = await tab.evaluate('window.location.href')
@@ -1365,7 +1367,7 @@ async def nodriver_hkticketing_type02_login(tab, config_dict):
                 return True
 
             # Progress indicator every 30 seconds
-            elapsed = int(time.time() - start_time)
+            elapsed = int(time.monotonic() - start_time)
             if elapsed > 0 and elapsed % 30 == 0:
                 print(f"[HKTICKETING TYPE02] Waiting for login... ({elapsed}s / {timeout}s)")
 
@@ -2369,9 +2371,14 @@ async def nodriver_hkticketing_url_redirect(tab, url, config_dict):
                     break
 
             try:
-                await tab.get(entry_url)
-                is_redirected = True
-                debug.log(f"[HKTICKETING REDIRECT] Redirected to: {entry_url}")
+                is_redirected = await guarded_get(
+                    tab,
+                    entry_url,
+                    config_dict,
+                    reason="hkticketing_redirect_recovery",
+                )
+                if is_redirected:
+                    debug.log(f"[HKTICKETING REDIRECT] Redirected to: {entry_url}")
             except Exception as exc:
                 pass
 
@@ -2400,9 +2407,14 @@ async def nodriver_hkticketing_url_redirect(tab, url, config_dict):
         if is_need_refresh:
             entry_url = "https://hotshow.hkticketing.com/"
             try:
-                await tab.get(entry_url)
-                is_redirected = True
-                debug.log(f"[HKTICKETING REDIRECT] Access denied, redirected to: {entry_url}")
+                is_redirected = await guarded_get(
+                    tab,
+                    entry_url,
+                    config_dict,
+                    reason="hkticketing_access_denied_recovery",
+                )
+                if is_redirected:
+                    debug.log(f"[HKTICKETING REDIRECT] Access denied, redirected to: {entry_url}")
             except Exception as exc:
                 pass
 
@@ -2446,9 +2458,14 @@ async def nodriver_hkticketing_content_refresh(tab, url, config_dict):
         if is_need_refresh:
             debug.log("[HKTICKETING CONTENT] Start to automatically refresh page.")
             try:
-                await tab.get(new_url)
-                is_redirected = True
-                debug.log(f"[HKTICKETING CONTENT] Redirected to: {new_url}")
+                is_redirected = await guarded_get(
+                    tab,
+                    new_url,
+                    config_dict,
+                    reason="hkticketing_content_refresh",
+                )
+                if is_redirected:
+                    debug.log(f"[HKTICKETING CONTENT] Redirected to: {new_url}")
             except Exception as exc:
                 pass
 
@@ -2495,9 +2512,14 @@ async def nodriver_hkticketing_travel_iframe(tab, config_dict):
                             url = await tab.evaluate('window.location.href')
                             domain_name = url.split('/')[2]
                             new_url = "https://%s/default.aspx" % (domain_name)
-                            await tab.get(new_url)
-                            is_redirected = True
-                            debug.log(f"[HKTICKETING IFRAME] Error detected in iframe, redirected to: {new_url}")
+                            is_redirected = await guarded_get(
+                                tab,
+                                new_url,
+                                config_dict,
+                                reason="hkticketing_iframe_error_recovery",
+                            )
+                            if is_redirected:
+                                debug.log(f"[HKTICKETING IFRAME] Error detected in iframe, redirected to: {new_url}")
                             break
             except Exception as exc:
                 pass
@@ -2571,10 +2593,20 @@ async def nodriver_hkticketing_main(tab, url, config_dict):
             await asyncio.sleep(0.5)
             homepage = config_dict.get("homepage", "").strip()
             if homepage and 'hkt.hkticketing.com' in homepage:
-                await tab.get(homepage)
+                await guarded_get(
+                    tab,
+                    homepage,
+                    config_dict,
+                    reason="hkticketing_type02_homepage_recovery",
+                )
                 debug.log(f"[HKTICKETING TYPE02] Redirecting to: {homepage}")
             else:
-                await tab.get("https://hkt.hkticketing.com/hant/#/home")
+                await guarded_get(
+                    tab,
+                    "https://hkt.hkticketing.com/hant/#/home",
+                    config_dict,
+                    reason="hkticketing_type02_default_home",
+                )
                 debug.log("[HKTICKETING TYPE02] Redirecting to home page")
         return tab
 
@@ -2686,8 +2718,14 @@ async def nodriver_hkticketing_main(tab, url, config_dict):
                         if not is_same_page and not is_homepage_default:
                             if 'default.aspx' in current_url or current_url.endswith('/'):
                                 debug.log(f"[HKTICKETING LOGIN] Redirecting to event page: {homepage}")
-                                await tab.get(homepage)
-                                await asyncio.sleep(1.0)
+                                navigated = await guarded_get(
+                                    tab,
+                                    homepage,
+                                    config_dict,
+                                    reason="hkticketing_login_event_recovery",
+                                )
+                                if navigated:
+                                    await asyncio.sleep(1.0)
                 except Exception as redirect_error:
                     debug.log(f"[HKTICKETING LOGIN] Redirect error: {redirect_error}")
 

@@ -13,8 +13,10 @@ except Exception:
     pass
 
 import util
+from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
+from runtime_health import guarded_get
 from nodriver_common import (
     check_and_handle_pause,
     create_ocr_for_platform,
@@ -45,7 +47,7 @@ __all__ = [
     "nodriver_funone_main",
 ]
 
-_state = {}
+_state = PlatformStateProxy("funone")
 
 
 def _funone_state_defaults():
@@ -1877,7 +1879,7 @@ async def nodriver_funone_main(tab, url, config_dict):
         homepage = config_dict["homepage"]
         homepage_is_root = homepage.rstrip('/') == 'https://tickets.funone.io'
         if not homepage_is_root:
-            current_time = time.time()
+            current_time = time.monotonic()
             last_redirect_time = _state.get("last_homepage_redirect_time", 0)
             redirect_interval = get_auto_reload_interval(config_dict, default=3)
             if redirect_interval <= 0:
@@ -1885,7 +1887,12 @@ async def nodriver_funone_main(tab, url, config_dict):
             if current_time - last_redirect_time > redirect_interval:
                 try:
                     _state["last_homepage_redirect_time"] = current_time
-                    await tab.get(homepage)
+                    await guarded_get(
+                        tab,
+                        homepage,
+                        config_dict,
+                        reason="funone_homepage_recovery",
+                    )
                 except Exception:
                     pass
 

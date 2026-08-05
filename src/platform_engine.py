@@ -10,7 +10,12 @@ from typing import Any
 import runtime_health
 from page_classifier import PageClass
 from platform_adapters import adapter_for_url
-from platform_contract import PlatformAdapter, PlatformRuntimeState
+from platform_contract import (
+    PlatformAdapter,
+    PlatformRuntimeState,
+    activate_platform_state,
+    clear_active_platform_state,
+)
 from run_modes import is_leak_watch_mode
 
 
@@ -59,6 +64,18 @@ class PlatformEngine:
         state.backfill()
         return state
 
+    def _reset_inactive_families(self, tab: Any, active_key: str | None) -> None:
+        for key, state in self._tab_states(tab).items():
+            if key == active_key:
+                continue
+            state.backfill()
+            if (
+                state.previous_url
+                or state.current_page is not PageClass.UNKNOWN
+                or state.platform_data
+            ):
+                state.reset_attempt()
+
     def before_dispatch(
         self,
         tab: Any,
@@ -70,10 +87,36 @@ class PlatformEngine:
     ) -> DispatchDecision:
         adapter = adapter_for_url(url)
         if adapter is None:
+            self._reset_inactive_families(tab, None)
+            clear_active_platform_state()
             return DispatchDecision(False, "unsupported_host", PageClass.UNKNOWN, None)
 
         page_class = adapter.classify_page(url, text)
+        self._reset_inactive_families(tab, adapter.key)
         state = self.state_for(tab, adapter)
+        previous_page = state.current_page
+        previous_url = state.previous_url
+        safe_pages = {PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA}
+        protected_pages = {
+            PageClass.TICKET,
+            PageClass.ORDER,
+            PageClass.CHECKOUT,
+            PageClass.PAYMENT,
+        }
+        starts_new_attempt = bool(
+            previous_url
+            and (
+                (previous_page in protected_pages and page_class in safe_pages)
+                or (
+                    page_class is PageClass.ACTIVITY
+                    and previous_page in safe_pages
+                    and previous_url != str(url or "")
+                )
+            )
+        )
+        if starts_new_attempt:
+            state.reset_attempt()
+        activate_platform_state(adapter.key, state.platform_data)
         state.current_page = page_class
         state.previous_url = str(url or "")
         state.cycle_count += 1
