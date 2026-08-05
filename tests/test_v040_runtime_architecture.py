@@ -263,13 +263,18 @@ def test_tixcraft_soft_block_text_markers(text: str) -> None:
 
 @pytest.mark.asyncio
 async def test_tixcraft_soft_block_text_page_is_detected_on_area_url() -> None:
+    tixcraft_platform._state.clear()
+    tixcraft_platform._ensure_tixcraft_state_defaults()
     tab = _SoftBlockTab(
         "Your Browsing Activity Has Been Paused\n"
         "We've detected unusual behavior on either your network or your browser."
     )
 
+    first = await _detect_tixcraft_soft_block(tab, "https://tixcraft.com/ticket/area/abc/1", {})
     detection = await _detect_tixcraft_soft_block(tab, "https://tixcraft.com/ticket/area/abc/1", {})
 
+    assert first["blocked"] is False
+    assert first["inconclusive"] is True
     assert detection["blocked"] is True
     assert detection["kind"] == "text_marker"
 
@@ -413,7 +418,7 @@ def test_submit_guard_prevents_duplicate_pending_submit() -> None:
     assert guard.can_submit("https://tixcraft.com/ticket/ticket/a")
     guard.mark_submitted("https://tixcraft.com/ticket/ticket/a", pending_seconds=10)
     assert not guard.can_submit("https://tixcraft.com/ticket/ticket/a")
-    assert guard.can_submit("https://tixcraft.com/ticket/order")
+    assert not guard.can_submit("https://tixcraft.com/ticket/order")
     guard.reset()
     assert guard.can_submit("https://tixcraft.com/ticket/ticket/a")
 

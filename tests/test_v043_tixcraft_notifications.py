@@ -1085,7 +1085,7 @@ def test_submit_after_completed_checkout_starts_a_new_attempt_without_area_round
     assert current is not None
     assert current is not previous
     assert current.attempt_id == previous.attempt_id + 1
-    assert current.phase == tixcraft.TixCraftAttemptPhase.TICKET_FORM_ACTIVE
+    assert current.phase == tixcraft.TixCraftAttemptPhase.SUBMIT_IN_FLIGHT
     assert current.discord_stages == set()
     assert current.seat_area == AREA_NAME
     assert tixcraft._state["notification_submit_started_at"] > 0
@@ -1132,11 +1132,13 @@ async def test_keydown_commits_new_attempt_when_keyup_fails(monkeypatch) -> None
 
     current = tixcraft._get_tixcraft_purchase_attempt()
     assert tab.send_count == 2
-    assert guard.marked == [(ticket_url, 1.5)]
+    assert guard.marked == [
+        (ticket_url, tixcraft._TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS)
+    ]
     assert current is not None
     assert current is not previous
     assert current.attempt_id == previous.attempt_id + 1
-    assert current.phase == tixcraft.TixCraftAttemptPhase.TICKET_FORM_ACTIVE
+    assert current.phase == tixcraft.TixCraftAttemptPhase.SUBMIT_IN_FLIGHT
     assert current.discord_stages == set()
     assert tixcraft._has_confirmed_tixcraft_submit_context()
 

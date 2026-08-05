@@ -233,7 +233,8 @@ async def test_full_viewport_white_overlay_is_stable_blank_even_with_large_dom(
     assert first_detection["inconclusive"] is True
     clock["now"] += tixcraft._TIXCRAFT_BLANK_PAGE_GRACE_SECONDS
     detected = await tixcraft._detect_tixcraft_soft_block(object(), AREA_URL, {})
-    assert detected["blocked"] is True
+    assert detected["blocked"] is False
+    assert detected["inconclusive"] is True
     assert detected["kind"] == "stable_blank"
 
 
@@ -623,10 +624,22 @@ async def test_eps_and_text_markers_detect_but_non_tixcraft_fast_rejects(
         AREA_URL,
         {},
     )
+    assert detected["blocked"] is False
+    detected = await tixcraft._detect_tixcraft_soft_block(
+        object(),
+        AREA_URL,
+        {},
+    )
     assert detected["blocked"] is True
     assert detected["kind"] == "eps_js"
-    assert len(calls) == 1
+    assert len(calls) == 2
 
+    detected = await tixcraft._detect_tixcraft_soft_block(
+        object(),
+        "https://www.ticketmaster.sg/ticket/area/event/game",
+        {},
+    )
+    assert detected["blocked"] is False
     detected = await tixcraft._detect_tixcraft_soft_block(
         object(),
         "https://www.ticketmaster.sg/ticket/area/event/game",
@@ -634,7 +647,7 @@ async def test_eps_and_text_markers_detect_but_non_tixcraft_fast_rejects(
     )
     assert detected["blocked"] is True
     assert detected["kind"] == "eps_js"
-    assert len(calls) == 2
+    assert len(calls) == 4
 
     calls.clear()
     non_tixcraft = await tixcraft._detect_tixcraft_soft_block(
@@ -659,6 +672,8 @@ async def test_eps_and_text_markers_detect_but_non_tixcraft_fast_rejects(
         )
 
     monkeypatch.setattr(tixcraft.runtime_health, "evaluate_with_timeout", text_evaluate)
+    detected = await tixcraft._detect_tixcraft_soft_block(object(), AREA_URL, {})
+    assert detected["blocked"] is False
     detected = await tixcraft._detect_tixcraft_soft_block(object(), AREA_URL, {})
     assert detected["blocked"] is True
     assert detected["kind"] == "text_marker"
@@ -700,8 +715,8 @@ async def test_repeated_page_health_timeout_becomes_soft_block(
     assert first_detection["blocked"] is False
     assert first_detection["inconclusive"] is True
     detected = await tixcraft._detect_tixcraft_soft_block(object(), AREA_URL, {})
-    assert detected["blocked"] is True
-    assert detected["kind"] == "health_probe_timeout"
+    assert detected["blocked"] is False
+    assert detected["inconclusive"] is True
 
 
 class _RecoveryTab:

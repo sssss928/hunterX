@@ -34,7 +34,7 @@ def test_tixcraft_captcha_agreement_and_submit_flow_is_still_present() -> None:
     submit_guard = submit_helper.index("submit_guard.mark_submitted")
     attempt_started = submit_helper.index("_mark_tixcraft_submit_started")
     key_up = submit_helper.index('"keyUp"')
-    assert key_down < submit_guard < attempt_started < key_up
+    assert submit_guard < attempt_started < key_down < key_up
 
 
 def test_tixcraft_submit_still_requires_ticket_captcha_and_agreement_ready() -> None:

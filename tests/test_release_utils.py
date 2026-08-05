@@ -57,7 +57,7 @@ def test_project_version_reads_literal_without_importing(tmp_path: Path) -> None
     "source",
     [
         "",
-        'APP_VERSION = "0.4.4"\nAPP_VERSION = "0.4.6"\n',
+        'APP_VERSION = "0.4.4"\nAPP_VERSION = "0.4.7"\n',
         'APP_VERSION = ".".join(("0", "4", "4"))\n',
         "APP_VERSION = 44\n",
         'APP_VERSION = "v0.4.4"\n',

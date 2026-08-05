@@ -56,6 +56,7 @@ def test_cityline_login_page_detector_covers_hong_kong_realm() -> None:
     assert is_cityline_login_page("https://www.cityline.com/Login.html?targetUrl=x")
     assert is_cityline_login_page("https://www.cityline.com.hk/en_US/Login.html?targetUrl=x")
     assert not is_cityline_login_page("https://venue.cityline.com/utsvInternet/eventDetail?event=abc")
+    assert not is_cityline_login_page("https://cityline.com.attacker.invalid/Login.html")
 
 
 def test_ibon_date_filter_applies_keyword_exclude() -> None:
