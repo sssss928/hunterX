@@ -39,8 +39,8 @@ build_scripts\build_and_test.bat
 
 ### 輸出檔案
 
-- `dist/release/hunterX_windows_0.4.6.zip` - 發布 ZIP
-- `dist/release/test_report_0.4.6.txt` - 本機品質檢查摘要
+- `dist/release/hunterX_windows_0.4.7.zip` - 發布 ZIP
+- `dist/release/test_report_0.4.7.txt` - 本機品質檢查摘要
 
 ### 執行時間
 
@@ -123,8 +123,8 @@ dist/
 │   ├── www/
 │   └── CHANGELOG.md
 └── release/
-    ├── hunterX_windows_0.4.6.zip      ← 發布 ZIP
-    └── test_report_0.4.6.txt          ← 本機品質檢查摘要
+    ├── hunterX_windows_0.4.7.zip      ← 發布 ZIP
+    └── test_report_0.4.7.txt          ← 本機品質檢查摘要
 ```
 
 ---
