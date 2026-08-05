@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.4.7
+
+- Fix the TixCraft post-submit race that could return a valid in-flight order
+  to `/ticket/area/`: the 1.5-second captcha throttle expired before delayed
+  URL/DOM transitions, so stale ticket DOM and inconclusive CDP/health probes
+  could reach ticket-count recovery or soft-block recovery first.
+- Arm an immutable submit context, attempt phase, monotonic deadline,
+  generation token and tab identity before Enter `keyDown`; keep `keyUp`
+  best-effort when document replacement makes its outcome ambiguous.
+- Treat spinner overlays, blank or stale DOM, unchanged/early-changing URLs,
+  health-probe timeouts and single soft-block observations as inconclusive.
+  Recovery now requires confirmed sold-out/reselect/cancel/continue evidence,
+  a known retryable alert, or two matching explicit soft-block observations.
+- Protect manual captcha and non-auto-submit OCR flows before control returns to
+  the human operator, and invalidate ticket/area/reload work once an order,
+  checkout, payment or order-processing state is observed.
+- Route keyword, multi-keyword, exclusion and every supported area ordering
+  mode through the same provisional-click, navigation-confirmation and submit
+  protection lifecycle; no-match selection remains a safe refresh outcome.
+- Move legacy per-platform module state into PlatformEngine-owned per-tab
+  mappings for TixCraft, TicketPlus, KKTIX, KHAM/UDN/ticket.com.tw, iBon,
+  Cityline, HKTicketing/Ticketek, FamiTicket, FunOne and FANSI GO.
+- Route every automatic platform navigation through the shared single-flight
+  guarded navigation path and record reason, source/target URL and page class;
+  TixCraft diagnostics additionally include attempt, generation and token.
+- Use monotonic clocks for platform polling deadlines, retry/backoff windows,
+  cooldowns, queue timing and redirect/log throttles so wall-clock corrections
+  cannot expire or extend purchase-state transitions.
+- Add v0.4.7 production-path regressions for submit delays through 20 seconds,
+  manual/OCR modes, all area ordering and keyword paths, false/real soft
+  blocks, concurrent tabs, guarded navigation and long-run scheduler liveness.
+- Update the pinned `cryptography` runtime dependency to 50.0.0 to address the
+  advisories reported against 48.0.1 by the release security gate.
+- Known validation limit: no real ticket order, captcha bypass, queue bypass or
+  payment was attempted. Site behavior was validated with unit/integration
+  fixtures and production handlers; external DOM changes remain possible.
+
 ## v0.4.6
 
 - Add a shared `PlatformAdapter` contract, fail-closed route policies and
