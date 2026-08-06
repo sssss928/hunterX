@@ -33,6 +33,10 @@
   blocks, concurrent tabs, guarded navigation and long-run scheduler liveness.
 - Update the pinned `cryptography` runtime dependency to 50.0.0 to address the
   advisories reported against 48.0.1 by the release security gate.
+- Keep Zendriver's CDP listener alive when Chrome returns a result or protocol
+  error after the corresponding asyncio transaction was cancelled during a
+  document replacement. The transport-only guard discards only responses whose
+  Future is already done and preserves normal results and protocol exceptions.
 - Known validation limit: no real ticket order, captcha bypass, queue bypass or
   payment was attempted. Site behavior was validated with unit/integration
   fixtures and production handlers; external DOM changes remain possible.

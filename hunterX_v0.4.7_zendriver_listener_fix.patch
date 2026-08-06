@@ -1,0 +1,385 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 321c8ee..5cbfe30 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -33,6 +33,10 @@
+   blocks, concurrent tabs, guarded navigation and long-run scheduler liveness.
+ - Update the pinned `cryptography` runtime dependency to 50.0.0 to address the
+   advisories reported against 48.0.1 by the release security gate.
++- Keep Zendriver's CDP listener alive when Chrome returns a result or protocol
++  error after the corresponding asyncio transaction was cancelled during a
++  document replacement. The transport-only guard discards only responses whose
++  Future is already done and preserves normal results and protocol exceptions.
+ - Known validation limit: no real ticket order, captcha bypass, queue bypass or
+   payment was attempted. Site behavior was validated with unit/integration
+   fixtures and production handlers; external DOM changes remain possible.
+diff --git a/RELEASE_NOTES_v0.4.7.md b/RELEASE_NOTES_v0.4.7.md
+index adf1555..5efb4df 100644
+--- a/RELEASE_NOTES_v0.4.7.md
++++ b/RELEASE_NOTES_v0.4.7.md
+@@ -50,6 +50,19 @@ FamiTicket, FunOne and FANSI GO. See
+ `docs/04-implementation/platform-capability-matrix-v0.4.7.md` for the detailed
+ support and validation matrix.
+ 
++## Zendriver listener stability
++
++Chrome may finish a CDP request after its awaiting task was cancelled during a
++rapid navigation or document replacement. Zendriver 0.15.3 then tries to finish
++the already-done Future and raises `asyncio.InvalidStateError` from
++`Listener.listener_loop`, which can stop subsequent browser event processing.
++
++HunterX now installs an idempotent transport-layer guard before browser startup.
++It discards only late results or protocol errors belonging to an already-done
++transaction. Pending transactions, successful results and unrelated protocol
++errors retain Zendriver's original behavior. No platform handler, selection,
++submission, recovery or notification flow is changed by this guard.
++
+ ## Validation and limits
+ 
+ The release suite covers production handlers with unit/integration browser
+diff --git a/build_scripts/nodriver_tixcraft.spec b/build_scripts/nodriver_tixcraft.spec
+index 9ed8ce7..9c8c643 100644
+--- a/build_scripts/nodriver_tixcraft.spec
++++ b/build_scripts/nodriver_tixcraft.spec
+@@ -51,7 +51,8 @@ a = Analysis(
+         'onnxruntime.capi.onnxruntime_pybind11_state',
+         'zendriver',
+         'zendriver.cdp',
+-        'zendriver.core',
++        'zendriver.core',
++        'zendriver_hardening',
+         # Shared utilities (important!)
+         'util',
+         'ocr_cache',
+diff --git a/src/browser_session.py b/src/browser_session.py
+index 30253b2..a77207c 100644
+--- a/src/browser_session.py
++++ b/src/browser_session.py
+@@ -7,6 +7,7 @@ from pathlib import Path
+ import chrome_downloader
+ import util
+ from hunter_metadata import APP_NAME
++from zendriver_hardening import install_zendriver_transaction_guard
+ 
+ try:
+     from zendriver.core.config import Config
+@@ -71,7 +72,9 @@ class BrowserSessionManager:
+             ),
+             headless=bool(advanced.get("headless", False)),
+             proxy_server_port=str(advanced.get("proxy_server_port", "") or ""),
+-            instance=getattr(args, "instance", "") if args and getattr(args, "instance", "") else util.get_instance_id(),
++            instance=getattr(args, "instance", "")
++            if args and getattr(args, "instance", "")
++            else util.get_instance_id(),
+         )
+         self.config_dict = config_dict
+         self.args = args
+@@ -106,6 +109,10 @@ class BrowserSessionManager:
+     def build_config(self, base_args: list[str], sandbox: bool = True) -> Config:
+         if Config is None:
+             raise RuntimeError("zendriver is required to build a browser config")
++        # Install the transport-only compatibility guard before uc.start()
++        # creates any CDP listener tasks. This does not alter platform routing,
++        # ticket selection, submission, recovery, or notification behavior.
++        install_zendriver_transaction_guard()
+         browser_path = self.browser_executable_path()
+         if self.launch.browser_type == BROWSER_EDGE and not browser_path:
+             raise FileNotFoundError("Microsoft Edge executable was not found")
+diff --git a/src/zendriver_hardening.py b/src/zendriver_hardening.py
+new file mode 100644
+index 0000000..096e980
+--- /dev/null
++++ b/src/zendriver_hardening.py
+@@ -0,0 +1,84 @@
++"""Runtime compatibility guards for known Zendriver transport races.
++
++This module intentionally stays below HunterX's platform and purchasing layers.
++It only protects Zendriver's CDP response Future from a response that arrives
++after its awaiting task has already completed or been cancelled.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import functools
++import logging
++from typing import Any
++
++
++logger = logging.getLogger(__name__)
++
++_PATCH_MARKER = "__hunterx_late_cdp_response_guard__"
++_ORIGINAL_CALL_ATTRIBUTE = "__hunterx_original_transaction_call__"
++
++
++def _describe_transaction_state(transaction: Any) -> str:
++    if transaction.cancelled():
++        return "cancelled"
++    if transaction.done():
++        return "finished"
++    return "pending"
++
++
++def _log_late_response(transaction: Any, response: dict[str, Any]) -> None:
++    logger.debug(
++        "Ignored late Zendriver CDP response: id=%r method=%r state=%s response_has_error=%s",
++        getattr(transaction, "id", None),
++        getattr(transaction, "method", None),
++        _describe_transaction_state(transaction),
++        "error" in response,
++    )
++
++
++def install_zendriver_transaction_guard(transaction_class: type | None = None) -> bool:
++    """Keep a late CDP response from terminating Zendriver's listener task.
++
++    Zendriver stores each CDP command in an ``asyncio.Future`` subclass. If the
++    caller is cancelled while Chrome is navigating, Chrome may still send the
++    response. Zendriver then calls ``set_result`` or ``set_exception`` on an
++    already-done Future, raising ``asyncio.InvalidStateError`` from its listener
++    loop. Discarding that stale response is safe because no caller can consume
++    it after the Future is done.
++
++    Returns ``True`` when the guard is installed and ``False`` when the class
++    was already guarded. ``transaction_class`` exists for isolated tests; the
++    production path always uses Zendriver's real Transaction class.
++    """
++
++    if transaction_class is None:
++        from zendriver.core.connection import Transaction
++
++        transaction_class = Transaction
++
++    current_call = transaction_class.__call__
++    if getattr(current_call, _PATCH_MARKER, False):
++        return False
++
++    @functools.wraps(current_call)
++    def guarded_call(transaction: Any, **response: dict[str, Any]) -> None:
++        if transaction.done():
++            _log_late_response(transaction, response)
++            return None
++
++        try:
++            return current_call(transaction, **response)
++        except asyncio.InvalidStateError:
++            # This catch closes the tiny thread/callback race between done()
++            # above and Zendriver's set_result()/set_exception() call. Never
++            # suppress InvalidStateError while the transaction is still live.
++            if not transaction.done():
++                raise
++            _log_late_response(transaction, response)
++            return None
++
++    setattr(guarded_call, _PATCH_MARKER, True)
++    setattr(guarded_call, _ORIGINAL_CALL_ATTRIBUTE, current_call)
++    transaction_class.__call__ = guarded_call
++    return True
+diff --git a/tests/test_zendriver_hardening.py b/tests/test_zendriver_hardening.py
+new file mode 100644
+index 0000000..217f523
+--- /dev/null
++++ b/tests/test_zendriver_hardening.py
+@@ -0,0 +1,202 @@
++from __future__ import annotations
++
++import asyncio
++import json
++from contextlib import suppress
++from types import SimpleNamespace
++
++import pytest
++from zendriver.core.connection import Listener, ProtocolException, Transaction
++
++import browser_session
++from zendriver_hardening import (
++    _ORIGINAL_CALL_ATTRIBUTE,
++    install_zendriver_transaction_guard,
++)
++
++
++def _return_value_command():
++    result = yield {"method": "Runtime.evaluate", "params": {}}
++    return result["value"]
++
++
++def _non_terminal_command():
++    yield {"method": "Runtime.evaluate", "params": {}}
++    yield {"method": "Runtime.evaluate", "params": {"expression": "next"}}
++
++
++def _restore_original_call(monkeypatch) -> None:
++    current_call = Transaction.__call__
++    original_call = getattr(current_call, _ORIGINAL_CALL_ATTRIBUTE, current_call)
++    monkeypatch.setattr(Transaction, "__call__", original_call)
++
++
++@pytest.mark.asyncio
++async def test_unpatched_zendriver_reproduces_cancelled_future_race(monkeypatch):
++    _restore_original_call(monkeypatch)
++    transaction = Transaction(_return_value_command())
++    transaction.cancel()
++
++    with pytest.raises(asyncio.InvalidStateError, match="invalid state"):
++        transaction(result={"value": "loading"})
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    "response",
++    [
++        {"result": {"value": "loading"}},
++        {"error": {"code": -32000, "message": "execution context replaced"}},
++    ],
++)
++async def test_guard_discards_late_result_and_error_responses(monkeypatch, response):
++    _restore_original_call(monkeypatch)
++    assert install_zendriver_transaction_guard(Transaction) is True
++
++    transaction = Transaction(_return_value_command())
++    transaction.id = 17
++    transaction.cancel()
++
++    assert transaction(**response) is None
++    assert transaction.cancelled() is True
++
++
++@pytest.mark.asyncio
++async def test_guard_keeps_normal_pending_transaction_semantics(monkeypatch):
++    _restore_original_call(monkeypatch)
++    assert install_zendriver_transaction_guard(Transaction) is True
++
++    transaction = Transaction(_return_value_command())
++    transaction(result={"value": "complete"})
++
++    assert transaction.done() is True
++    assert transaction.result() == "complete"
++
++
++@pytest.mark.asyncio
++async def test_guard_does_not_hide_other_protocol_errors(monkeypatch):
++    _restore_original_call(monkeypatch)
++    assert install_zendriver_transaction_guard(Transaction) is True
++    transaction = Transaction(_non_terminal_command())
++
++    with pytest.raises(ProtocolException, match="could not parse the cdp response"):
++        transaction(result={"value": "loading"})
++
++
++def test_guard_installation_is_idempotent(monkeypatch):
++    _restore_original_call(monkeypatch)
++
++    assert install_zendriver_transaction_guard(Transaction) is True
++    guarded_call = Transaction.__call__
++    assert install_zendriver_transaction_guard(Transaction) is False
++    assert Transaction.__call__ is guarded_call
++
++
++@pytest.mark.asyncio
++async def test_default_installation_guards_real_zendriver_transaction(monkeypatch):
++    _restore_original_call(monkeypatch)
++
++    assert install_zendriver_transaction_guard() is True
++    transaction = Transaction(_return_value_command())
++    transaction.cancel()
++
++    assert transaction(result={"value": "loading"}) is None
++
++
++def test_guard_only_suppresses_invalid_state_after_transaction_finishes():
++    class SimulatedRaceTransaction:
++        def __init__(self):
++            self.finished = False
++
++        def done(self):
++            return self.finished
++
++        def cancelled(self):
++            return False
++
++        def __call__(self, **_response):
++            self.finished = True
++            raise asyncio.InvalidStateError("simulated callback race")
++
++    assert install_zendriver_transaction_guard(SimulatedRaceTransaction) is True
++    assert SimulatedRaceTransaction()(result={"value": "loading"}) is None
++
++
++def test_guard_propagates_invalid_state_while_transaction_is_pending():
++    class LiveTransaction:
++        def done(self):
++            return False
++
++        def cancelled(self):
++            return False
++
++        def __call__(self, **_response):
++            raise asyncio.InvalidStateError("unrelated live transaction error")
++
++    assert install_zendriver_transaction_guard(LiveTransaction) is True
++
++    with pytest.raises(asyncio.InvalidStateError, match="unrelated live transaction error"):
++        LiveTransaction()(result={"value": "loading"})
++
++
++def test_browser_config_installs_guard_before_returning_config(monkeypatch, tmp_path):
++    install_calls = []
++
++    class FakeConfig:
++        def __init__(self, **kwargs):
++            self.kwargs = kwargs
++            self.user_data_dir = ""
++
++    monkeypatch.setattr(browser_session, "Config", FakeConfig)
++    monkeypatch.setattr(
++        browser_session,
++        "install_zendriver_transaction_guard",
++        lambda: install_calls.append("installed"),
++    )
++    monkeypatch.setattr(browser_session.util, "get_app_root", lambda: str(tmp_path))
++    manager = browser_session.BrowserSessionManager(
++        {"advanced": {"browser_type": "chrome", "browser_private_mode": True}}
++    )
++    monkeypatch.setattr(manager, "browser_executable_path", lambda: "chrome.exe")
++
++    config = manager.build_config(["--disable-extensions"])
++
++    assert install_calls == ["installed"]
++    assert config.kwargs["browser_executable_path"] == "chrome.exe"
++    assert config.kwargs["browser_args"] == ["--disable-extensions", "--incognito"]
++
++
++@pytest.mark.asyncio
++async def test_real_listener_continues_after_cancelled_transaction_response(monkeypatch):
++    _restore_original_call(monkeypatch)
++    assert install_zendriver_transaction_guard(Transaction) is True
++
++    class FakeWebSocket:
++        def __init__(self):
++            self.messages = asyncio.Queue()
++
++        async def recv(self):
++            return await self.messages.get()
++
++    websocket = FakeWebSocket()
++    cancelled_transaction = Transaction(_return_value_command())
++    cancelled_transaction.id = 41
++    cancelled_transaction.cancel()
++    live_transaction = Transaction(_return_value_command())
++    live_transaction.id = 42
++    connection = SimpleNamespace(
++        websocket=websocket,
++        mapper={41: cancelled_transaction, 42: live_transaction},
++        handlers={},
++    )
++
++    await websocket.messages.put(json.dumps({"id": 41, "result": {"value": "loading"}}))
++    await websocket.messages.put(json.dumps({"id": 42, "result": {"value": "complete"}}))
++    listener = Listener(connection)
++    try:
++        assert await asyncio.wait_for(live_transaction, timeout=1.0) == "complete"
++        assert listener.running is True
++    finally:
++        listener.cancel()
++        with suppress(asyncio.CancelledError):
++            await listener.task

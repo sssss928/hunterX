@@ -50,6 +50,19 @@ FamiTicket, FunOne and FANSI GO. See
 `docs/04-implementation/platform-capability-matrix-v0.4.7.md` for the detailed
 support and validation matrix.
 
+## Zendriver listener stability
+
+Chrome may finish a CDP request after its awaiting task was cancelled during a
+rapid navigation or document replacement. Zendriver 0.15.3 then tries to finish
+the already-done Future and raises `asyncio.InvalidStateError` from
+`Listener.listener_loop`, which can stop subsequent browser event processing.
+
+HunterX now installs an idempotent transport-layer guard before browser startup.
+It discards only late results or protocol errors belonging to an already-done
+transaction. Pending transactions, successful results and unrelated protocol
+errors retain Zendriver's original behavior. No platform handler, selection,
+submission, recovery or notification flow is changed by this guard.
+
 ## Validation and limits
 
 The release suite covers production handlers with unit/integration browser
