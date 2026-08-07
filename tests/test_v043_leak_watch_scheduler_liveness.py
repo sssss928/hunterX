@@ -252,3 +252,34 @@ def test_reload_guard_history_is_bounded_to_recent_decisions() -> None:
         f"cycle-{RELOAD_GUARD_HISTORY_CAPACITY + 49}"
     )
     assert guard.history[0].reason == "cycle-50"
+
+
+def test_completed_dom_scan_waits_for_successful_reload_before_next_scan() -> None:
+    scheduler = LeakWatchScheduler()
+    config = _config(5.0)
+
+    assert scheduler.should_wait_for_reload_before_dom_scan(config) is False
+    assert scheduler.mark_dom_scan_start(now=10.0) is True
+    scheduler.mark_dom_scan_end(now=10.1)
+    assert scheduler.dom_scan_completed_since_reload is True
+    assert scheduler.should_wait_for_reload_before_dom_scan(config) is True
+
+    assert scheduler.begin_reload_cycle(AREA_URL, now=15.0) is True
+    scheduler.finish_reload_cycle(config, success=False, now=15.2)
+    assert scheduler.dom_scan_completed_since_reload is True
+    assert scheduler.should_wait_for_reload_before_dom_scan(config) is True
+
+    assert scheduler.begin_reload_cycle(AREA_URL, now=20.2) is True
+    scheduler.finish_reload_cycle(config, success=True, now=20.3)
+    assert scheduler.dom_scan_completed_since_reload is False
+    assert scheduler.should_wait_for_reload_before_dom_scan(config) is False
+
+
+def test_zero_interval_preserves_legacy_dom_rescan_semantics() -> None:
+    scheduler = LeakWatchScheduler()
+    config = _config(0.0)
+
+    assert scheduler.mark_dom_scan_start(now=1.0) is True
+    scheduler.mark_dom_scan_end(now=1.1)
+    assert scheduler.dom_scan_completed_since_reload is True
+    assert scheduler.should_wait_for_reload_before_dom_scan(config) is False

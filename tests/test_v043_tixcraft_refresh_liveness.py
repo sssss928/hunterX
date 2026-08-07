@@ -481,3 +481,91 @@ async def test_controlled_recovery_requires_interactive_confirmed_area(
 
 async def _async_result(value):
     return value
+
+
+@pytest.mark.asyncio
+async def test_leak_watch_scans_each_loaded_area_document_once_until_reload_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = _seed_state()
+    tab = _AreaTab()
+    clock = {"now": 10.0}
+    zone_queries: list[float] = []
+    reloads: list[float] = []
+
+    async def ready(*_args, **_kwargs) -> bool:
+        return True
+
+    async def missing_zone(*_args, **_kwargs):
+        zone_queries.append(clock["now"])
+        return None
+
+    async def record_reload(*_args, **_kwargs) -> bool:
+        reloads.append(clock["now"])
+        return True
+
+    monkeypatch.setattr(tixcraft.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(tixcraft, "check_and_handle_pause", _no_pause)
+    monkeypatch.setattr(tixcraft.runtime_health, "wait_for_interactive_ready", ready)
+    monkeypatch.setattr(tixcraft.runtime_health, "query_selector_with_timeout", missing_zone)
+    monkeypatch.setattr(tixcraft.runtime_health, "runtime_log", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tixcraft, "guarded_reload", record_reload)
+
+    config = _config(5.0)
+
+    # Initial loaded document is inspected once, then immediately refreshed.
+    assert not await tixcraft.nodriver_tixcraft_area_auto_select(tab, AREA_URL, config)
+    assert zone_queries == [10.0]
+    assert reloads == [10.0]
+
+    # The fresh document is inspected once. Subsequent hot-loop iterations must
+    # not issue duplicate DOM/CDP reads while the 5-second deadline is pending.
+    clock["now"] = 10.01
+    assert not await tixcraft.nodriver_tixcraft_area_auto_select(tab, AREA_URL, config)
+    assert zone_queries == [10.0, 10.01]
+
+    for tick in range(1, 400):
+        clock["now"] = 10.01 + tick * 0.01
+        assert not await tixcraft.nodriver_tixcraft_area_auto_select(tab, AREA_URL, config)
+
+    assert zone_queries == [10.0, 10.01]
+    assert reloads == [10.0]
+
+    # At the deadline, reload first without reading the stale DOM again.
+    clock["now"] = 15.0
+    assert not await tixcraft.nodriver_tixcraft_area_auto_select(tab, AREA_URL, config)
+    assert zone_queries == [10.0, 10.01]
+    assert reloads == [10.0, 15.0]
+
+    # The next iteration reads the newly loaded document immediately.
+    clock["now"] = 15.01
+    assert not await tixcraft.nodriver_tixcraft_area_auto_select(tab, AREA_URL, config)
+    assert zone_queries == [10.0, 10.01, 15.01]
+
+
+@pytest.mark.asyncio
+async def test_leak_watch_zero_interval_keeps_existing_repeated_dom_scan_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_state()
+    tab = _AreaTab()
+    zone_queries = 0
+
+    async def ready(*_args, **_kwargs) -> bool:
+        return True
+
+    async def missing_zone(*_args, **_kwargs):
+        nonlocal zone_queries
+        zone_queries += 1
+        return None
+
+    monkeypatch.setattr(tixcraft, "check_and_handle_pause", _no_pause)
+    monkeypatch.setattr(tixcraft.runtime_health, "wait_for_interactive_ready", ready)
+    monkeypatch.setattr(tixcraft.runtime_health, "query_selector_with_timeout", missing_zone)
+    monkeypatch.setattr(tixcraft.runtime_health, "runtime_log", lambda *_args, **_kwargs: None)
+
+    config = _config(0.0)
+    for _ in range(5):
+        assert not await tixcraft.nodriver_tixcraft_area_auto_select(tab, AREA_URL, config)
+
+    assert zone_queries == 5

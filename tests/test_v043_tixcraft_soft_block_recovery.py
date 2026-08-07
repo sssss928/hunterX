@@ -824,7 +824,7 @@ async def test_soft_block_wait_has_no_requests_then_navigates_to_area_once(
         AREA_URL,
         {"kind": "stable_blank", "original_url": "", "client_ip": "redacted"},
     )
-    assert sleeps == pytest.approx([7])
+    assert sleeps == [7]
     assert tab.get_calls == [AREA_URL]
     assert tab.reload_calls == 0
     assert tixcraft._state["soft_block_recovery_scan_pending"] is True
