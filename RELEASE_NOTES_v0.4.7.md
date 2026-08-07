@@ -63,6 +63,20 @@ transaction. Pending transactions, successful results and unrelated protocol
 errors retain Zendriver's original behavior. No platform handler, selection,
 submission, recovery or notification flow is changed by this guard.
 
+## Leak-watch renderer/CDP stability
+
+TixCraft leak-watch now treats each loaded AREA document as one inventory snapshot.
+After that document has been scanned, the hot main loop no longer repeats identical
+DOM queries while waiting for the next configured refresh deadline. A successful
+reload or recovery opens exactly one fresh scan.
+
+The outer runtime also avoids repeated `window.location.href` JavaScript probes while
+a known-safe AREA document is settling after reload/recovery or waiting after its scan.
+It uses the non-JavaScript CDP `TargetInfo.url` cache only in those idle states. Any
+area click, navigation retry, submit, manual intervention or active purchase attempt
+disables the fast path immediately, preserving the existing purchase-transition URL
+detection and all selection/captcha/submit/order logic.
+
 ## Validation and limits
 
 The release suite covers production handlers with unit/integration browser

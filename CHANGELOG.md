@@ -37,6 +37,13 @@
   error after the corresponding asyncio transaction was cancelled during a
   document replacement. The transport-only guard discards only responses whose
   Future is already done and preserves normal results and protocol exceptions.
+- Keep each TixCraft leak-watch AREA document to one complete DOM scan; after
+  a no-ticket scan, later main-loop iterations wait for the existing reload
+  deadline instead of repeatedly querying the same DOM/CDP document.
+- Avoid repeated page-JavaScript URL probes during the safe AREA refresh cycle:
+  after a known successful reload/recovery and while an already-scanned document
+  waits for the next reload, use CDP TargetInfo.url. Normal JavaScript URL
+  detection resumes immediately for click/navigation/submit/purchase transitions.
 - Known validation limit: no real ticket order, captcha bypass, queue bypass or
   payment was attempted. Site behavior was validated with unit/integration
   fixtures and production handlers; external DOM changes remain possible.
