@@ -130,6 +130,10 @@ class LeakWatchScheduler:
     last_cycle_url: str = ""
     last_dom_read_at: float = 0.0
     dom_scan_started_at: float = 0.0
+    # True after the current document has completed one leak-watch DOM scan.
+    # A successful reload/recovery clears it so the fresh document can be read
+    # exactly once before the scheduler waits for the next refresh cycle.
+    dom_scan_completed_since_reload: bool = False
     last_area_click_at: float = 0.0
     last_clicked_url: str = ""
     history: deque[str] = field(
@@ -185,6 +189,7 @@ class LeakWatchScheduler:
         self.cycle_started_at = 0.0
         self.dom_scan_pending = False
         self.dom_scan_started_at = 0.0
+        self.dom_scan_completed_since_reload = False
         self.area_click_pending = False
         self.last_area_click_at = 0.0
         self.ticket_form_pending = False
@@ -226,6 +231,7 @@ class LeakWatchScheduler:
         self.cycle_started_at = 0.0
         self.dom_scan_pending = False
         self.dom_scan_started_at = 0.0
+        self.dom_scan_completed_since_reload = False
         self.area_click_pending = False
         self.last_area_click_at = 0.0
         self.ticket_form_pending = False
@@ -248,7 +254,23 @@ class LeakWatchScheduler:
         self.dom_scan_pending = False
         self.dom_scan_started_at = 0.0
         self.last_dom_read_at = self._now(now)
+        self.dom_scan_completed_since_reload = True
         self._record("dom_scan_end")
+
+    def should_wait_for_reload_before_dom_scan(self, config_dict: dict | None) -> bool:
+        """Return whether the current safe-page document was already scanned.
+
+        A positive leak-watch interval represents a refresh/re-scan cycle. Once
+        the current document has been read, repeatedly querying the same DOM in
+        the hot main loop adds browser/CDP load without observing a new server
+        response. Keep interval=0 behavior unchanged: it disables timed reloads
+        and therefore does not apply this per-document scan gate.
+        """
+
+        return (
+            get_leak_refresh_interval(config_dict) > 0.0
+            and self.dom_scan_completed_since_reload
+        )
 
     def mark_area_click_pending(self, url: str = "", now: float | None = None) -> bool:
         if self.area_click_pending:
@@ -375,5 +397,10 @@ class LeakWatchScheduler:
         finished_at = self._now(now)
         self.reload_pending = False
         self.cycle_started_at = 0.0
+        if success:
+            # The browser now owns a fresh document. Allow exactly one new DOM
+            # scan on the next platform iteration; failed reloads keep the old
+            # document marked as consumed to avoid returning to the hot loop.
+            self.dom_scan_completed_since_reload = False
         self.next_cycle_at = finished_at + max(0.0, interval)
         self._record("cycle_done" if success else "cycle_timeout")

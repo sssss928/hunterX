@@ -231,6 +231,7 @@ class TixCraftAttemptPhase(str, Enum):
 
 class TixCraftAreaOutcome(str, Enum):
     PAGE_NOT_READY = "page_not_ready"
+    WAITING_NEXT_CYCLE = "waiting_next_cycle"
     DOM_SCAN_BUSY = "dom_scan_busy"
     ZONE_MISSING = "zone_missing"
     DOM_QUERY_FAILED = "dom_query_failed"
@@ -5625,6 +5626,35 @@ async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
             url,
             config_dict,
             TixCraftAreaOutcome.CLICK_NOT_NAVIGATED,
+        )
+        return False
+
+    if (
+        leak_dom_guard
+        and leak_scheduler.should_wait_for_reload_before_dom_scan(config_dict)
+    ):
+        # The current AREA document has already been fully inspected. The
+        # main automation loop can run several times per second, so rescanning
+        # here would repeatedly issue identical CDP/JS queries while the reload
+        # scheduler is intentionally waiting. Route through the existing
+        # finalizer instead: before the deadline it is a cheap no-op; at the
+        # deadline it performs the existing guarded reload. A successful
+        # reload clears the scheduler flag and the next iteration scans the
+        # fresh document immediately.
+        _runtime_log_rate_limited(
+            "tixcraft_area_cycle_scan_wait_log",
+            "[AREA] dom_read_skipped",
+            config_dict,
+            now=now_monotonic,
+            identity=_tixcraft_route_key(url),
+            reason="current_document_already_scanned",
+            current_url=url,
+        )
+        await _finalize_tixcraft_area_iteration(
+            tab,
+            url,
+            config_dict,
+            TixCraftAreaOutcome.WAITING_NEXT_CYCLE,
         )
         return False
 
