@@ -388,7 +388,7 @@ const HELP_CONTENT = {
     short: '撿漏模式使用的安全頁刷新/重掃秒數。',
     detail: `
       <p>此欄位只在<strong>撿漏模式</strong>使用。正式搶票模式仍使用「自動刷新頁面間隔」。</p>
-      <p>流程是：回到安全頁後先立即重讀 DOM；若沒票，才依此秒數等待後刷新/重掃。等待期間不會重複掃描同一份已載入的 AREA DOM。</p>
+      <p>流程是：回到安全頁後先立即重讀 DOM；若沒票，才依此秒數等待後刷新/重掃。同一份 AREA document 只掃一次；成功刷新後到第一次掃描、以及掃描完成等待下一輪期間，會優先使用瀏覽器的 CDP 快取網址，不反覆進入頁面 JavaScript 讀取 URL。</p>
       <p class="text-muted small mb-0">設定為 <code>0</code> 代表不做定時刷新，但仍可在頁面變化時由既有平台流程處理。</p>`,
     link: null
   },
@@ -1273,7 +1273,7 @@ const HELP_CONTENT_EN_META = {
     short: 'Safe-page refresh/rescan interval used only in leak-watch mode.',
     detailHtml: `
       <p>This value is used only in <strong>leak-watch mode</strong>. Onsale mode continues to use the regular auto reload interval.</p>
-      <p>After returning to a safe page, the bot first rereads the DOM immediately. If no tickets are found, it waits this many seconds before refreshing/rescanning.</p>
+      <p>After returning to a safe page, the bot first rereads the DOM immediately. If no tickets are found, it waits this many seconds before refreshing/rescanning. Each AREA document is scanned once; while a known-safe document is settling after reload or waiting for the next cycle, the runtime prefers the CDP-cached URL instead of repeatedly entering page JavaScript.</p>
       <p class="text-muted small mb-0">Set <code>0</code> to disable timed reloads while keeping existing platform handling.</p>`,
   },
   tixcraft_soft_block_delay: {

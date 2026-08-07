@@ -1191,6 +1191,24 @@ def _should_prefer_cached_refresh_url(config_dict, state) -> bool:
     return remaining_ns <= REFRESH_CACHED_URL_FAST_PATH_WINDOW_NS
 
 
+def _should_prefer_cached_runtime_url(tab, config_dict, refresh_state) -> bool:
+    """Use cached URLs only for explicitly safe non-transition states.
+
+    Scheduled-sale countdowns keep their existing near-boundary fast path. Leak-watch
+    additionally opts in only for a known safe AREA document immediately after a
+    successful reload/recovery or after that document has been scanned, while no
+    purchase/navigation action is pending. Active purchase transitions retain the
+    original JavaScript URL probe.
+    """
+
+    if _should_prefer_cached_refresh_url(config_dict, refresh_state):
+        return True
+    return tixcraft_platform.should_prefer_cached_url_during_leak_wait(
+        tab,
+        config_dict,
+    )
+
+
 def _reset_refresh_trigger_retry(state) -> None:
     state["refresh_retry_pending"] = False
     state["refresh_reload_attempts"] = 0
@@ -2064,7 +2082,8 @@ async def _run_main(args, resources):
             is_quit_bot = True
 
         if not is_quit_bot:
-            prefer_cached_url = _should_prefer_cached_refresh_url(
+            prefer_cached_url = _should_prefer_cached_runtime_url(
+                tab,
                 config_dict,
                 refresh_datetime_state,
             )

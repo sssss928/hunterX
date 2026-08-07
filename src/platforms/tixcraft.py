@@ -91,6 +91,7 @@ __all__ = [
     "nodriver_tixcraft_ticket_main_ocr",
     "nodriver_tixcraft_main",
     "nodriver_ticketmaster_check_ip_block",
+    "should_prefer_cached_url_during_leak_wait",
 ]
 
 # Direct helper tests use the default mapping. Production dispatch binds this
@@ -1432,6 +1433,54 @@ def _ensure_runtime_helpers():
 def _get_leak_scheduler():
     _ensure_runtime_helpers()
     return _state["leak_scheduler"]
+
+
+def should_prefer_cached_url_during_leak_wait(tab, config_dict) -> bool:
+    """Use TargetInfo.url only while an already-scanned AREA document is idle.
+
+    The normal runtime probes ``window.location.href`` so JavaScript can supersede
+    a briefly stale CDP target URL during navigation. Leak-watch has a special idle
+    window after a known safe AREA reload/recovery and while that document is either
+    settling before its first scan or waiting for the next scheduled reload. During
+    those states there is no purchase transition to discover, so repeated JavaScript
+    URL probes only add renderer/CDP pressure.
+
+    Fail closed whenever a click/navigation/submit/manual-intervention state exists.
+    As soon as a purchase transition starts, the normal JavaScript probe resumes.
+    """
+
+    if not is_leak_watch_mode(config_dict):
+        return False
+
+    cached_url = _get_cached_tab_url(tab)
+    if not cached_url or classify_page(cached_url) is not PageClass.AREA:
+        return False
+    if not should_use_leak_watch(config_dict, cached_url):
+        return False
+
+    try:
+        state = _state_for_tab(tab)
+    except Exception:
+        return False
+
+    scheduler = state.get("leak_scheduler")
+    if not isinstance(scheduler, LeakWatchScheduler):
+        return False
+    if not scheduler.can_use_cached_url_for_safe_area_cycle(config_dict):
+        return False
+
+    if isinstance(state.get("pending_area_navigation"), TixCraftPendingNavigation):
+        return False
+    if state.get("area_navigation_retry_due", False):
+        return False
+    if state.get("submit_in_flight") is not None:
+        return False
+    if state.get("manual_intervention_required", False):
+        return False
+    if isinstance(state.get("purchase_attempt"), TixCraftPurchaseAttempt):
+        return False
+
+    return True
 
 
 def _record_action(name, value=""):
