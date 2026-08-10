@@ -91,7 +91,11 @@ def _assert_no_denied_paths(paths: set[str]) -> None:
             if part == "dist" and path_prefix in WINDOWS_VENDOR_DIST_PREFIXES:
                 continue
             raise ValueError(f"Denied release path: {name}")
-        if filename in DENIED_FILENAMES or filename.startswith(".env."):
+        if (
+            filename in DENIED_FILENAMES
+            or filename.startswith(".env.")
+            or filename.startswith(".coverage.")
+        ):
             raise ValueError(f"Denied release file: {name}")
         if (
             filename.endswith(DENIED_SUFFIXES)
@@ -111,7 +115,11 @@ def _assert_no_denied_source_paths(paths: set[str], prefix: str) -> None:
         filename = parts[-1]
         if len(parts) > 1 and parts[0] in DENIED_PARTS:
             raise ValueError(f"Denied source top-level directory: {name}")
-        if filename in DENIED_FILENAMES or filename.startswith(".env."):
+        if (
+            filename in DENIED_FILENAMES
+            or filename.startswith(".env.")
+            or filename.startswith(".coverage.")
+        ):
             raise ValueError(f"Denied release file: {name}")
         if filename.endswith(DENIED_SUFFIXES):
             raise ValueError(f"Denied private-key file: {name}")
@@ -215,11 +223,59 @@ def _git_archive_files(
     return expected
 
 
+def working_tree_source_files(
+    repo_root: Path,
+    prefix: str,
+) -> dict[str, bytes]:
+    """Read tracked plus non-ignored untracked files from the local tree."""
+
+    result = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        check=True,
+    )
+    relative_names = sorted(
+        {
+            item.decode("utf-8", errors="strict").replace("\\", "/")
+            for item in result.stdout.split(b"\0")
+            if item
+        }
+    )
+    archive_names = {f"{prefix}{name}" for name in relative_names}
+    _assert_no_denied_source_paths(archive_names, prefix)
+
+    files: dict[str, bytes] = {}
+    root = repo_root.resolve()
+    for relative_name in relative_names:
+        candidate = root / Path(relative_name)
+        if candidate.is_symlink():
+            raise ValueError(f"Source symlink is not allowed: {relative_name}")
+        source = candidate.resolve()
+        if not source.is_file():
+            raise ValueError(f"Source entry must be a regular file: {relative_name}")
+        try:
+            source.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"Source entry escapes repository: {relative_name}") from exc
+        files[f"{prefix}{relative_name}"] = source.read_bytes()
+    return files
+
+
 def verify_source_archive(
     path: Path,
     version: str,
     repo_root: Path,
     commit: str,
+    *,
+    working_tree: bool = False,
 ) -> dict[str, object]:
     expected_prefix = f"hunterX-{version}/"
     expected_name = f"hunterX_source_{version}.zip"
@@ -232,7 +288,11 @@ def verify_source_archive(
         if any(not name.startswith(expected_prefix) for name in entries):
             raise ValueError(f"Source ZIP root must be {expected_prefix!r}")
         _assert_no_denied_source_paths(set(entries), expected_prefix)
-        expected = _git_archive_files(repo_root, commit, expected_prefix)
+        expected = (
+            working_tree_source_files(repo_root, expected_prefix)
+            if working_tree
+            else _git_archive_files(repo_root, commit, expected_prefix)
+        )
         actual_names = set(entries)
         expected_names = set(expected)
         missing = sorted(expected_names - actual_names)
@@ -244,13 +304,14 @@ def verify_source_archive(
         )
         if missing or extra or mismatch:
             raise ValueError(
-                "Source archive differs from commit "
-                f"{commit}: missing={len(missing)} extra={len(extra)} "
+                "Source archive differs from "
+                f"{'working tree' if working_tree else 'commit ' + commit}: "
+                f"missing={len(missing)} extra={len(extra)} "
                 f"mismatch={len(mismatch)}"
             )
         return {
             "archive": str(path.resolve()),
-            "commit": commit,
+            "source": "working-tree" if working_tree else f"commit:{commit}",
             "entries": len(entries),
             "missing": 0,
             "extra": 0,
@@ -275,6 +336,7 @@ def _build_parser() -> argparse.ArgumentParser:
     source.add_argument("--version", required=True)
     source.add_argument("--repo-root", type=Path, default=Path.cwd())
     source.add_argument("--commit", default="HEAD")
+    source.add_argument("--working-tree", action="store_true")
     return parser
 
 
@@ -289,6 +351,7 @@ def main() -> int:
                 args.version,
                 args.repo_root,
                 args.commit,
+                working_tree=args.working_tree,
             )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         print(f"release archive verification failed: {exc}")

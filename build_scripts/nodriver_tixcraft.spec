@@ -52,7 +52,6 @@ a = Analysis(
         'zendriver',
         'zendriver.cdp',
         'zendriver.core',
-        'zendriver_hardening',
         # Shared utilities (important!)
         'util',
         'ocr_cache',
