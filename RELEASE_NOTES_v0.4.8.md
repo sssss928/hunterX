@@ -30,6 +30,22 @@ a new full wait. TixCraft state remains PlatformEngine-owned and per tab.
 Ticketmaster keeps its separate family behavior and does not inherit the
 custom TixCraft/Indievox delay merely because it shares handlers.
 
+## Zendriver listener continuity
+
+Zendriver 0.15.3 can receive a late Chrome DevTools Protocol reply after its
+waiting Future was cancelled. Its original transaction callback then calls
+`set_result`/`set_exception` on an already-finished Future, raises
+`InvalidStateError`, and terminates the only listener task. The visible
+`StopIteration` in the traceback is the coroutine return carrying the reply;
+the fatal condition is the subsequent invalid Future transition.
+
+v0.4.8 installs a small, idempotent guard before any browser configuration is
+built. It discards only replies whose transaction is already done or cancelled,
+keeps live reply/error behavior unchanged, and re-raises an invalid transition
+for a still-live transaction. A real Zendriver Listener stress fixture sends
+2,000 alternating late result/error messages, then a normal live result, and
+verifies that the listener remains active and its transaction map is empty.
+
 ## On-sale and leak-watch modes
 
 Both modes use the same date, area, quantity, qualification, verification,
@@ -41,7 +57,10 @@ submit, transition and checkout-handoff handlers.
 - `leak_watch`: uses `leak_refresh_interval_seconds` only on classified safe
   pages. A completed no-ticket scan consumes the current document generation;
   the same unchanged DOM is not fully rescanned until navigation/reload creates
-  a new generation. Queue, challenge and purchase pages remain protected.
+  a new generation. While explicitly waiting on a consumed TixCraft area
+  document it also uses the cached classified URL, avoiding a hidden per-tick
+  `location.href` CDP call. Fresh documents are inspected once; queue,
+  challenge and purchase pages remain protected.
 
 Neither mode bypasses CAPTCHA, waiting rooms, Cloudflare, risk controls or
 payment. No software setting can guarantee ticket inventory or a successful

@@ -2,6 +2,16 @@
 
 ## v0.4.8
 
+- Install an idempotent Zendriver transaction guard before browser startup.
+  Late CDP replies for already cancelled/completed transactions are discarded
+  without raising `InvalidStateError`, so Zendriver's sole listener task stays
+  alive; live transactions and real protocol errors retain normal behavior.
+- Stop TixCraft leak-watch from evaluating `location.href` every hot-loop tick
+  after the current area document has already been consumed. The cached URL is
+  used only in explicit per-tab, fail-closed wait-for-refresh state, and fresh
+  documents are scanned once before normal deterministic pacing resumes.
+- Make sale-time tests explicitly use `Asia/Taipei`, eliminating an eight-hour
+  fixture mismatch between Taiwan Windows hosts and UTC GitHub Actions runners.
 - Add one deterministic `RefreshCoordinator` per browser tab. Every automatic
   reload passes the existing protected-page/single-flight guard and the same
   monotonic minimum-interval owner; delayed loops never catch up in bursts.
