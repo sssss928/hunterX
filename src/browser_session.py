@@ -7,6 +7,7 @@ from pathlib import Path
 import chrome_downloader
 import util
 from hunter_metadata import APP_NAME
+from zendriver_hardening import install_zendriver_transaction_guard
 
 try:
     from zendriver.core.config import Config
@@ -106,6 +107,11 @@ class BrowserSessionManager:
     def build_config(self, base_args: list[str], sandbox: bool = True) -> Config:
         if Config is None:
             raise RuntimeError("zendriver is required to build a browser config")
+        # Install before ``uc.start`` can create a Connection/Listener. A
+        # cancelled CDP transaction may receive a late Chrome response during
+        # navigation; unguarded Zendriver raises InvalidStateError and kills
+        # its only listener task. The patch is process-wide and idempotent.
+        install_zendriver_transaction_guard()
         browser_path = self.browser_executable_path()
         if self.launch.browser_type == BROWSER_EDGE and not browser_path:
             raise FileNotFoundError("Microsoft Edge executable was not found")

@@ -38,9 +38,14 @@ from platforms.common_async import get_auto_reload_interval
 from action_ledger import ActionLedger
 from notification_context import clean_event_name, make_notification_context
 from page_classifier import PageClass, classify_page
+from platform_contract import platform_state_for_tab
 from platform_registry import platform_key_for_url
 from reload_guard import guarded_reload
-from run_modes import get_effective_reload_interval, is_leak_watch_mode
+from run_modes import (
+    get_effective_reload_interval,
+    get_leak_refresh_interval,
+    is_leak_watch_mode,
+)
 from submit_guard import SubmitGuard
 from tab_ownership import close_owned_tab, register_owned_tab
 from nodriver_common import (
@@ -1546,6 +1551,55 @@ def _ensure_runtime_helpers():
 def _get_leak_scheduler():
     _ensure_runtime_helpers()
     return _state["leak_scheduler"]
+
+
+def should_prefer_cached_url_during_leak_wait(tab, config_dict):
+    """Use TargetInfo.url only in the exact, idle TixCraft area wait state.
+
+    Re-entering ``window.location.href`` on every 50 ms main-loop tick creates
+    CDP transactions even though a consumed document cannot gain inventory
+    before its scheduled reload. This predicate fails closed for every known
+    navigation, purchase, submit, recovery or manual-intervention transition.
+    """
+
+    if not is_leak_watch_mode(config_dict):
+        return False
+    if get_leak_refresh_interval(config_dict) <= 0.0:
+        return False
+    cached_url = _get_cached_tab_url(tab)
+    if (
+        platform_key_for_url(cached_url) != "tixcraft"
+        or classify_page(cached_url) is not PageClass.AREA
+    ):
+        return False
+    try:
+        state = platform_state_for_tab(tab, "tixcraft")
+    except (RuntimeError, TypeError):
+        return False
+    scheduler = state.get("leak_scheduler")
+    if not isinstance(scheduler, LeakWatchScheduler):
+        return False
+    if any(
+        (
+            scheduler.reload_pending,
+            scheduler.dom_scan_pending,
+            scheduler.area_click_pending,
+            scheduler.ticket_form_pending,
+            scheduler.submit_pending,
+            state.get("pending_area_navigation") is not None,
+            state.get("pending_date_navigation") is not None,
+            bool(state.get("area_navigation_retry_due")),
+            state.get("submit_in_flight") is not None,
+            state.get("purchase_attempt") is not None,
+            bool(state.get("manual_intervention_required")),
+            bool(state.get("soft_block_recovery_in_progress")),
+        )
+    ):
+        return False
+    return bool(
+        scheduler.fresh_document_after_reload
+        or scheduler.should_wait_for_reload_before_dom_scan(config_dict)
+    )
 
 
 def _record_action(name, value=""):

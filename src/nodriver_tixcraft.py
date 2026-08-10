@@ -1261,6 +1261,17 @@ def _should_prefer_cached_refresh_url(config_dict, state) -> bool:
     return remaining_ns <= REFRESH_CACHED_URL_FAST_PATH_WINDOW_NS
 
 
+def _should_prefer_cached_runtime_url(tab, config_dict, refresh_state) -> bool:
+    """Combine the deadline and idle leak-watch cached-URL fast paths."""
+
+    if _should_prefer_cached_refresh_url(config_dict, refresh_state):
+        return True
+    return tixcraft_platform.should_prefer_cached_url_during_leak_wait(
+        tab,
+        config_dict,
+    )
+
+
 def _reset_refresh_trigger_retry(state) -> None:
     state["refresh_retry_pending"] = False
     state["refresh_reload_attempts"] = 0
@@ -2183,7 +2194,8 @@ async def _run_main(args, resources):
             is_quit_bot = True
 
         if not is_quit_bot:
-            prefer_cached_url = _should_prefer_cached_refresh_url(
+            prefer_cached_url = _should_prefer_cached_runtime_url(
+                tab,
                 config_dict,
                 refresh_datetime_state,
             )

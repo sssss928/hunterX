@@ -62,17 +62,18 @@ def install_zendriver_transaction_guard(transaction_class: type | None = None) -
         return False
 
     @functools.wraps(current_call)
-    def guarded_call(transaction: Any, **response: dict[str, Any]) -> None:
+    def guarded_call(transaction: Any, **response: Any) -> None:
         if transaction.done():
             _log_late_response(transaction, response)
             return None
 
         try:
-            return current_call(transaction, **response)
+            current_call(transaction, **response)
+            return None
         except asyncio.InvalidStateError:
-            # This catch closes the tiny thread/callback race between done()
-            # above and Zendriver's set_result()/set_exception() call. Never
-            # suppress InvalidStateError while the transaction is still live.
+            # This catch closes the tiny callback race between done() above
+            # and Zendriver's set_result()/set_exception() call. Never hide an
+            # InvalidStateError while the transaction is still live.
             if not transaction.done():
                 raise
             _log_late_response(transaction, response)
@@ -80,5 +81,5 @@ def install_zendriver_transaction_guard(transaction_class: type | None = None) -
 
     setattr(guarded_call, _PATCH_MARKER, True)
     setattr(guarded_call, _ORIGINAL_CALL_ATTRIBUTE, current_call)
-    transaction_class.__call__ = guarded_call
+    setattr(transaction_class, "__call__", guarded_call)
     return True

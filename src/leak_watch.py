@@ -137,6 +137,8 @@ class LeakWatchScheduler:
     last_clicked_url: str = ""
     document_generation: int = 0
     last_no_ticket_scan_generation: int = -1
+    dom_scan_completed_since_reload: bool = False
+    fresh_document_after_reload: bool = False
     history: deque[str] = field(
         default_factory=lambda: deque(maxlen=LEAK_WATCH_HISTORY_CAPACITY)
     )
@@ -213,7 +215,35 @@ class LeakWatchScheduler:
 
     def mark_new_document(self) -> None:
         self.document_generation += 1
+        self.dom_scan_completed_since_reload = False
+        self.fresh_document_after_reload = False
         self._record("document_generation_advanced")
+
+    def should_wait_for_reload_before_dom_scan(
+        self,
+        config_dict: dict[str, Any] | None,
+    ) -> bool:
+        """Return whether this document was consumed and awaits its refresh.
+
+        This is intentionally narrower than ``should_scan_current_document``:
+        it controls only the main-loop URL probe fast path. A positive result
+        means entering the page JavaScript context again cannot reveal new
+        inventory until a real reload advances the document generation.
+        """
+
+        if not is_leak_watch_mode(config_dict):
+            return False
+        if get_leak_refresh_interval(config_dict) <= 0.0:
+            return False
+        return (
+            self.dom_scan_completed_since_reload
+            and not self.fresh_document_after_reload
+            and not self.reload_pending
+            and not self.dom_scan_pending
+            and not self.area_click_pending
+            and not self.ticket_form_pending
+            and not self.submit_pending
+        )
 
     def reset_for_recovery(self) -> None:
         """Clear an interrupted cycle before recovery navigation starts.
@@ -271,6 +301,11 @@ class LeakWatchScheduler:
             return False
         self.dom_scan_pending = True
         self.dom_scan_started_at = self._now(now)
+        self.dom_scan_completed_since_reload = False
+        # A fresh post-reload document may use cached TargetInfo only until the
+        # first deliberate DOM scan starts. From here the normal JS URL probe
+        # is restored so navigation cannot be hidden by stale cached state.
+        self.fresh_document_after_reload = False
         self._record("dom_scan_start")
         return True
 
@@ -278,6 +313,8 @@ class LeakWatchScheduler:
         self.dom_scan_pending = False
         self.dom_scan_started_at = 0.0
         self.last_dom_read_at = self._now(now)
+        self.dom_scan_completed_since_reload = True
+        self.fresh_document_after_reload = False
         self._record("dom_scan_end")
 
     def mark_area_click_pending(self, url: str = "", now: float | None = None) -> bool:
@@ -413,4 +450,10 @@ class LeakWatchScheduler:
         self.next_cycle_at = finished_at + max(0.0, interval)
         if success:
             self.mark_new_document()
+            # TargetInfo.url is safe to read while the new document settles.
+            # mark_dom_scan_start clears this before the first live DOM read.
+            self.fresh_document_after_reload = True
+        else:
+            self.dom_scan_completed_since_reload = False
+            self.fresh_document_after_reload = False
         self._record("cycle_done" if success else "cycle_timeout")
