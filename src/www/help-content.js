@@ -358,19 +358,19 @@ const HELP_CONTENT = {
 
   run_mode: {
     title: '執行模式',
-    short: '正式搶票模式保留原流程；撿漏模式只調整安全頁刷新與重讀 DOM 策略。',
+    short: '兩種模式共用購票流程，只更換準點、掃描、刷新與退避策略。',
     detail: `
-      <p><strong>正式搶票模式：</strong>保留 v0.4.0 hotfix 的日期、選區、票數、驗證碼、勾選與送出流程。</p>
-      <p><strong>撿漏模式：</strong>只在尚未進入訂單/付款的安全頁使用撿漏刷新間隔。回安全頁後會先重新讀 DOM，有票就立即依關鍵字或排序點擊。</p>
+      <p><strong>正式搶票模式：</strong>驗證並鎖定指定開賣時間，以一次性 monotonic deadline 刷新，接著進入共用的日期、選區、票數、資格、驗證與送出流程。</p>
+      <p><strong>撿漏模式：</strong>只在尚未進入訂單/付款的安全頁使用撿漏刷新間隔。每份新頁面最多完成一次無票掃描；有票時立即取消待執行刷新並進入同一購票流程。</p>
       <p class="text-warning-emphasis small mb-0"><strong>注意：</strong>撿漏模式不會繞過驗證碼、Cloudflare、Queue-it 或其他防護；ticket、order、checkout、payment 頁不會因撿漏模式刷新。</p>`,
     link: null
   },
 
   auto_reload_page_interval: {
     title: '自動刷新頁面間隔',
-    short: '活動頁面的自動重新整理間隔秒數（0 = 停用）',
+    short: '同一分頁兩次自動 reload 開始時間的最小間隔（0 = 停用）',
     detail: `
-      <p>設定程式在目標頁面等待時自動刷新的間隔時間（單位：秒）。</p>
+      <p>設定同一分頁兩次自動 reload dispatch 的最小間隔（單位：秒）。延遲後不會補跑錯過的刷新，也不會加入隱藏隨機值。</p>
       <table class="table table-sm table-bordered">
         <thead><tr><th>值</th><th>行為</th></tr></thead>
         <tbody>
@@ -388,7 +388,7 @@ const HELP_CONTENT = {
     short: '撿漏模式使用的安全頁刷新/重掃秒數。',
     detail: `
       <p>此欄位只在<strong>撿漏模式</strong>使用。正式搶票模式仍使用「自動刷新頁面間隔」。</p>
-      <p>流程是：回到安全頁後先立即重讀 DOM；若沒票，才依此秒數等待後刷新/重掃。同一份 AREA document 只掃一次；成功刷新後到第一次掃描、以及掃描完成等待下一輪期間，會優先使用瀏覽器的 CDP 快取網址，不反覆進入頁面 JavaScript 讀取 URL。</p>
+      <p>流程是：每份新頁面完成一次無票掃描；若沒票，依此秒數等待後刷新，新的 document generation 才再完整掃描。</p>
       <p class="text-muted small mb-0">設定為 <code>0</code> 代表不做定時刷新，但仍可在頁面變化時由既有平台流程處理。</p>`,
     link: null
   },
@@ -415,7 +415,7 @@ const HELP_CONTENT = {
     title: '不足張數仍購買',
     short: '拓元家族票數不足時，允許購買小於設定張數的最大可用張數',
     detail: `
-      <p>此開關只影響拓元、添翼、Indievox。預設關閉，避免買到少於您原本設定的張數。</p>
+      <p>此開關適用拓元、添翼、Indievox 與 Ticketmaster。預設關閉，只有精確張數可用時才繼續；即使開啟也永遠不會選擇超過設定的張數。</p>
       <table class="table table-sm table-bordered">
         <thead><tr><th>狀態</th><th>行為</th></tr></thead>
         <tbody>
@@ -626,12 +626,13 @@ const HELP_CONTENT = {
 
   refresh_datetime: {
     title: '刷新在指定時間',
-    short: '讓程式在特定時間點才開始搶票',
+    short: '以 Asia/Taipei 毫秒時間建立一次性準點 reload',
     detail: `
       <p>設定程式在指定的日期時間才開始嘗試搶票。用於場次在特定時間才開放售票的情境。</p>
       <p><strong>格式：</strong><code>YYYY/MM/DD HH:MM:SS</code> 或 <code>YYYY/MM/DD HH:MM:SS.SSS</code></p>
       <p>範例：<code>2025/12/25 10:00:00.000</code></p>
-      <p>程式會在你輸入的指定時間重整頁面，不會依延遲估算自動提前。如果想提早刷新，請直接輸入較早的毫秒時間，例如 <code>2026/07/13 09:59:59.850</code>。</p>
+      <p>時間預設依 <code>Asia/Taipei</code>（UTC+08:00）解讀。程式會在你輸入的指定時間送出一次 guarded reload，不會依延遲估算自動提前。如果想提早刷新，請直接輸入較早的毫秒時間，例如 <code>2026/07/13 09:59:59.850</code>。</p>
+      <p class="text-warning-emphasis small">搶票前請在 Windows「日期與時間」按下立即同步；程式可偵測時鐘跳動，但無法修正錯誤的系統時間、網路或伺服器延遲。</p>
       <p class="text-muted small mb-0">提示：倒數顯示可每秒更新；實際觸發使用獨立的 monotonic deadline，不由畫面輪詢精度決定。</p>`,
     faq: [
       {
@@ -1262,10 +1263,10 @@ const HELP_CONTENT_EN_META = {
   },
   run_mode: {
     title: 'Run mode',
-    short: 'Onsale keeps the existing flow. Leak-watch changes only safe-page refresh and DOM reread strategy.',
+    short: 'Both modes share the purchase flow and replace only timing, scan, refresh, and backoff policy.',
     detailHtml: `
-      <p><strong>Onsale mode:</strong> keeps the v0.4.0 hotfix date, area, ticket count, captcha, agreement, and submit flow.</p>
-      <p><strong>Leak-watch mode:</strong> uses the leak-watch interval only on safe pages before order/payment. After returning to a safe page it rereads the DOM first; if tickets are visible, it clicks immediately according to keywords or ordering.</p>
+      <p><strong>Onsale mode:</strong> validates and freezes the configured sale time, performs one monotonic-deadline refresh, then enters the shared date, area, quantity, qualification, verification, and submit flow.</p>
+      <p><strong>Leak-watch mode:</strong> uses the leak-watch interval only on safe pages before order/payment. It completes at most one no-ticket scan per new document and enters the same purchase flow as soon as inventory is found.</p>
       <p class="text-warning-emphasis small mb-0"><strong>Note:</strong> leak-watch mode does not bypass CAPTCHA, Cloudflare, Queue-it, or other protections. Ticket/order/checkout/payment pages are not reloaded by leak-watch mode.</p>`,
   },
   leak_refresh_interval_seconds: {
@@ -1273,7 +1274,7 @@ const HELP_CONTENT_EN_META = {
     short: 'Safe-page refresh/rescan interval used only in leak-watch mode.',
     detailHtml: `
       <p>This value is used only in <strong>leak-watch mode</strong>. Onsale mode continues to use the regular auto reload interval.</p>
-      <p>After returning to a safe page, the bot first rereads the DOM immediately. If no tickets are found, it waits this many seconds before refreshing/rescanning. Each AREA document is scanned once; while a known-safe document is settling after reload or waiting for the next cycle, the runtime prefers the CDP-cached URL instead of repeatedly entering page JavaScript.</p>
+      <p>Each new document gets one complete no-ticket scan. If no tickets are found, the bot waits this many seconds before refreshing; only the new document generation is scanned again.</p>
       <p class="text-muted small mb-0">Set <code>0</code> to disable timed reloads while keeping existing platform handling.</p>`,
   },
   tixcraft_soft_block_delay: {
@@ -1296,7 +1297,7 @@ const HELP_CONTENT_EN_META = {
     title: 'Buy fewer TixCraft tickets if needed',
     short: 'Allow the TixCraft family to buy the largest available count below your configured ticket count.',
     detailHtml: `
-      <p>This switch applies only to TixCraft, TeamEar, and Indievox. It is off by default to avoid buying fewer tickets than requested.</p>
+      <p>This switch applies to TixCraft, TeamEar, Indievox, and Ticketmaster. It is off by default; even when enabled, HunterX never selects more tickets than requested.</p>
       <table class="table table-sm table-bordered">
         <thead><tr><th>Status</th><th>Behavior</th></tr></thead>
         <tbody>
@@ -1483,13 +1484,13 @@ const HELP_CONTENT_EN_META = {
   },
   refresh_datetime: {
     title: 'Refresh at specific time',
-    short: 'Wait until a specific date and time before starting the ticketing flow.',
+    short: 'Create one millisecond sale refresh in Asia/Taipei time.',
     detailHtml: `
       <p>Set the exact date and time when the bot should start trying to get tickets. This is useful when sales open at a specific moment.</p>
-      <p><strong>Format:</strong> <code>YYYY/MM/DD HH:MM:SS</code></p>
-      <p>Example: <code>2025/12/25 10:00:00</code></p>
-      <p>Before the target time, the bot waits and checks the time once per second. As soon as the target time is reached, it starts refreshing and ticketing immediately.</p>
-      <p class="text-muted small mb-0">Tip: set this 1-2 seconds before the official sale time to compensate for network and processing delay.</p>`,
+      <p><strong>Format:</strong> <code>YYYY/MM/DD HH:MM:SS</code> or <code>YYYY/MM/DD HH:MM:SS.SSS</code></p>
+      <p>Example: <code>2026/08/10 11:00:00.000</code></p>
+      <p>The runtime interprets the target in <code>Asia/Taipei</code> (UTC+08:00), freezes a monotonic one-shot deadline, and sends one guarded reload at the entered target. It never silently subtracts a delay estimate.</p>
+      <p class="text-warning-emphasis small">Use Windows Date &amp; time → Sync now before a sale. HunterX cannot repair an incorrect OS clock or remove browser, network, or server latency.</p>`,
     faq: [
       {
         q: 'What happens if I leave it empty?',

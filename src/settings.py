@@ -34,6 +34,7 @@ import util
 from hunter_metadata import APP_DISPLAY_VERSION, APP_NAME, RELEASE_URL
 from notification_context import make_notification_context
 from refresh_timing import (
+    DEFAULT_REFRESH_CALIBRATION,
     DEFAULT_TIME_CALIBRATION,
     calibrate_ntp_servers,
     get_platform_timing_capability,
@@ -306,7 +307,7 @@ CONST_CENTER = "center"
 CONST_RANDOM = "random"
 CONST_MOST_REMAINING = "most remaining"
 CONST_SELECT_ORDER_DEFAULT = CONST_RANDOM
-CONST_EXCLUDE_DEFAULT = "\"輪椅\",\"身障\",\"身心\",\"障礙\",\"Restricted View\",\"燈柱遮蔽\",\"視線不完整\""
+CONST_EXCLUDE_DEFAULT = "\"輪椅\",\"身障\",\"身心\",\"障礙\",\"愛心\",\"Restricted View\",\"燈柱遮蔽\",\"視線不完整\""
 CONST_CAPTCHA_SOUND_FILENAME_DEFAULT = "assets/sounds/ding-dong.wav"
 CONST_HOMEPAGE_DEFAULT = "about:blank"
 
@@ -351,6 +352,7 @@ def get_default_config():
     config_dict["language"] = "English"
     config_dict["ticket_number"] = 2
     config_dict["refresh_datetime"] = ""
+    config_dict["refresh_calibration"] = dict(DEFAULT_REFRESH_CALIBRATION)
     config_dict["time_calibration"] = dict(DEFAULT_TIME_CALIBRATION)
 
     config_dict["ocr_captcha"] = {}
@@ -452,8 +454,6 @@ def get_default_config():
     config_dict["advanced"]["auto_reload_page_interval"] = 5
     config_dict["advanced"]["leak_refresh_interval_seconds"] = 3
     config_dict["advanced"]["tixcraft_soft_block_delay"] = ""
-    config_dict["advanced"]["auto_reload_overheat_count"] = 4
-    config_dict["advanced"]["auto_reload_overheat_cd"] = 1.0
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""
     config_dict["advanced"]["window_size"] = "600,1024"
@@ -593,7 +593,7 @@ def migrate_config(config_dict):
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
-    for section in ["advanced", "kktix", "tixcraft", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline", "time_calibration"]:
+    for section in ["advanced", "kktix", "tixcraft", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline", "refresh_calibration", "time_calibration"]:
         if section in default:
             if section not in config_dict or not isinstance(config_dict[section], dict):
                 config_dict[section] = dict(default[section])
@@ -613,8 +613,10 @@ def migrate_config(config_dict):
 
         if not isinstance(config_dict["refresh_calibration"], dict):
             config_dict["refresh_calibration"] = {}
-        migrated_calibration = dict(DEFAULT_REFRESH_CALIBRATION)
-        migrated_calibration.update(config_dict["refresh_calibration"])
+        # The default-section pass above already replaced invalid mappings and
+        # backfilled every missing key.  Normalize that owned mapping in place
+        # instead of allocating and merging the same calibration data twice.
+        migrated_calibration = config_dict["refresh_calibration"]
         migrated_calibration["enable"] = False
         migrated_calibration["auto_calibrate"] = False
         migrated_calibration["advanced_delay_mode"] = normalize_advanced_delay_mode(
@@ -628,6 +630,10 @@ def migrate_config(config_dict):
     )
 
     if "advanced" in config_dict:
+        # v0.4.8 removes the unused legacy overheat fallback.  It never owned
+        # refresh decisions and must not reintroduce a hidden one-second pace.
+        config_dict["advanced"].pop("auto_reload_overheat_count", None)
+        config_dict["advanced"].pop("auto_reload_overheat_cd", None)
         run_mode = str(config_dict["advanced"].get("run_mode", default["advanced"]["run_mode"])).strip().lower()
         if run_mode not in {"onsale", "leak_watch"}:
             run_mode = default["advanced"]["run_mode"]

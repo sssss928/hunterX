@@ -329,7 +329,7 @@ function applyOrRestore(selector, property, englishValue) {
 function renderReadmePane() {
     const englishHtml = `
 <div class="alert alert-info" role="alert">
-        <p class="mb-0"><strong>Version</strong>: HunterX (0.4.7) | <strong>Technical support</strong>: Claude Code AI-assisted development</p>
+        <p class="mb-0"><strong>Version</strong>: HunterX (0.4.8) | <strong>Technical support</strong>: Codex AI-assisted development</p>
 </div>
 
 <div class="accordion mb-3" id="devStatusAccordion">
@@ -566,7 +566,7 @@ function renderAdvancedTabTranslations() {
 
     setNearestFormText('notification_message', 'This message will be sent to both Discord and Telegram when tickets are found. Leave it empty to keep the default message.');
     setNearestFormText('tixcraft_soft_block_delay', 'Applies only to the TixCraft, TeamEar, and Indievox soft-block white screen. Leave it empty to keep the default randomized delay.');
-    setNearestFormText('tixcraft_allow_less_tickets', 'Applies only to TixCraft, TeamEar, and Indievox. When enabled, Hunter buys the largest available count below your configured ticket count if the exact count is unavailable.');
+    setNearestFormText('tixcraft_allow_less_tickets', 'Applies to TixCraft, TeamEar, Indievox, and Ticketmaster. When enabled, HunterX buys the largest available count below your configured ticket count if the exact count is unavailable; it never selects more than requested.');
     setNearestFormText('ocr_captcha_use_universal', 'When enabled, HunterX uses the self-trained OCR model instead of the upstream ddddocr model and beta configuration.');
     setNearestFormText('ocr_model_path', 'Path to the custom OCR model <strong>folder</strong>. The folder must contain <code>custom.onnx</code> and <code>charsets.json</code>. Relative paths are supported. If left empty, the built-in ddddocr model is used.');
 

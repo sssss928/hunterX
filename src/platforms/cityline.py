@@ -13,6 +13,7 @@ from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
 from runtime_health import guarded_get
+from tab_ownership import register_owned_tab
 from nodriver_common import (
     check_and_handle_pause,
     handle_cloudflare_challenge,
@@ -60,6 +61,8 @@ def _cityline_state_defaults():
         "played_sound_order": False,
         "last_homepage_redirect_time": 0,
         "otp_wait_last_log": 0,
+        "pending_owned_tab_baseline_ids": (),
+        "pending_owned_tab_deadline": 0.0,
     }
 
 
@@ -779,7 +782,13 @@ async def nodriver_cityline_purchase_button_press(tab, config_dict):
 
     # Click 'Continue' button to go to performance page
     debug.log("[CITYLINE EVENTDETAIL] Clicking continue button...")
+    baseline_tabs = tuple(getattr(tab.browser, "tabs", ()))
     is_button_clicked = await nodriver_cityline_continue_button_press(tab, config_dict)
+    if is_button_clicked:
+        _state["pending_owned_tab_baseline_ids"] = tuple(
+            id(item) for item in baseline_tabs
+        )
+        _state["pending_owned_tab_deadline"] = time.monotonic() + 5.0
 
     return is_button_clicked
 
@@ -789,15 +798,25 @@ async def nodriver_cityline_close_second_tab(tab, url):
     if len(tab.browser.tabs) > 1:
         # wait page ready.
         await asyncio.sleep(0.3)
+        baseline_ids = set(_state.get("pending_owned_tab_baseline_ids", ()))
+        pending_deadline = float(
+            _state.get("pending_owned_tab_deadline", 0.0) or 0.0
+        )
+        if not pending_deadline or time.monotonic() >= pending_deadline:
+            _state["pending_owned_tab_baseline_ids"] = ()
+            _state["pending_owned_tab_deadline"] = 0.0
+            return new_tab
         for tmp_tab in tab.browser.tabs:
-            if tmp_tab != tab:
+            if tmp_tab is not tab and id(tmp_tab) not in baseline_ids:
                 tmp_url, is_quit_bot = await nodriver_current_url(tmp_tab)
                 if len(tmp_url) > 0:
                     if tmp_url[:5] == "https":
-                        await new_tab.activate()
-                        await tab.close()
+                        register_owned_tab(tmp_tab, "cityline_continue_click")
+                        await tmp_tab.activate()
                         await asyncio.sleep(0.3)
                         new_tab = tmp_tab
+                        _state["pending_owned_tab_baseline_ids"] = ()
+                        _state["pending_owned_tab_deadline"] = 0.0
                         break
     return new_tab
 

@@ -42,6 +42,7 @@ from platform_registry import platform_key_for_url
 from reload_guard import guarded_reload
 from run_modes import get_effective_reload_interval, is_leak_watch_mode
 from submit_guard import SubmitGuard
+from tab_ownership import close_owned_tab, register_owned_tab
 from nodriver_common import (
     check_and_handle_pause,
     check_and_handle_quit,
@@ -91,7 +92,6 @@ __all__ = [
     "nodriver_tixcraft_ticket_main_ocr",
     "nodriver_tixcraft_main",
     "nodriver_ticketmaster_check_ip_block",
-    "should_prefer_cached_url_during_leak_wait",
 ]
 
 # Direct helper tests use the default mapping. Production dispatch binds this
@@ -209,6 +209,13 @@ def _dispatch_state_for_tab(tab):
     return _state_for_tab(tab)
 
 
+def _refresh_coordinator_for_tab(tab):
+    # Lazy import avoids the platform registry -> adapter -> platform cycle.
+    from platform_engine import platform_engine
+
+    return platform_engine.refresh_coordinator_for(tab)
+
+
 @contextmanager
 def _bind_tixcraft_tab_state(tab):
     token = _state.bind(_state_for_tab(tab))
@@ -232,7 +239,6 @@ class TixCraftAttemptPhase(str, Enum):
 
 class TixCraftAreaOutcome(str, Enum):
     PAGE_NOT_READY = "page_not_ready"
-    WAITING_NEXT_CYCLE = "waiting_next_cycle"
     DOM_SCAN_BUSY = "dom_scan_busy"
     ZONE_MISSING = "zone_missing"
     DOM_QUERY_FAILED = "dom_query_failed"
@@ -428,6 +434,12 @@ _TIXCRAFT_SOFT_BLOCK_SCOPE_HOSTS = (
     "ticketmaster.com",
 )
 
+_TIXCRAFT_CUSTOM_SOFT_BLOCK_DELAY_HOSTS = (
+    "tixcraft.com",
+    "teamear.com",
+    "indievox.com",
+)
+
 _TIXCRAFT_SOFT_BLOCK_TEXT_MARKERS = (
     "your browsing activity has been paused",
     "browsing activity has been paused",
@@ -456,6 +468,18 @@ def _is_tixcraft_soft_block_scope(url):
         return _is_tixcraft_family_host(urlsplit(str(url or "")).hostname)
     except ValueError:
         return False
+
+
+def _is_tixcraft_custom_soft_block_delay_scope(url):
+    try:
+        hostname = urlsplit(str(url or "")).hostname
+    except ValueError:
+        return False
+    host = str(hostname or "").lower().split(":", 1)[0].rstrip(".")
+    return any(
+        host == root or host.endswith(f".{root}")
+        for root in _TIXCRAFT_CUSTOM_SOFT_BLOCK_DELAY_HOSTS
+    )
 
 
 def _is_tixcraft_soft_block_text(text):
@@ -855,7 +879,9 @@ def _parse_tixcraft_soft_block_delay(config_dict):
 
 def _resolve_soft_block_wait_seconds(config_dict, scope_url, default_wait_seconds=None):
     custom_delay = _parse_tixcraft_soft_block_delay(config_dict)
-    if custom_delay is not None and _is_tixcraft_soft_block_scope(scope_url):
+    if custom_delay is not None and _is_tixcraft_custom_soft_block_delay_scope(
+        scope_url,
+    ):
         return custom_delay, True
 
     if default_wait_seconds is None:
@@ -882,7 +908,10 @@ def _confirm_tixcraft_soft_block_evidence(url, kind, now=None):
     _state["soft_block_evidence_signature"] = signature
     _state["soft_block_evidence_first_at"] = first_at
     _state["soft_block_evidence_count"] = count
-    return count >= 2
+    confirmed = count >= 2
+    if not confirmed and str(_state.get("soft_block_state", "CLEAR")) == "CLEAR":
+        _state["soft_block_state"] = "SUSPECTED"
+    return confirmed
 
 
 def _clear_tixcraft_soft_block_evidence():
@@ -1040,17 +1069,44 @@ def _mark_tixcraft_recovery_landed(config_dict, recovery_url, now=None):
         _state["leak_scheduler"].mark_recovery_landed(config_dict, now=landed_at)
 
 
-def _clear_tixcraft_soft_block_backoff():
+def _clear_tixcraft_soft_block_backoff(tab=None):
     _state["soft_block_phase"] = ""
+    _state["soft_block_state"] = "CLEAR"
     _state["soft_block_backoff_until"] = 0.0
     _state["soft_block_recovery_retry_at"] = 0.0
+    _state["soft_block_retry_wait_seconds"] = 0.0
+    _state["soft_block_incident_signature"] = ""
     _state["ip_block_until"] = 0.0
+    if tab is not None:
+        _refresh_coordinator_for_tab(tab).clear_soft_block()
 
 
-def _defer_tixcraft_soft_block_recovery(now=None):
+def _defer_tixcraft_soft_block_recovery(
+    config_dict=None,
+    scope_url="",
+    *,
+    tab=None,
+    now=None,
+):
     current = time.monotonic() if now is None else float(now)
+    wait_seconds = float(
+        _state.get("soft_block_retry_wait_seconds", 0.0) or 0.0
+    )
+    if wait_seconds <= 0:
+        wait_seconds, _ = _resolve_soft_block_wait_seconds(
+            config_dict,
+            scope_url,
+        )
+        _state["soft_block_retry_wait_seconds"] = wait_seconds
+    retry_at = current + wait_seconds
     _state["soft_block_phase"] = "recovering"
-    _state["soft_block_recovery_retry_at"] = current + 1.0
+    _state["soft_block_state"] = "CONFIRMED_WAIT"
+    _state["soft_block_recovery_retry_at"] = retry_at
+    _state["ip_block_until"] = retry_at
+    if tab is not None:
+        _refresh_coordinator_for_tab(tab).begin_soft_block(
+            round(retry_at * 1_000_000_000)
+        )
 
 
 def _is_tixcraft_recovery_health_confirmed(snapshot, expected_page=None):
@@ -1102,8 +1158,27 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
     detection = detection or {"kind": "unknown", "original_url": "", "client_ip": "unknown"}
     original_url = detection.get("original_url", "") or ""
     scope_url = current_url if _is_tixcraft_soft_block_scope(current_url) else original_url
-    wait_seconds, is_custom_delay = _resolve_soft_block_wait_seconds(config_dict, scope_url)
     kind = detection.get("kind", "unknown")
+    incident_signature = f"{_tixcraft_route_key(scope_url)}:{kind}"
+    stored_signature = str(
+        _state.get("soft_block_incident_signature", "") or ""
+    )
+    stored_wait = float(
+        _state.get("soft_block_retry_wait_seconds", 0.0) or 0.0
+    )
+    if stored_signature == incident_signature and stored_wait > 0:
+        wait_seconds = stored_wait
+        is_custom_delay = (
+            _parse_tixcraft_soft_block_delay(config_dict) == int(stored_wait)
+            and _is_tixcraft_custom_soft_block_delay_scope(scope_url)
+        )
+    else:
+        wait_seconds, is_custom_delay = _resolve_soft_block_wait_seconds(
+            config_dict,
+            scope_url,
+        )
+        _state["soft_block_incident_signature"] = incident_signature
+        _state["soft_block_retry_wait_seconds"] = wait_seconds
     _state["soft_block_recovery_in_progress"] = True
     try:
         _set_tixcraft_attempt_phase(TixCraftAttemptPhase.RECOVERING_TO_AREA)
@@ -1134,7 +1209,11 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
             backoff_until = now + wait_seconds
             _state["soft_block_backoff_until"] = backoff_until
         _state["soft_block_phase"] = "backoff"
+        _state["soft_block_state"] = "CONFIRMED_WAIT"
         _state["ip_block_until"] = backoff_until
+        _refresh_coordinator_for_tab(tab).begin_soft_block(
+            round(backoff_until * 1_000_000_000)
+        )
         remaining_wait = max(0.0, backoff_until - now)
         if remaining_wait > 0:
             wait_result = await runtime_health.sleep_with_heartbeat(
@@ -1154,6 +1233,8 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
 
         _state["ip_block_until"] = 0
         _state["soft_block_phase"] = "recovering"
+        _state["soft_block_state"] = "RECOVERING"
+        _refresh_coordinator_for_tab(tab).mark_soft_block_recovering()
         recovery_url = _get_tixcraft_soft_block_recovery_url(config_dict, current_url, original_url)
         if not recovery_url:
             routing_url = _get_tixcraft_controlled_routing_url(config_dict)
@@ -1161,6 +1242,11 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
                 debug.log(
                     "[EPS BLOCK] No observed /ticket/area/ URL or safe configured activity route is available; "
                     "navigation skipped"
+                )
+                _defer_tixcraft_soft_block_recovery(
+                    config_dict,
+                    scope_url,
+                    tab=tab,
                 )
                 return True
             debug.log(
@@ -1178,7 +1264,11 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
                 debug.log(
                     f"[EPS BLOCK] Controlled activity-route recovery failed: {type(exc).__name__}"
                 )
-                _defer_tixcraft_soft_block_recovery()
+                _defer_tixcraft_soft_block_recovery(
+                    config_dict,
+                    scope_url,
+                    tab=tab,
+                )
             else:
                 ready = await runtime_health.wait_for_interactive_ready(
                     tab,
@@ -1209,9 +1299,13 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
                         guarded_result=bool(routed),
                         interactive=bool(ready),
                     )
-                    _defer_tixcraft_soft_block_recovery()
+                    _defer_tixcraft_soft_block_recovery(
+                        config_dict,
+                        scope_url,
+                        tab=tab,
+                    )
                 else:
-                    _clear_tixcraft_soft_block_backoff()
+                    _clear_tixcraft_soft_block_backoff(tab)
             return True
 
         debug.log(f"[EPS BLOCK] Soft-block wait finished, navigating once to area: {recovery_url}")
@@ -1224,7 +1318,11 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
             )
         except Exception as exc:
             debug.log(f"[EPS BLOCK] Soft-block recovery navigation failed: {exc}")
-            _defer_tixcraft_soft_block_recovery()
+            _defer_tixcraft_soft_block_recovery(
+                config_dict,
+                scope_url,
+                tab=tab,
+            )
             return True
         ready = await runtime_health.wait_for_interactive_ready(tab, config_dict)
         landed_target_url = _get_cached_tab_url(tab)
@@ -1236,7 +1334,11 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
                 current_url=landed_target_url,
                 guarded_result=bool(navigated),
             )
-            _defer_tixcraft_soft_block_recovery()
+            _defer_tixcraft_soft_block_recovery(
+                config_dict,
+                scope_url,
+                tab=tab,
+            )
             return True
         if not ready:
             runtime_health.runtime_log(
@@ -1244,7 +1346,11 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
                 config_dict,
                 current_url=recovery_url,
             )
-            _defer_tixcraft_soft_block_recovery()
+            _defer_tixcraft_soft_block_recovery(
+                config_dict,
+                scope_url,
+                tab=tab,
+            )
             return True
         recovery_snapshot = await _read_tixcraft_page_health(tab, config_dict)
         if not _is_tixcraft_recovery_health_confirmed(
@@ -1257,10 +1363,14 @@ async def _handle_tixcraft_soft_block(tab, config_dict, current_url="", detectio
                 current_url=recovery_url,
                 guarded_result=bool(navigated),
             )
-            _defer_tixcraft_soft_block_recovery()
+            _defer_tixcraft_soft_block_recovery(
+                config_dict,
+                scope_url,
+                tab=tab,
+            )
             return True
         _mark_tixcraft_recovery_landed(config_dict, recovery_url)
-        _clear_tixcraft_soft_block_backoff()
+        _clear_tixcraft_soft_block_backoff(tab)
         runtime_health.runtime_log(
             "[EPS BLOCK] recovery_landed",
             config_dict,
@@ -1409,8 +1519,11 @@ def _tixcraft_state_defaults():
         "ip_block_until": 0,
         "ip_block_count": 0,
         "soft_block_phase": "",
+        "soft_block_state": "CLEAR",
         "soft_block_backoff_until": 0.0,
         "soft_block_recovery_retry_at": 0.0,
+        "soft_block_retry_wait_seconds": 0.0,
+        "soft_block_incident_signature": "",
         "queue_it_enter_time": None,
     }
 
@@ -1433,54 +1546,6 @@ def _ensure_runtime_helpers():
 def _get_leak_scheduler():
     _ensure_runtime_helpers()
     return _state["leak_scheduler"]
-
-
-def should_prefer_cached_url_during_leak_wait(tab, config_dict) -> bool:
-    """Use TargetInfo.url only while an already-scanned AREA document is idle.
-
-    The normal runtime probes ``window.location.href`` so JavaScript can supersede
-    a briefly stale CDP target URL during navigation. Leak-watch has a special idle
-    window after a known safe AREA reload/recovery and while that document is either
-    settling before its first scan or waiting for the next scheduled reload. During
-    those states there is no purchase transition to discover, so repeated JavaScript
-    URL probes only add renderer/CDP pressure.
-
-    Fail closed whenever a click/navigation/submit/manual-intervention state exists.
-    As soon as a purchase transition starts, the normal JavaScript probe resumes.
-    """
-
-    if not is_leak_watch_mode(config_dict):
-        return False
-
-    cached_url = _get_cached_tab_url(tab)
-    if not cached_url or classify_page(cached_url) is not PageClass.AREA:
-        return False
-    if not should_use_leak_watch(config_dict, cached_url):
-        return False
-
-    try:
-        state = _state_for_tab(tab)
-    except Exception:
-        return False
-
-    scheduler = state.get("leak_scheduler")
-    if not isinstance(scheduler, LeakWatchScheduler):
-        return False
-    if not scheduler.can_use_cached_url_for_safe_area_cycle(config_dict):
-        return False
-
-    if isinstance(state.get("pending_area_navigation"), TixCraftPendingNavigation):
-        return False
-    if state.get("area_navigation_retry_due", False):
-        return False
-    if state.get("submit_in_flight") is not None:
-        return False
-    if state.get("manual_intervention_required", False):
-        return False
-    if isinstance(state.get("purchase_attempt"), TixCraftPurchaseAttempt):
-        return False
-
-    return True
 
 
 def _record_action(name, value=""):
@@ -3584,6 +3649,22 @@ async def nodriver_tixcraft_redirect(tab, url):
                 pass
     return ret
 
+
+def _should_redirect_tixcraft_detail(url):
+    normalized = str(url or "").casefold()
+    return "/activity/detail/" in normalized and "ticketmaster" not in normalized
+
+
+def _is_ticketmaster_date_page(url):
+    normalized = str(url or "").casefold()
+    if "ticketmaster" not in normalized:
+        return False
+    return (
+        "/activity/detail/" in normalized
+        or "/activity/game/" in normalized
+        or ("/artist/" in normalized and len(normalized.split("/")) == 6)
+    )
+
 # ============================================
 # Ticketmaster.com NoDriver Platform Migration
 # ============================================
@@ -4153,6 +4234,7 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
     is_date_clicked = False
     if target_area:
         try:
+            existing_tabs = tuple(getattr(tab.browser, "tabs", ()))
             # Click "See Tickets" link
             link_element = await target_area.query_selector('a')
             if link_element:
@@ -4162,10 +4244,21 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
 
                 # Handle new tab (close if opened)
                 await tab.sleep(0.3)
-                if len(tab.browser.tabs) > 1:
-                    # Close extra tabs
-                    for extra_tab in tab.browser.tabs[1:]:
-                        await extra_tab.close()
+                new_tabs = [
+                    candidate
+                    for candidate in getattr(tab.browser, "tabs", ())
+                    if all(candidate is not existing for existing in existing_tabs)
+                ]
+                if new_tabs:
+                    # Only tabs observed as a direct result of this bot click
+                    # enter the ownership registry. User-opened tabs that were
+                    # already present are never closed.
+                    for extra_tab in new_tabs:
+                        register_owned_tab(
+                            extra_tab,
+                            "ticketmaster_date_click_popup",
+                        )
+                        await close_owned_tab(extra_tab)
                     await tab.sleep(0.2)
 
         except Exception as exc:
@@ -4321,6 +4414,11 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
         debug.log(f"[TICKETMASTER TICKET] Failed to check disabled status: {exc}")
         pass
 
+    ticket_number = str(config_dict.get("ticket_number", 1))
+    allow_less_tickets = bool(
+        config_dict.get("tixcraft", {}).get("allow_less_tickets", False)
+    )
+
     # Check current value (zendriver evaluate returns Python values directly)
     select_attrs = select_element.attrs or {}
     selector_id = select_attrs.get('id')
@@ -4340,18 +4438,27 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
             pass
 
     if current_value and current_value != "0" and current_value.isnumeric():
-        debug.log(f"[TICKETMASTER TICKET] Ticket number already set to: {current_value}")
-        try:
-            auto_mode_button = await tab.query_selector('#autoMode')
-            if auto_mode_button:
-                await auto_mode_button.click()
-                debug.log("[TICKETMASTER TICKET] Clicked #autoMode button")
-        except Exception:
-            pass
-        return True
-
-    # Set ticket number
-    ticket_number = str(config_dict.get("ticket_number", 1))
+        current_count = int(current_value)
+        target_count = int(ticket_number)
+        acceptable = current_count == target_count or (
+            allow_less_tickets and 0 < current_count < target_count
+        )
+        if acceptable:
+            debug.log(
+                f"[TICKETMASTER TICKET] Ticket number already set to: {current_value}"
+            )
+            try:
+                auto_mode_button = await tab.query_selector('#autoMode')
+                if auto_mode_button:
+                    await auto_mode_button.click()
+                    debug.log("[TICKETMASTER TICKET] Clicked #autoMode button")
+            except Exception:
+                pass
+            return True
+        debug.log(
+            f"[TICKETMASTER TICKET] Existing ticket number {current_value} "
+            f"does not satisfy target {ticket_number}; re-selecting"
+        )
 
     try:
         # Get select element ID for JavaScript manipulation
@@ -4371,9 +4478,11 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
         ''')
         debug.log(f"[TICKETMASTER TICKET] Available options: {option_texts}")
 
-        # Use JavaScript to set select value; fallback to max available if exact not found
+        # Exact count is mandatory unless the user explicitly enables
+        # allow_less_tickets.  The fallback is always below the target; HunterX
+        # must never silently buy more tickets than configured.
         result = await tab.evaluate(f'''
-            (function(elementId, targetText) {{
+            (function(elementId, targetText, targetCount, allowLess) {{
                 const selectEl = document.getElementById(elementId);
                 if (!selectEl) {{
                     return {{ success: false, error: "Element not found" }};
@@ -4387,12 +4496,15 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
                         return {{ success: true, value: options[i].value, selected: options[i].text }};
                     }}
                 }}
-                // Fallback: select max available (last numeric option, excluding value="0")
+                if (!allowLess) {{
+                    return {{ success: false, error: "Exact ticket count unavailable" }};
+                }}
+                // Fallback: largest available count strictly below the target.
                 let maxIdx = -1;
                 let maxVal = 0;
                 for (let i = 0; i < options.length; i++) {{
                     const v = parseInt(options[i].value);
-                    if (!isNaN(v) && v > 0 && v > maxVal) {{
+                    if (!isNaN(v) && v > 0 && v < targetCount && v > maxVal) {{
                         maxVal = v;
                         maxIdx = i;
                     }}
@@ -4403,13 +4515,16 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
                     return {{ success: true, value: options[maxIdx].value, selected: options[maxIdx].text, fallback: true }};
                 }}
                 return {{ success: false, error: "Option not found" }};
-            }})('{selector_id}', '{ticket_number}');
+            }})({json.dumps(selector_id)}, {json.dumps(ticket_number)}, {int(ticket_number)}, {json.dumps(allow_less_tickets)});
         ''')
 
         if result and result.get('success'):
             selected = result.get('selected', ticket_number)
             if result.get('fallback'):
-                debug.log(f"[TICKETMASTER TICKET] Exact '{ticket_number}' not found, selected max available: {selected}")
+                debug.log(
+                    f"[TICKETMASTER TICKET] Exact '{ticket_number}' not found; "
+                    f"allow_less_tickets selected: {selected}"
+                )
             else:
                 debug.log(f"[TICKETMASTER TICKET] Set ticket number to: {selected}")
 
@@ -5454,6 +5569,12 @@ async def _finalize_tixcraft_area_iteration(
     }:
         return False
 
+    if (
+        normalized_outcome == TixCraftAreaOutcome.NO_AVAILABLE_AREA
+        and is_leak_watch_mode(config_dict)
+    ):
+        _get_leak_scheduler().mark_no_ticket_scan_complete()
+
     return await _reload_page_when_due(
         tab,
         config_dict,
@@ -5678,35 +5799,6 @@ async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
         )
         return False
 
-    if (
-        leak_dom_guard
-        and leak_scheduler.should_wait_for_reload_before_dom_scan(config_dict)
-    ):
-        # The current AREA document has already been fully inspected. The
-        # main automation loop can run several times per second, so rescanning
-        # here would repeatedly issue identical CDP/JS queries while the reload
-        # scheduler is intentionally waiting. Route through the existing
-        # finalizer instead: before the deadline it is a cheap no-op; at the
-        # deadline it performs the existing guarded reload. A successful
-        # reload clears the scheduler flag and the next iteration scans the
-        # fresh document immediately.
-        _runtime_log_rate_limited(
-            "tixcraft_area_cycle_scan_wait_log",
-            "[AREA] dom_read_skipped",
-            config_dict,
-            now=now_monotonic,
-            identity=_tixcraft_route_key(url),
-            reason="current_document_already_scanned",
-            current_url=url,
-        )
-        await _finalize_tixcraft_area_iteration(
-            tab,
-            url,
-            config_dict,
-            TixCraftAreaOutcome.WAITING_NEXT_CYCLE,
-        )
-        return False
-
     if leak_dom_guard:
         if not await runtime_health.wait_for_interactive_ready(
             tab,
@@ -5726,6 +5818,25 @@ async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
                 url,
                 config_dict,
                 TixCraftAreaOutcome.PAGE_NOT_READY,
+            )
+            return False
+        if not leak_scheduler.should_scan_current_document():
+            _runtime_log_rate_limited(
+                "tixcraft_area_generation_scan_log",
+                "[AREA] dom_read_skipped",
+                config_dict,
+                identity=(
+                    f"generation_already_scanned:"
+                    f"{leak_scheduler.document_generation}"
+                ),
+                reason="generation_already_scanned",
+                current_url=url,
+            )
+            await _finalize_tixcraft_area_iteration(
+                tab,
+                url,
+                config_dict,
+                TixCraftAreaOutcome.NO_AVAILABLE_AREA,
             )
             return False
         if not leak_scheduler.mark_dom_scan_start(now=time.monotonic()):
@@ -7236,10 +7347,15 @@ async def _nodriver_ticketmaster_check_ip_block_impl(tab, config_dict, current_u
         if not detection.get("blocked", False):
             if detection.get("health_confirmed", False):
                 _state["ip_block_count"] = 0
-                _clear_tixcraft_soft_block_backoff()
+                _clear_tixcraft_soft_block_backoff(tab)
                 return False
             if _state.get("soft_block_phase") in {"backoff", "recovering"}:
-                _defer_tixcraft_soft_block_recovery(now_monotonic)
+                _defer_tixcraft_soft_block_recovery(
+                    config_dict,
+                    current_url,
+                    tab=tab,
+                    now=now_monotonic,
+                )
                 return True
             return False
         _state["ip_block_count"] = int(_state.get("ip_block_count", 0)) + 1
@@ -7508,7 +7624,9 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
                 except Exception:
                     pass
 
-    if "/activity/detail/" in url:
+    # Ticketmaster renders #gameList on the detail route and does not use the
+    # TixCraft detail -> game redirect.  Its date handler claims this page.
+    if _should_redirect_tixcraft_detail(url):
         _state["start_time"] = time.monotonic()
         is_redirected = await nodriver_tixcraft_redirect(tab, url)
 
@@ -7524,11 +7642,7 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
     # Support both URL formats:
     # - /artist/{artist_id} (artist listing page)
     # - /activity/game/{event_id} (event date listing page from /activity/detail redirect)
-    is_ticketmaster_date_page = (
-        'ticketmaster' in url and
-        (('/artist/' in url and len(url.split('/'))==6) or
-         ('/activity/game/' in url))
-    )
+    is_ticketmaster_date_page = _is_ticketmaster_date_page(url)
 
     if is_ticketmaster_date_page:
         _state["start_time"] = time.monotonic()
@@ -7581,10 +7695,21 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
                     else:
                         _state["area_retry_count"] += 1
                         if _state["area_retry_count"] >= 30:
-                            # ticketPriceList failed to load, re-select area
-                            debug.log("[TICKETMASTER] Ticket assignment failed after 30 retries, re-selecting area")
+                            # A stale ticketPriceList or an unavailable exact
+                            # count must not spin forever on the same document.
+                            # The shared coordinator throttles this reload with
+                            # the configured per-tab minimum interval.
+                            debug.log(
+                                "[TICKETMASTER] Ticket assignment failed after "
+                                "30 retries, requesting throttled reload"
+                            )
                             _state["ticketmaster_phase"] = "area_select"
                             _state["area_retry_count"] = 0
+                            await guarded_reload(
+                                tab,
+                                reason="ticketmaster_ticket_count_stale",
+                                config_dict=config_dict,
+                            )
 
                 # phase == "done": no-op, wait for POST navigation to /ticket/ticket/
     else:

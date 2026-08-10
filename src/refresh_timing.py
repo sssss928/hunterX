@@ -9,11 +9,12 @@ import struct
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, tzinfo
 from enum import StrEnum
 from statistics import median
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 NTP_UNIX_EPOCH_DELTA_SECONDS = 2_208_988_800
@@ -48,7 +49,7 @@ DEFAULT_REFRESH_CALIBRATION: dict[str, Any] = {
     "safety_margin_ms": 30,
     "freeze_before_seconds": 10,
     "auto_calibrate_interval_seconds": 300,
-    "timezone": "local",
+    "timezone": "Asia/Taipei",
     "confidence": "low",
 }
 
@@ -219,7 +220,10 @@ class RefreshTriggerController:
     def maybe_freeze(self, target_dt: datetime, freeze_before_seconds: int) -> bool:
         if self.plan is None or self.phase != TriggerPhase.ARMED:
             return False
-        now_wall = datetime.fromtimestamp(self.clock.wall_time_ns() / NS_PER_SECOND)
+        now_wall = datetime.fromtimestamp(
+            self.clock.wall_time_ns() / NS_PER_SECOND,
+            tz=target_dt.tzinfo,
+        )
         if (target_dt - now_wall).total_seconds() <= freeze_before_seconds:
             self.phase = TriggerPhase.FROZEN
             self.frozen_generation = self.generation
@@ -252,7 +256,31 @@ class RefreshTriggerController:
             self.phase = TriggerPhase.ERROR
 
 
-def parse_refresh_datetime_value(raw_value: Any) -> datetime | None:
+def resolve_refresh_timezone(value: Any = "Asia/Taipei") -> tzinfo:
+    """Resolve the configured wall-clock timezone without requiring tzdata on Windows.
+
+    Taiwan has used UTC+08:00 without daylight-saving transitions since 1979,
+    so the explicit fixed-offset fallback is correct for current sale dates.
+    Other IANA names use :mod:`zoneinfo` when the host provides its database.
+    """
+
+    name = str(value or "Asia/Taipei").strip() or "Asia/Taipei"
+    if name.casefold() == "local":
+        return datetime.now().astimezone().tzinfo or timezone.utc
+    if name.casefold() in {"utc", "etc/utc", "z"}:
+        return timezone.utc
+    if name.casefold() in {"asia/taipei", "taipei"}:
+        return timezone(timedelta(hours=8), name="Asia/Taipei")
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone(timedelta(hours=8), name="Asia/Taipei")
+
+
+def parse_refresh_datetime_value(
+    raw_value: Any,
+    timezone_name: Any | None = None,
+) -> datetime | None:
     target_text = str(raw_value or "").strip()
     if not target_text:
         return None
@@ -260,7 +288,10 @@ def parse_refresh_datetime_value(raw_value: Any) -> datetime | None:
         return None
     fmt = "%Y/%m/%d %H:%M:%S.%f" if "." in target_text else "%Y/%m/%d %H:%M:%S"
     try:
-        return datetime.strptime(target_text, fmt)
+        parsed = datetime.strptime(target_text, fmt)
+        if timezone_name is not None:
+            parsed = parsed.replace(tzinfo=resolve_refresh_timezone(timezone_name))
+        return parsed
     except ValueError:
         return None
 
@@ -438,7 +469,9 @@ def get_refresh_calibration(config_dict: dict[str, Any]) -> dict[str, Any]:
     merged["safety_margin_ms"] = _calibration_int(merged, "safety_margin_ms", DEFAULT_REFRESH_CALIBRATION["safety_margin_ms"], 0, 5000)
     merged["freeze_before_seconds"] = _calibration_int(merged, "freeze_before_seconds", DEFAULT_REFRESH_CALIBRATION["freeze_before_seconds"], 0, 60)
     merged["auto_calibrate_interval_seconds"] = _calibration_int(merged, "auto_calibrate_interval_seconds", 300, 60, 86400)
-    merged["timezone"] = str(merged.get("timezone") or "local").strip() or "local"
+    merged["timezone"] = (
+        str(merged.get("timezone") or "Asia/Taipei").strip() or "Asia/Taipei"
+    )
     merged["confidence"] = _normalize_confidence(merged.get("confidence"))
     return merged
 
@@ -593,11 +626,18 @@ async def sleep_until_deadline(deadline_monotonic_ns: int, clock: Clock | None =
             return active_clock.monotonic_ns() - deadline_monotonic_ns
         remaining_seconds = remaining_ns / NS_PER_SECOND
         if remaining_seconds > 2.0:
-            await asyncio.sleep(min(1.0, remaining_seconds / 2))
-        elif remaining_seconds > 0.05:
-            await asyncio.sleep(min(0.05, remaining_seconds / 2))
+            await asyncio.sleep(min(1.0, remaining_seconds - 1.0))
+        elif remaining_seconds > 0.25:
+            await asyncio.sleep(max(0.001, remaining_seconds - 0.1))
+        elif remaining_seconds > 0.025:
+            await asyncio.sleep(max(0.001, remaining_seconds - 0.01))
+        elif remaining_seconds > 0.003:
+            await asyncio.sleep(max(0.0005, remaining_seconds - 0.002))
         else:
-            await asyncio.sleep(max(0.001, min(0.01, remaining_seconds)))
+            # Keep the final window cooperative.  This is intentionally short;
+            # it avoids a long busy-spin while not asking the Windows timer for
+            # a millisecond sleep that can overshoot by an entire scheduler tick.
+            await asyncio.sleep(0)
 
 
 def robust_estimate(samples: list[Any] | tuple[Any, ...]) -> dict[str, Any]:

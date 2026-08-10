@@ -53,6 +53,8 @@ class ReloadGuard:
         recovery: bool = False,
         timeout_seconds: float = DEFAULT_RELOAD_TIMEOUT_SECONDS,
         config_dict: dict[str, Any] | None = None,
+        coordinator: Any | None = None,
+        priority: str = "periodic",
     ) -> bool:
         url = getattr(getattr(tab, "target", None), "url", "") or ""
         decision = self.can_reload(url=url, reason=reason, recovery=recovery)
@@ -75,7 +77,43 @@ class ReloadGuard:
                 current_url=url,
             )
             return False
+        dispatch_token = None
+        dispatch_started_ns = None
         try:
+            if coordinator is not None:
+                from run_modes import get_effective_reload_interval
+
+                dispatch = coordinator.begin_dispatch(
+                    reason or "reload",
+                    get_effective_reload_interval(config_dict, 0.0),
+                    priority=priority,
+                )
+                if not dispatch.allowed:
+                    runtime_log(
+                        "[REFRESH] suppressed",
+                        config_dict,
+                        reason=reason or "reload",
+                        suppressed_reason=dispatch.reason,
+                        page_class=decision.page_class.value,
+                        generation=coordinator.generation,
+                        next_allowed_monotonic_ns=dispatch.next_allowed_ns,
+                        current_url=url,
+                    )
+                    return False
+                dispatch_token = dispatch.token
+                dispatch_started_ns = dispatch.requested_ns
+                runtime_log(
+                    "[REFRESH] dispatch",
+                    config_dict,
+                    reason=reason or "reload",
+                    priority=priority,
+                    page_class=decision.page_class.value,
+                    generation=coordinator.generation,
+                    requested_monotonic_ns=dispatch.requested_ns,
+                    start_monotonic_ns=dispatch.requested_ns,
+                    lateness_ms=dispatch.lateness_ms,
+                    current_url=url,
+                )
             await wait_for_operation(
                 tab.reload(),
                 timeout_seconds,
@@ -83,9 +121,26 @@ class ReloadGuard:
                 config_dict,
                 raise_on_timeout=True,
             )
+            if coordinator is not None:
+                coordinator.complete_dispatch(dispatch_token, True)
+                runtime_log(
+                    "[REFRESH] completed",
+                    config_dict,
+                    reason=reason or "reload",
+                    generation=coordinator.generation,
+                    start_monotonic_ns=dispatch_started_ns,
+                    completed_monotonic_ns=coordinator.clock_ns(),
+                    current_url=url,
+                )
             return True
         except TimeoutError:
+            if coordinator is not None:
+                coordinator.complete_dispatch(dispatch_token, False)
             return False
+        except BaseException:
+            if coordinator is not None:
+                coordinator.complete_dispatch(dispatch_token, False)
+            raise
         finally:
             finish_browser_action(tab, action_token)
 
@@ -110,24 +165,34 @@ async def guarded_reload(
 
     url = getattr(getattr(tab, "target", None), "url", "") or ""
     adapter = adapter_for_url(url)
-    leak_mode = is_leak_watch_mode(config_dict)
+    coordinator = platform_engine.refresh_coordinator_for(tab)
+    effective_config = config_dict
+    runtime_state = None
+    if adapter is not None:
+        runtime_state = platform_engine.state_for(tab, adapter)
+        if effective_config is None:
+            effective_config = runtime_state.config_snapshot
+    leak_mode = is_leak_watch_mode(effective_config)
     if leak_mode and adapter is None:
         runtime_log(
             "[LEAK WATCH] reload_blocked",
-            config_dict,
+            effective_config,
             reason="unknown_platform_or_route",
             current_url=url,
         )
         return False
     if adapter is not None and adapter.key != "tixcraft" and leak_mode:
         try:
-            state = platform_engine.state_for(tab, adapter)
+            state = runtime_state or platform_engine.state_for(tab, adapter)
             scheduler = state.leak_scheduler
-            can_reload, scheduler_reason = scheduler.can_reload(config_dict, url)
+            can_reload, scheduler_reason = scheduler.can_reload(
+                effective_config,
+                url,
+            )
             if not can_reload:
                 runtime_log(
                     "[LEAK WATCH] reload_blocked",
-                    config_dict,
+                    effective_config,
                     platform=adapter.key,
                     reason=scheduler_reason,
                     current_url=url,
@@ -139,7 +204,7 @@ async def guarded_reload(
         except (AttributeError, TypeError, ValueError) as exc:
             runtime_log(
                 "[LEAK WATCH] reload_blocked",
-                config_dict,
+                effective_config,
                 platform=adapter.key,
                 reason="scheduler_state_invalid",
                 error_type=type(exc).__name__,
@@ -149,14 +214,24 @@ async def guarded_reload(
 
     success = False
     try:
-        success = await reload_guard.reload(
+        active_guard = reload_guard
+        if runtime_state is not None:
+            active_guard = runtime_state.reload_guard
+        priority = "periodic"
+        if str(reason or "").startswith("refresh_datetime"):
+            priority = "scheduled"
+        elif recovery:
+            priority = "recovery"
+        success = await active_guard.reload(
             tab,
             reason=reason,
             recovery=recovery,
             timeout_seconds=timeout_seconds,
-            config_dict=config_dict,
+            config_dict=effective_config,
+            coordinator=coordinator,
+            priority=priority,
         )
         return success
     finally:
         if scheduler is not None and scheduler_started:
-            scheduler.finish_reload_cycle(config_dict, success)
+            scheduler.finish_reload_cycle(effective_config, success)

@@ -2346,14 +2346,18 @@ def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kkt
         if platform.system() == 'Windows':
             print("execute .exe binary.")
         executable, executable_dir = resolve_frozen_executable(script_name, working_dir)
-        return subprocess.Popen([executable, *cmd_argument], cwd=executable_dir)
+        return subprocess.Popen(
+            [executable, *cmd_argument],
+            cwd=executable_dir,
+            shell=False,
+        )
     else:
         interpreter_binary = sys.executable
         print("execute in shell mode.")
 
         print('try', interpreter_binary)
         cmd_array = [interpreter_binary, script_name + '.py'] + cmd_argument
-        return subprocess.Popen(cmd_array, cwd=working_dir)
+        return subprocess.Popen(cmd_array, cwd=working_dir, shell=False)
 
 def parse_nodriver_result(result):
     """

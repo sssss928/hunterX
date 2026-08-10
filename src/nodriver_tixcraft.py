@@ -18,12 +18,29 @@ import time
 import webbrowser
 from datetime import datetime
 
-# 強制使用 UTF-8 編碼輸出（解決 Windows CP950 編碼問題）
-# 適用於所有輸出環境（終端、IDE、重定向、管道）
-if sys.platform == 'win32':
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+def _configure_windows_console_utf8():
+    """Configure real Windows consoles without replacing captured streams.
+
+    Wrapping ``sys.stdout.buffer`` at import time invalidated pytest/IDE/pipe
+    capture when the old wrapper was finalized. ``reconfigure`` keeps stream
+    ownership intact and is limited to interactive terminals.
+    """
+
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream.isatty() and hasattr(stream, "reconfigure"):
+                stream.reconfigure(
+                    encoding="utf-8",
+                    errors="replace",
+                    line_buffering=True,
+                )
+        except (AttributeError, OSError, ValueError):
+            continue
+
+
+_configure_windows_console_utf8()
 
 import zendriver as uc
 from zendriver import cdp
@@ -42,11 +59,13 @@ from refresh_timing import (
     format_remaining_seconds,
     get_effective_refresh_calibration,
     parse_refresh_datetime_value,
+    resolve_refresh_timezone,
     sleep_until_deadline,
     wall_datetime_to_monotonic_deadline_ns,
 )
 from NonBrowser import NonBrowser
 from page_classifier import PageClass, classify_page
+from onsale_preflight import build_onsale_preflight
 from platform_registry import platform_key_for_url
 from platform_engine import platform_engine
 from platforms.common_async import is_interval_due
@@ -88,6 +107,11 @@ logging.basicConfig()
 logger = logging.getLogger('logger')
 
 CONFIG_RELOAD_CHECK_INTERVAL_SEC = 0.5
+EMPTY_URL_SAFE_STOP_SECONDS = 30.0
+IBON_TRACKER_BLOCK_PATTERNS = (
+    "*tour-uat.ibon.com.tw/dmp/api/v1.0/events*",
+    "*order-uat.ibon.com.tw/dmp/api/v1.0/events*",
+)
 REFRESH_TRIGGER_RETRY_DELAY_NS = 200_000_000
 REFRESH_TRIGGER_RETRY_WINDOW_NS = 2_000_000_000
 REFRESH_TRIGGER_MAX_ATTEMPTS = 2
@@ -105,6 +129,28 @@ REFRESH_TRIGGER_RETRYABLE_REASONS = frozenset(
         "reload_in_flight",
     }
 )
+
+
+def platform_specific_network_block_patterns(homepage):
+    """Return narrowly scoped optional blocks for one configured platform."""
+
+    if platform_key_for_url(str(homepage or "")) == "ibon":
+        return IBON_TRACKER_BLOCK_PATTERNS
+    return ()
+
+
+def persistent_empty_url_should_stop(
+    empty_since,
+    now_monotonic,
+    threshold_seconds=EMPTY_URL_SAFE_STOP_SECONDS,
+):
+    try:
+        started = float(empty_since)
+        current = float(now_monotonic)
+        threshold = max(0.0, float(threshold_seconds))
+    except (TypeError, ValueError):
+        return False
+    return started > 0.0 and current >= started and current - started >= threshold
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -476,6 +522,12 @@ async def nodrver_block_urls(tab, config_dict):
         '*geolocation.onetrust.com/*',
     ]
 
+    platform_patterns = platform_specific_network_block_patterns(homepage)
+    if platform_patterns:
+        # Exact DMP event collector endpoints only. Do not broaden this to the
+        # iBon host/domain: ticket, checkout and payment APIs must remain open.
+        NETWORK_BLOCKED_URLS.extend(platform_patterns)
+
     # Block session-recording trackers for non-TicketPlus platforms only.
     # These tools (Clarity, Hotjar) record mouse trails / clicks / scroll heatmaps,
     # which can fingerprint automated cursor behavior. TicketPlus is excluded because
@@ -548,23 +600,24 @@ async def _inject_clarity_stub_for_ticketplus(tab):
 
 
 
-def parse_refresh_datetime(target_str):
+def parse_refresh_datetime(target_str, timezone_name="Asia/Taipei"):
     # Parse refresh_datetime setting to a datetime object.
     # Supports: "YYYY/MM/DD HH:MM:SS(.SSS)" | "HH:MM:SS(.SSS)" (today) | "" (disabled)
     # Returns: datetime or None
     if not target_str or not target_str.strip():
         return None
     target_str = target_str.strip()
-    target_dt = parse_refresh_datetime_value(target_str)
+    target_dt = parse_refresh_datetime_value(target_str, timezone_name)
     if target_dt is not None:
         return target_dt
     try:
         # Stage 0: legacy HH:MM:SS format, treat as today.
-        today = datetime.now().date()
+        active_timezone = resolve_refresh_timezone(timezone_name)
+        today = datetime.now(active_timezone).date()
         for fmt in ('%H:%M:%S.%f', '%H:%M:%S'):
             try:
                 t = datetime.strptime(target_str, fmt).time()
-                return datetime.combine(today, t)
+                return datetime.combine(today, t, tzinfo=active_timezone)
             except ValueError:
                 pass
     except ValueError:
@@ -667,7 +720,8 @@ def _get_runtime_refresh_calibration_config(
     """Poll runtime NTP state and return an ephemeral timing config."""
 
     now_wall = datetime.fromtimestamp(
-        controller.clock.wall_time_ns() / 1_000_000_000
+        controller.clock.wall_time_ns() / 1_000_000_000,
+        tz=target_dt.tzinfo if target_dt is not None else None,
     )
     remaining_seconds = (
         (target_dt - now_wall).total_seconds()
@@ -1015,6 +1069,22 @@ async def _preflight_tixcraft_refresh_boundary(
         state["refresh_soft_block_preflight_token"] = token
         state["refresh_soft_block_preflight_reason"] = "ready"
         return None
+    controller = state.get("controller")
+    if (
+        boundary_name in {"initial_trigger", "public_sale_target"}
+        and isinstance(controller, RefreshTriggerController)
+        and controller.remaining_ns() <= 0
+    ):
+        # The final deadline path must not start a DOM/CDP round trip.  The
+        # watchdog obtains fresh evidence before the arm window and caches it
+        # for this boundary; missing evidence fails closed without making the
+        # scheduled dispatch hundreds of milliseconds late.
+        return TriggerReloadDecision(
+            attempted=False,
+            reloaded=False,
+            reason="health_probe_unavailable",
+            page_class=classify_page(current_url),
+        )
     if token == state.get("refresh_soft_block_preflight_token"):
         cached_reason = state.get("refresh_soft_block_preflight_reason", "")
         if cached_reason == "order_processing_detected":
@@ -1091,7 +1161,7 @@ async def _run_refresh_gate_health_watchdog(
 
     now = time.monotonic()
     if remaining_seconds <= REFRESH_GATE_HEALTH_NEAR_BOUNDARY_SECONDS:
-        interval = 0.0
+        interval = 0.5
     elif remaining_seconds <= 60.0:
         interval = 1.0
     else:
@@ -1099,7 +1169,7 @@ async def _run_refresh_gate_health_watchdog(
     next_probe_at = float(
         state.get("refresh_gate_health_next_probe_at", 0.0) or 0.0
     )
-    if interval > 0 and now < next_probe_at:
+    if now < next_probe_at:
         return False
 
     state["refresh_gate_health_next_probe_at"] = now + max(0.5, interval)
@@ -1189,24 +1259,6 @@ def _should_prefer_cached_refresh_url(config_dict, state) -> bool:
         (target_dt.timestamp() * 1_000_000_000) - time.time_ns()
     )
     return remaining_ns <= REFRESH_CACHED_URL_FAST_PATH_WINDOW_NS
-
-
-def _should_prefer_cached_runtime_url(tab, config_dict, refresh_state) -> bool:
-    """Use cached URLs only for explicitly safe non-transition states.
-
-    Scheduled-sale countdowns keep their existing near-boundary fast path. Leak-watch
-    additionally opts in only for a known safe AREA document immediately after a
-    successful reload/recovery or after that document has been scanned, while no
-    purchase/navigation action is pending. Active purchase transitions retain the
-    original JavaScript URL probe.
-    """
-
-    if _should_prefer_cached_refresh_url(config_dict, refresh_state):
-        return True
-    return tixcraft_platform.should_prefer_cached_url_during_leak_wait(
-        tab,
-        config_dict,
-    )
 
 
 def _reset_refresh_trigger_retry(state) -> None:
@@ -1458,7 +1510,13 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
     if controller is None:
         controller = RefreshTriggerController()
         state["controller"] = controller
-    target_dt = parse_refresh_datetime(current_str)
+    raw_refresh_calibration = config_dict.get("refresh_calibration", {})
+    timezone_name = (
+        raw_refresh_calibration.get("timezone", "Asia/Taipei")
+        if isinstance(raw_refresh_calibration, dict)
+        else "Asia/Taipei"
+    )
+    target_dt = parse_refresh_datetime(current_str, timezone_name)
     timing_config = _get_runtime_refresh_calibration_config(
         config_dict,
         state,
@@ -1506,12 +1564,46 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
         state["refresh_gate_health_next_probe_at"] = 0.0
         state["refresh_gate_health_ready_route"] = ""
         state["refresh_gate_health_ready_at"] = 0.0
+        state["onsale_preflight_reported"] = False
         _reset_refresh_trigger_retry(state)
 
     if not state.get("reported_platform_timing", False):
         for warning in timing_decision.warnings:
             print(f"[REFRESH] {warning}")
         state["reported_platform_timing"] = True
+
+    if target_dt is not None and not state.get("onsale_preflight_reported", False):
+        preflight_now = datetime.fromtimestamp(
+            controller.clock.wall_time_ns() / 1_000_000_000,
+            tz=target_dt.tzinfo,
+        )
+        preflight_report = build_onsale_preflight(
+            config_dict,
+            current_url,
+            target_dt,
+            now=preflight_now,
+        )
+        state["onsale_preflight_reported"] = True
+        if not preflight_report.get("skipped", False):
+            non_ok = [
+                item
+                for item in preflight_report.get("checks", ())
+                if item.get("status") != "ok"
+            ]
+            runtime_health.runtime_log(
+                "[ONSALE] preflight",
+                config_dict,
+                ready=bool(preflight_report.get("ready", False)),
+                platform=preflight_report.get("platform", "unknown"),
+                page_class=preflight_report.get("page_class", "unknown"),
+                attention=",".join(str(item.get("name", "")) for item in non_ok),
+            )
+            for item in non_ok:
+                print(
+                    "[ONSALE] Preflight",
+                    item.get("status", "warning"),
+                    f"{item.get('name', 'check')}: {item.get('message', '')}",
+                )
 
     post_boundary_retry_reloaded = False
     if state.get("post_boundary_retry_pending", False):
@@ -1620,13 +1712,22 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
         state["reached"] = True
         return False
 
-    now = datetime.fromtimestamp(controller.clock.wall_time_ns() / 1_000_000_000)
+    now = datetime.fromtimestamp(
+        controller.clock.wall_time_ns() / 1_000_000_000,
+        tz=target_dt.tzinfo,
+    )
     was_armed = (
         controller.state_key == state_key
         and controller.plan is not None
         and controller.trigger_deadline_monotonic_ns is not None
     )
     plan = controller.arm(target_dt, calibration, state_key)
+    if controller.trigger_deadline_monotonic_ns is not None:
+        platform_engine.refresh_coordinator_for(tab).arm_scheduled(
+            state_key,
+            controller.trigger_deadline_monotonic_ns,
+            target_wall=current_str,
+        )
 
     trusted_clock_plan = plan.confidence in {"high", "medium"}
     if calibration.get("enable", False) or trusted_clock_plan:
@@ -1906,7 +2007,6 @@ async def reload_config(config_dict, last_mtime, config_filepath):
                         "auto_guess_options", "user_guess_string", "auto_reload_page_interval",
                         "run_mode", "leak_refresh_interval_seconds", "verbose",
                         "tixcraft_soft_block_delay",
-                        "auto_reload_overheat_count", "auto_reload_overheat_cd",
                         "idle_keyword", "resume_keyword", "idle_keyword_second", "resume_keyword_second",
                         "discord_webhook_url", "telegram_bot_token", "telegram_chat_id",
                         "discount_code"
@@ -2042,6 +2142,7 @@ async def _run_main(args, resources):
     last_heartbeat_time = 0.0
     last_runtime_alive_log = 0.0
     last_empty_url_log = 0.0
+    empty_url_since = 0.0
     is_quit_bot = False
     ticketplus_purchase_done = False  # Guard: stop polling after purchase completed
 
@@ -2082,8 +2183,7 @@ async def _run_main(args, resources):
             is_quit_bot = True
 
         if not is_quit_bot:
-            prefer_cached_url = _should_prefer_cached_runtime_url(
-                tab,
+            prefer_cached_url = _should_prefer_cached_refresh_url(
                 config_dict,
                 refresh_datetime_state,
             )
@@ -2099,18 +2199,30 @@ async def _run_main(args, resources):
             util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_AUTOMATION_STOP_FILE))
             break
 
-        if url is None:
+        if url is None or len(url) == 0:
+            now_mono = time.monotonic()
+            if empty_url_since <= 0:
+                empty_url_since = now_mono
+            if now_mono - last_empty_url_log >= 2.0:
+                last_empty_url_log = now_mono
+                util.create_debug_logger(config_dict).log(
+                    "[URL DIAG] empty url, skipping dispatch; "
+                    f"{format_cached_target_url_diagnostic(tab)}"
+                )
+            if persistent_empty_url_should_stop(empty_url_since, now_mono):
+                runtime_health.runtime_log(
+                    "[URL DIAG] safe_stop",
+                    config_dict,
+                    reason="persistent_empty_url_or_cdp_disconnect",
+                    elapsed_s=round(now_mono - empty_url_since, 1),
+                )
+                print(
+                    "Browser connection produced no URL for 30 seconds. "
+                    "HunterX stopped safely; please restart the browser instance manually."
+                )
+                break
             continue
-        else:
-            if len(url) == 0:
-                now_mono = time.monotonic()
-                if now_mono - last_empty_url_log >= 2.0:
-                    last_empty_url_log = now_mono
-                    util.create_debug_logger(config_dict).log(
-                        "[URL DIAG] empty url, skipping dispatch; "
-                        f"{format_cached_target_url_diagnostic(tab)}"
-                    )
-                continue
+        empty_url_since = 0.0
 
         is_maxbot_paused = await check_and_handle_pause(config_dict)
 

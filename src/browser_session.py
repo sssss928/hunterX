@@ -7,7 +7,6 @@ from pathlib import Path
 import chrome_downloader
 import util
 from hunter_metadata import APP_NAME
-from zendriver_hardening import install_zendriver_transaction_guard
 
 try:
     from zendriver.core.config import Config
@@ -72,9 +71,7 @@ class BrowserSessionManager:
             ),
             headless=bool(advanced.get("headless", False)),
             proxy_server_port=str(advanced.get("proxy_server_port", "") or ""),
-            instance=getattr(args, "instance", "")
-            if args and getattr(args, "instance", "")
-            else util.get_instance_id(),
+            instance=getattr(args, "instance", "") if args and getattr(args, "instance", "") else util.get_instance_id(),
         )
         self.config_dict = config_dict
         self.args = args
@@ -109,10 +106,6 @@ class BrowserSessionManager:
     def build_config(self, base_args: list[str], sandbox: bool = True) -> Config:
         if Config is None:
             raise RuntimeError("zendriver is required to build a browser config")
-        # Install the transport-only compatibility guard before uc.start()
-        # creates any CDP listener tasks. This does not alter platform routing,
-        # ticket selection, submission, recovery, or notification behavior.
-        install_zendriver_transaction_guard()
         browser_path = self.browser_executable_path()
         if self.launch.browser_type == BROWSER_EDGE and not browser_path:
             raise FileNotFoundError("Microsoft Edge executable was not found")

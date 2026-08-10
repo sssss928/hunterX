@@ -8,6 +8,7 @@ page safety, capability evidence and per-instance leak-watch state.
 from __future__ import annotations
 
 import contextvars
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 import inspect
@@ -19,7 +20,10 @@ from page_classifier import PageClass
 from reload_guard import ReloadGuard
 
 
-_platform_state_context = contextvars.ContextVar("platform_runtime_state", default=None)
+PlatformStateBinding = tuple[str, dict[str, Any]]
+_platform_state_context: contextvars.ContextVar[PlatformStateBinding | None] = (
+    contextvars.ContextVar("platform_runtime_state", default=None)
+)
 _default_platform_states: dict[str, dict[str, Any]] = {}
 
 
@@ -47,7 +51,7 @@ def platform_state_for_tab(tab: Any, platform_key: str) -> dict[str, Any]:
     return platform_engine.state_for(tab, adapter).platform_data
 
 
-class PlatformStateProxy(dict):
+class PlatformStateProxy(dict[Any, Any]):
     """Dict-compatible view of per-tab platform state.
 
     Existing platform helpers intentionally keep their small ``_state`` API.
@@ -70,53 +74,57 @@ class PlatformStateProxy(dict):
         binding = _platform_state_context.get()
         return binding is not None and binding[0] == self.platform_key
 
-    def bind(self, state: dict[str, Any]):
+    def bind(
+        self, state: dict[str, Any]
+    ) -> contextvars.Token[PlatformStateBinding | None]:
         return _platform_state_context.set((self.platform_key, state))
 
     @staticmethod
-    def reset_binding(token) -> None:
+    def reset_binding(
+        token: contextvars.Token[PlatformStateBinding | None],
+    ) -> None:
         _platform_state_context.reset(token)
 
-    def __getitem__(self, key):
+    def __getitem__(self, key: Any) -> Any:
         return self.current()[key]
 
-    def __setitem__(self, key, value) -> None:
+    def __setitem__(self, key: Any, value: Any) -> None:
         self.current()[key] = value
 
-    def __delitem__(self, key) -> None:
+    def __delitem__(self, key: Any) -> None:
         del self.current()[key]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Any]:
         return iter(self.current())
 
     def __len__(self) -> int:
         return len(self.current())
 
-    def __contains__(self, key) -> bool:
+    def __contains__(self, key: object) -> bool:
         return key in self.current()
 
-    def get(self, key, default=None):
+    def get(self, key: Any, default: Any = None) -> Any:
         return self.current().get(key, default)
 
-    def setdefault(self, key, default=None):
+    def setdefault(self, key: Any, default: Any = None) -> Any:
         return self.current().setdefault(key, default)
 
-    def pop(self, key, *default):
+    def pop(self, key: Any, *default: Any) -> Any:
         return self.current().pop(key, *default)
 
     def clear(self) -> None:
         self.current().clear()
 
-    def update(self, *args, **kwargs) -> None:
+    def update(self, *args: Any, **kwargs: Any) -> None:
         self.current().update(*args, **kwargs)
 
-    def keys(self):
+    def keys(self) -> Any:
         return self.current().keys()
 
-    def items(self):
+    def items(self) -> Any:
         return self.current().items()
 
-    def values(self):
+    def values(self) -> Any:
         return self.current().values()
 
 
@@ -156,6 +164,7 @@ class PlatformRuntimeState:
     cycle_count: int = 0
     recovery_count: int = 0
     platform_data: dict[str, Any] = field(default_factory=dict)
+    config_snapshot: dict[str, Any] | None = None
 
     def backfill(self) -> None:
         """Repair state restored by hot reload without replacing live owners."""
@@ -174,6 +183,11 @@ class PlatformRuntimeState:
         self.recovery_count = max(0, int(self.recovery_count or 0))
         if not isinstance(self.platform_data, dict):
             self.platform_data = {}
+        if self.config_snapshot is not None and not isinstance(
+            self.config_snapshot,
+            dict,
+        ):
+            self.config_snapshot = None
 
     def reset_attempt(self) -> None:
         self.leak_scheduler.reset_for_recovery()
@@ -360,10 +374,12 @@ class DeclarativePlatformAdapter:
         url = str(context.get("url") or "")
         if tab is None or not self.is_safe_watch_page(url):
             return False
-        return await guarded_reload(
-            tab,
-            reason=f"{self.key}_inventory_refresh",
-            config_dict=context.get("config"),
+        return bool(
+            await guarded_reload(
+                tab,
+                reason=f"{self.key}_inventory_refresh",
+                config_dict=context.get("config"),
+            )
         )
 
     async def select_candidate(self, context: BrowserContext, config: dict[str, Any]) -> Any:

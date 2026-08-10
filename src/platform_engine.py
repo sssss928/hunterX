@@ -16,6 +16,7 @@ from platform_contract import (
     activate_platform_state,
     clear_active_platform_state,
 )
+from refresh_coordinator import RefreshCoordinator
 from run_modes import is_leak_watch_mode
 
 
@@ -35,6 +36,12 @@ class PlatformEngine:
             weakref.WeakKeyDictionary()
         )
         self._fallback_states: dict[int, tuple[Any, dict[str, PlatformRuntimeState]]] = {}
+        self._refresh_coordinators: weakref.WeakKeyDictionary[Any, RefreshCoordinator] = (
+            weakref.WeakKeyDictionary()
+        )
+        self._fallback_refresh_coordinators: dict[
+            int, tuple[Any, RefreshCoordinator]
+        ] = {}
         self._fallback_capacity = 64
 
     def _tab_states(self, tab: Any) -> dict[str, PlatformRuntimeState]:
@@ -63,6 +70,28 @@ class PlatformEngine:
             states[adapter.key] = state
         state.backfill()
         return state
+
+    def refresh_coordinator_for(self, tab: Any) -> RefreshCoordinator:
+        """Return the single refresh owner for ``tab`` across platform families."""
+
+        try:
+            coordinator = self._refresh_coordinators.get(tab)
+            if coordinator is None:
+                coordinator = RefreshCoordinator()
+                coordinator.bind_tab(tab)
+                self._refresh_coordinators[tab] = coordinator
+            return coordinator
+        except TypeError:
+            tab_id = id(tab)
+            current = self._fallback_refresh_coordinators.get(tab_id)
+            if current is not None and current[0] is tab:
+                return current[1]
+            if len(self._fallback_refresh_coordinators) >= self._fallback_capacity:
+                self._fallback_refresh_coordinators.clear()
+            coordinator = RefreshCoordinator()
+            coordinator.bind_tab(tab)
+            self._fallback_refresh_coordinators[tab_id] = (tab, coordinator)
+            return coordinator
 
     def _reset_inactive_families(self, tab: Any, active_key: str | None) -> None:
         for key, state in self._tab_states(tab).items():
@@ -120,6 +149,19 @@ class PlatformEngine:
         state.current_page = page_class
         state.previous_url = str(url or "")
         state.cycle_count += 1
+        # ``reload_config`` replaces the runtime dictionary atomically. Keep
+        # that generation's object so legacy platform helpers which do not
+        # thread config through their call signature still obey the same
+        # per-tab refresh interval. Never clear live cooldown/deadline state.
+        state.config_snapshot = config_dict
+        coordinator = self.refresh_coordinator_for(tab)
+        if page_class in protected_pages or page_class is PageClass.QUEUE:
+            coordinator.cancel_pending(
+                f"protected_{page_class.value}",
+                purchase_guard=page_class in protected_pages,
+            )
+        elif starts_new_attempt:
+            coordinator.reset_purchase_guard()
         current = time.monotonic() if now is None else float(now)
         expired = state.leak_scheduler.maintenance(config_dict, url, current)
         for event in expired:
@@ -150,14 +192,27 @@ class PlatformEngine:
             self._states.pop(tab, None)
         except TypeError:
             pass
+        try:
+            self._refresh_coordinators.pop(tab, None)
+        except TypeError:
+            pass
         current = self._fallback_states.get(id(tab))
         if current is not None and current[0] is tab:
             self._fallback_states.pop(id(tab), None)
+        refresh_current = self._fallback_refresh_coordinators.get(id(tab))
+        if refresh_current is not None and refresh_current[0] is tab:
+            self._fallback_refresh_coordinators.pop(id(tab), None)
 
     @property
     def state_count(self) -> int:
         return sum(len(states) for states in self._states.values()) + sum(
             len(item[1]) for item in self._fallback_states.values()
+        )
+
+    @property
+    def refresh_coordinator_count(self) -> int:
+        return len(self._refresh_coordinators) + len(
+            self._fallback_refresh_coordinators,
         )
 
 
