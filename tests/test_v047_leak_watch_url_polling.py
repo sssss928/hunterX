@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from types import SimpleNamespace
 
 import pytest
 
@@ -164,6 +163,7 @@ def test_purchase_attempt_disables_cached_leak_wait_fast_path() -> None:
     )
 
     assert tixcraft.should_prefer_cached_url_during_leak_wait(tab, config) is False
+
 
 @pytest.mark.asyncio
 async def test_successful_reload_uses_cached_url_before_first_fresh_dom_scan() -> None:

@@ -200,3 +200,52 @@ async def test_real_listener_continues_after_cancelled_transaction_response(monk
         listener.cancel()
         with suppress(asyncio.CancelledError):
             await listener.task
+
+
+@pytest.mark.asyncio
+async def test_real_listener_survives_thousands_of_late_responses(monkeypatch):
+    _restore_original_call(monkeypatch)
+    assert install_zendriver_transaction_guard(Transaction) is True
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.messages = asyncio.Queue()
+
+        async def recv(self):
+            return await self.messages.get()
+
+    websocket = FakeWebSocket()
+    mapper = {}
+    late_response_count = 2_000
+    for message_id in range(1, late_response_count + 1):
+        transaction = Transaction(_return_value_command())
+        transaction.id = message_id
+        transaction.cancel()
+        mapper[message_id] = transaction
+        if message_id % 2:
+            response = {"id": message_id, "result": {"value": "loading"}}
+        else:
+            response = {
+                "id": message_id,
+                "error": {"code": -32000, "message": "execution context replaced"},
+            }
+        await websocket.messages.put(json.dumps(response))
+
+    live_transaction = Transaction(_return_value_command())
+    live_transaction.id = late_response_count + 1
+    mapper[live_transaction.id] = live_transaction
+    await websocket.messages.put(
+        json.dumps(
+            {"id": live_transaction.id, "result": {"value": "complete"}}
+        )
+    )
+    connection = SimpleNamespace(websocket=websocket, mapper=mapper, handlers={})
+    listener = Listener(connection)
+    try:
+        assert await asyncio.wait_for(live_transaction, timeout=5.0) == "complete"
+        assert listener.running is True
+        assert connection.mapper == {}
+    finally:
+        listener.cancel()
+        with suppress(asyncio.CancelledError):
+            await listener.task

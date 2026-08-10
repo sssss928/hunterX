@@ -410,7 +410,12 @@ def test_gate_applies_runtime_ntp_once_then_freezes_before_target() -> None:
         sys.path.insert(0, os.environ["HUNTERX_SRC_PATH"])
         import nodriver_tixcraft as runtime
         import refresh_timing
-        from refresh_timing import Clock, NS_PER_MS, RefreshTriggerController
+        from refresh_timing import (
+            Clock,
+            NS_PER_MS,
+            RefreshTriggerController,
+            resolve_refresh_timezone,
+        )
 
 
         class FakeClock(Clock):
@@ -440,7 +445,15 @@ def test_gate_applies_runtime_ntp_once_then_freezes_before_target() -> None:
 
 
         async def run():
-            now = datetime(2026, 7, 26, 11, 58, 0)
+            now = datetime(
+                2026,
+                7,
+                26,
+                11,
+                58,
+                0,
+                tzinfo=resolve_refresh_timezone("Asia/Taipei"),
+            )
             target = now + timedelta(seconds=120)
             clock = FakeClock(
                 int(now.timestamp() * 1_000_000_000),
@@ -819,7 +832,12 @@ def test_gate_soft_block_preflight_and_leak_scheduler_coordination() -> None:
         import nodriver_tixcraft as runtime
         import platforms.tixcraft as platform
         from leak_watch import LeakWatchScheduler
-        from refresh_timing import Clock, NS_PER_MS, RefreshTriggerController
+        from refresh_timing import (
+            Clock,
+            NS_PER_MS,
+            RefreshTriggerController,
+            resolve_refresh_timezone,
+        )
 
 
         class FakeClock(Clock):
@@ -848,7 +866,15 @@ def test_gate_soft_block_preflight_and_leak_scheduler_coordination() -> None:
                 self.target = Target(url)
 
 
-        target = datetime(2026, 7, 26, 12, 0, 0)
+        target = datetime(
+            2026,
+            7,
+            26,
+            12,
+            0,
+            0,
+            tzinfo=resolve_refresh_timezone("Asia/Taipei"),
+        )
         area_url = "https://tixcraft.com/ticket/area/event/game"
 
 

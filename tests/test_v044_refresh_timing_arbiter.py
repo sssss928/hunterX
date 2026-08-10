@@ -427,7 +427,12 @@ def test_refresh_gate_integrates_failure_and_stale_response_retries() -> None:
 
         sys.path.insert(0, os.environ["HUNTERX_SRC_PATH"])
         import nodriver_tixcraft as runtime
-        from refresh_timing import Clock, NS_PER_MS, RefreshTriggerController
+        from refresh_timing import (
+            Clock,
+            NS_PER_MS,
+            RefreshTriggerController,
+            resolve_refresh_timezone,
+        )
 
 
         class FakeClock(Clock):
@@ -466,7 +471,15 @@ def test_refresh_gate_integrates_failure_and_stale_response_retries() -> None:
                 return self.dom_result
 
 
-        target = datetime(2026, 7, 26, 12, 0, 0)
+        target = datetime(
+            2026,
+            7,
+            26,
+            12,
+            0,
+            0,
+            tzinfo=resolve_refresh_timezone("Asia/Taipei"),
+        )
         safe_url = "https://tixcraft.com/activity/game/26_event"
         area_url = "https://tixcraft.com/ticket/area/26_event/1"
         protected_url = "https://tixcraft.com/ticket/checkout/26_event"

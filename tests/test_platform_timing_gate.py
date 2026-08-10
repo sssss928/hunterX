@@ -77,7 +77,9 @@ def test_refresh_datetime_gate_platform_aware_deadline_behavior() -> None:
 
             runtime.tixcraft_platform._read_tixcraft_page_health = safe_health
 
-            target = datetime.now() + timedelta(milliseconds=90)
+            target = datetime.now(
+                runtime.resolve_refresh_timezone("Asia/Taipei")
+            ) + timedelta(milliseconds=90)
             tab = FakeTab()
             st = state()
             first = await check_refresh_datetime_gate(tab, config(target), st, "https://tixcraft.com/activity/detail/abc")
@@ -91,7 +93,9 @@ def test_refresh_datetime_gate_platform_aware_deadline_behavior() -> None:
                 "target_boundary_done": st["target_boundary_done"],
             }
 
-            target = datetime.now() + timedelta(milliseconds=90)
+            target = datetime.now(
+                runtime.resolve_refresh_timezone("Asia/Taipei")
+            ) + timedelta(milliseconds=90)
             tab = FakeTab()
             st = state()
             await check_refresh_datetime_gate(tab, config(target), st, "https://tixcraft.com/activity/detail/abc")
@@ -103,7 +107,9 @@ def test_refresh_datetime_gate_platform_aware_deadline_behavior() -> None:
                 "target_boundary_done": st["target_boundary_done"],
             }
 
-            target = datetime.now() + timedelta(milliseconds=80)
+            target = datetime.now(
+                runtime.resolve_refresh_timezone("Asia/Taipei")
+            ) + timedelta(milliseconds=80)
             tab = FakeTab()
             st = state()
             await check_refresh_datetime_gate(tab, config(target), st, "https://ticketplus.com.tw/activity/abc")
@@ -113,7 +119,9 @@ def test_refresh_datetime_gate_platform_aware_deadline_behavior() -> None:
                 "reached": st["reached"],
             }
 
-            target = datetime.now() + timedelta(milliseconds=80)
+            target = datetime.now(
+                runtime.resolve_refresh_timezone("Asia/Taipei")
+            ) + timedelta(milliseconds=80)
             tab = FakeTab()
             st = state()
             await check_refresh_datetime_gate(tab, config(target, advanced_delay_mode="disabled"), st, "https://tixcraft.com/activity/detail/abc")
