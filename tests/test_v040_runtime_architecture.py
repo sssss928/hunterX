@@ -245,6 +245,8 @@ def test_tixcraft_retryable_alert_dictionary_covers_common_dialogs() -> None:
     assert _is_retryable_alert("票券已被選購一空")
     assert _is_retryable_alert("not enough tickets")
     assert not _is_retryable_alert("付款資料尚未填寫完成")
+    assert not _is_retryable_alert("確定要取消訂單嗎？")
+    assert not _is_retryable_alert("Are you sure you want to cancel this order?")
 
 
 @pytest.mark.parametrize(
@@ -653,9 +655,10 @@ def test_frozen_launch_maxbot_uses_resolved_executable(tmp_path, monkeypatch) ->
     split_exe.write_text("", encoding="utf-8")
     captured = {}
 
-    def fake_popen(args, cwd=None):  # noqa: ANN001
+    def fake_popen(args, cwd=None, shell=None):  # noqa: ANN001
         captured["args"] = args
         captured["cwd"] = cwd
+        captured["shell"] = shell
         return object()
 
     monkeypatch.setattr(util.sys, "frozen", True, raising=False)
@@ -667,6 +670,7 @@ def test_frozen_launch_maxbot_uses_resolved_executable(tmp_path, monkeypatch) ->
 
     assert captured["args"][0] == str(split_exe)
     assert captured["cwd"] == str(bot_root)
+    assert captured["shell"] is False
 
 
 def test_direct_lifecycle_calls_are_centralized() -> None:

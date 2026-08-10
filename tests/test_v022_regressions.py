@@ -66,7 +66,7 @@ class _FakeDateTab:
 
 
 def test_app_version_bumped_to_v047() -> None:
-    assert APP_VERSION == "0.4.7"
+    assert APP_VERSION == "0.4.8"
 
 
 def test_remove_html_tags_preserves_word_boundaries() -> None:
@@ -176,9 +176,10 @@ def test_tixcraft_date_keyword_matching_tolerates_full_width_digits() -> None:
 def test_launch_maxbot_does_not_put_credentials_in_command_line(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_popen(args, cwd=None):  # noqa: ANN001
+    def fake_popen(args, cwd=None, shell=None):  # noqa: ANN001
         captured["args"] = args
         captured["cwd"] = cwd
+        captured["shell"] = shell
         return object()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)

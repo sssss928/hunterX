@@ -254,32 +254,29 @@ def test_reload_guard_history_is_bounded_to_recent_decisions() -> None:
     assert guard.history[0].reason == "cycle-50"
 
 
-def test_completed_dom_scan_waits_for_successful_reload_before_next_scan() -> None:
+def test_no_ticket_scan_runs_once_per_successful_document_generation() -> None:
     scheduler = LeakWatchScheduler()
-    config = _config(5.0)
 
-    assert scheduler.should_wait_for_reload_before_dom_scan(config) is False
-    assert scheduler.mark_dom_scan_start(now=10.0) is True
-    scheduler.mark_dom_scan_end(now=10.1)
-    assert scheduler.dom_scan_completed_since_reload is True
-    assert scheduler.should_wait_for_reload_before_dom_scan(config) is True
+    assert scheduler.should_scan_current_document() is True
+    scheduler.mark_no_ticket_scan_complete()
+    assert scheduler.should_scan_current_document() is False
 
-    assert scheduler.begin_reload_cycle(AREA_URL, now=15.0) is True
-    scheduler.finish_reload_cycle(config, success=False, now=15.2)
-    assert scheduler.dom_scan_completed_since_reload is True
-    assert scheduler.should_wait_for_reload_before_dom_scan(config) is True
+    assert scheduler.begin_reload_cycle(AREA_URL, now=10.0)
+    scheduler.finish_reload_cycle(_config(), False, now=11.0)
+    assert scheduler.should_scan_current_document() is False
 
-    assert scheduler.begin_reload_cycle(AREA_URL, now=20.2) is True
-    scheduler.finish_reload_cycle(config, success=True, now=20.3)
-    assert scheduler.dom_scan_completed_since_reload is False
-    assert scheduler.should_wait_for_reload_before_dom_scan(config) is False
+    assert scheduler.begin_reload_cycle(AREA_URL, now=14.0)
+    scheduler.finish_reload_cycle(_config(), True, now=15.0)
+    assert scheduler.should_scan_current_document() is True
+    scheduler.mark_no_ticket_scan_complete()
+    assert scheduler.should_scan_current_document() is False
 
 
-def test_zero_interval_preserves_legacy_dom_rescan_semantics() -> None:
+def test_recovery_navigation_advances_document_generation() -> None:
     scheduler = LeakWatchScheduler()
-    config = _config(0.0)
+    scheduler.mark_no_ticket_scan_complete()
 
-    assert scheduler.mark_dom_scan_start(now=1.0) is True
-    scheduler.mark_dom_scan_end(now=1.1)
-    assert scheduler.dom_scan_completed_since_reload is True
-    assert scheduler.should_wait_for_reload_before_dom_scan(config) is False
+    scheduler.mark_recovery_landed(_config(), now=20.0)
+
+    assert scheduler.document_generation == 1
+    assert scheduler.should_scan_current_document() is True

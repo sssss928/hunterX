@@ -3,7 +3,7 @@ from __future__ import annotations
 import socket
 import struct
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -28,6 +28,7 @@ from refresh_timing import (
     parse_ntp_response,
     parse_refresh_datetime_value,
     query_sntp_server,
+    resolve_refresh_timezone,
     robust_estimate,
     select_time_source,
     unix_ns_to_ntp_parts,
@@ -95,6 +96,29 @@ def test_parse_refresh_datetime_accepts_millisecond_precision() -> None:
     assert parse_refresh_datetime_value("2026/07/13 09:59:59.850") == datetime(2026, 7, 13, 9, 59, 59, 850000)
     assert parse_refresh_datetime_value("2026/07/13 10:00:00.40") is None
     assert parse_refresh_datetime_value("2026-07-13 10:00:00.000") is None
+
+
+def test_runtime_refresh_datetime_is_timezone_aware_and_crosses_utc_day() -> None:
+    target = parse_refresh_datetime_value(
+        "2026/08/10 00:00:00.125",
+        "Asia/Taipei",
+    )
+
+    assert target is not None
+    assert target.utcoffset() == timedelta(hours=8)
+    assert target.astimezone(timezone.utc) == datetime(
+        2026,
+        8,
+        9,
+        16,
+        0,
+        0,
+        125000,
+        tzinfo=timezone.utc,
+    )
+    assert resolve_refresh_timezone("Asia/Taipei").utcoffset(None) == timedelta(
+        hours=8,
+    )
 
 
 def test_calculate_refresh_trigger_datetime_ignores_deprecated_advance_budget() -> None:

@@ -1082,29 +1082,31 @@ def test_gate_soft_block_preflight_and_leak_scheduler_coordination() -> None:
         "target": True,
         "followup": True,
         "probes_during_countdown": 1,
-        "probes": 3,
+        # The final deadline path consumes only pre-boundary cached evidence;
+        # it never starts a CDP probe after the deadline.
+        "probes": 1,
         "reloads": [],
-        "decision": "soft_block_detected",
+        "decision": "health_probe_unavailable",
     }
     assert payload["unsafe_kinds"] == {
             "text": {
                 "gate_active": True,
-            "decision": "soft_block_detected",
+            "decision": "health_probe_unavailable",
             "reload_count": 0,
         },
             "white": {
                 "gate_active": True,
-            "decision": "soft_block_detected",
+            "decision": "health_probe_unavailable",
             "reload_count": 0,
         },
             "blank": {
                 "gate_active": True,
-            "decision": "soft_block_detected",
+            "decision": "health_probe_unavailable",
             "reload_count": 0,
         },
         "order": {
-            "gate_active": False,
-            "decision": "order_processing_detected",
+            "gate_active": True,
+            "decision": "health_probe_unavailable",
             "reload_count": 0,
         },
     }

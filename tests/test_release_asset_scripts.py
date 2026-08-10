@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -56,3 +57,32 @@ def test_build_source_archive_verifies_exact_git_commit(tmp_path: Path) -> None:
     )
 
     assert archive.is_file()
+
+
+def test_build_source_archive_can_verify_local_working_tree(tmp_path: Path) -> None:
+    repo = tmp_path / "working tree with spaces"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE)
+    (repo / ".gitignore").write_text("settings.json\n", encoding="utf-8")
+    (repo / "README.md").write_text("tracked source\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore", "README.md"],
+        cwd=repo,
+        check=True,
+    )
+    (repo / "new-feature.py").write_text("VERSION = 'working-tree'\n", encoding="utf-8")
+    (repo / "settings.json").write_text('{"token": "secret"}', encoding="utf-8")
+
+    archive = build_source_archive(
+        version="0.4.8",
+        output=tmp_path / "hunterX_source_0.4.8.zip",
+        repo_root=repo,
+        working_tree=True,
+    )
+
+    with zipfile.ZipFile(archive) as source_zip:
+        names = set(source_zip.namelist())
+        assert "hunterX-0.4.8/README.md" in names
+        assert "hunterX-0.4.8/new-feature.py" in names
+        assert all("settings.json" not in name for name in names)
+        assert all("/.git/" not in name for name in names)

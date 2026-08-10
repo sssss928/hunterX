@@ -509,7 +509,11 @@ def test_launch_maxbot_returns_spawned_process(tmp_path: Path, monkeypatch: pyte
     spawned = object()
     monkeypatch.delattr(util.sys, "frozen", raising=False)
     monkeypatch.setattr(util, "get_app_root", lambda: str(tmp_path))
-    monkeypatch.setattr(util.subprocess, "Popen", lambda args, cwd=None: spawned)
+    monkeypatch.setattr(
+        util.subprocess,
+        "Popen",
+        lambda args, cwd=None, shell=None: spawned,
+    )
 
     assert util.launch_maxbot("nodriver_tixcraft") is spawned
 
@@ -518,7 +522,11 @@ def test_launch_maxbot_propagates_spawn_failure(tmp_path: Path, monkeypatch: pyt
     monkeypatch.delattr(util.sys, "frozen", raising=False)
     monkeypatch.setattr(util, "get_app_root", lambda: str(tmp_path))
 
-    def fail_spawn(args: object, cwd: str | None = None) -> None:
+    def fail_spawn(
+        args: object,
+        cwd: str | None = None,
+        shell: bool | None = None,
+    ) -> None:
         raise OSError("spawn denied")
 
     monkeypatch.setattr(util.subprocess, "Popen", fail_spawn)

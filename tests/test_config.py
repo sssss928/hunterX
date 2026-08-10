@@ -13,7 +13,7 @@ def test_default_config_contains_required_sections() -> None:
     assert "advanced" in config
     assert "accounts" in config
     assert config["advanced"]["server_port"] == settings.CONST_SERVER_PORT
-    assert "refresh_calibration" not in config
+    assert config["refresh_calibration"]["timezone"] == "Asia/Taipei"
     assert config["time_calibration"]["mode"] == "auto"
     assert config["time_calibration"]["background_refresh_seconds"] >= 60
 
@@ -90,8 +90,8 @@ def test_settings_frontend_static_version_matches_release() -> None:
     html = Path("src/www/settings.html").read_text(encoding="utf-8")
     js = Path("src/www/settings.js").read_text(encoding="utf-8")
 
-    assert "HunterX (0.4.7)" in html
-    assert "HunterX (0.4.7)" in js
+    assert "HunterX (0.4.8)" in html
+    assert "HunterX (0.4.8)" in js
     assert "HunterX (0.4.4)" not in html
     assert "HunterX (0.4.4)" not in js
     assert "HunterX (0.4.3)" not in html
@@ -109,8 +109,8 @@ def test_release_helpers_and_packaged_readme_match_v045() -> None:
     quick_start = Path("build_scripts/QUICK_START.md").read_text(encoding="utf-8")
     build_batch = Path("build_scripts/build_and_test.bat").read_text(encoding="utf-8")
 
-    assert "hunterX_windows_0.4.7.zip" in release_readme
-    assert "hunterX_windows_0.4.7.zip" in quick_start
+    assert "hunterX_windows_0.4.8.zip" in release_readme
+    assert "hunterX_windows_0.4.8.zip" in quick_start
     assert "hunterX_windows_%VERSION%.zip" in build_batch
     assert "project-version --metadata src\\hunter_metadata.py" in build_batch
     assert "validate-project-version --version" in build_batch
@@ -161,7 +161,7 @@ def test_migrate_config_fills_missing_sections() -> None:
     assert migrated["advanced"]["discount_code"] == "ABC"
     assert "ocr_captcha" in migrated
     assert "kktix" in migrated
-    assert "refresh_calibration" not in migrated
+    assert migrated["refresh_calibration"]["timezone"] == "Asia/Taipei"
     assert migrated["time_calibration"]["mode"] == "auto"
 
 

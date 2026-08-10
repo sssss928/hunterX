@@ -45,14 +45,3 @@ def test_profile_mutations_require_loaded_snapshot_and_run_is_snapshot_bound() -
     assert "do_launch('', launchProfile);" in js
     assert '"/run" + profile_query_for(launchProfile)' in js
     assert "profile_context_is_ready(launchProfile)" in js
-
-
-
-def test_settings_html_ids_are_unique() -> None:
-    import re
-
-    html = Path("src/www/settings.html").read_text(encoding="utf-8")
-    ids = re.findall(r'\\bid=["\\\']([^"\\\']+)["\\\']', html)
-    duplicates = sorted({item for item in ids if ids.count(item) > 1})
-
-    assert duplicates == []

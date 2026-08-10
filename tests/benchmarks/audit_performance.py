@@ -30,6 +30,9 @@ from platforms.cityline import is_cityline_login_page
 from platforms.common_async import bounded_poll, get_auto_reload_interval, is_interval_due
 from platforms.fansigo import get_fansigo_page_type, is_fansigo_url
 from platforms.ticketplus import _ticketplus_path_segment_count
+from leak_watch import LeakWatchScheduler
+from platform_engine import PlatformEngine
+from refresh_coordinator import NS_PER_SECOND, RefreshCoordinator
 from refresh_timing import (
     calculate_refresh_trigger_datetime,
     compute_remaining_ns,
@@ -252,6 +255,67 @@ def bench_url_classification(iterations: int) -> int:
     return total
 
 
+def bench_refresh_coordinator_idle(iterations: int) -> int:
+    now = [10 * NS_PER_SECOND]
+    coordinator = RefreshCoordinator(clock_ns=lambda: now[0])
+    first = coordinator.begin_dispatch("periodic", 5.0)
+    coordinator.complete_dispatch(first.token, True)
+    denied = 0
+    for _ in range(iterations):
+        denied += int(not coordinator.begin_dispatch("periodic", 5.0).allowed)
+        now[0] += 1_000_000
+    return denied
+
+
+def bench_same_document_no_ticket(iterations: int) -> int:
+    scheduler = LeakWatchScheduler()
+    scheduler.mark_no_ticket_scan_complete()
+    skipped = 0
+    for _ in range(iterations):
+        skipped += int(not scheduler.should_scan_current_document())
+    return skipped
+
+
+def _bench_tab_state_intents(count: int) -> int:
+    class Tab:
+        pass
+
+    engine = PlatformEngine()
+    tabs = [Tab() for _ in range(count)]
+    allowed = 0
+    for tab in tabs:
+        coordinator = engine.refresh_coordinator_for(tab)
+        decision = coordinator.begin_dispatch("inventory_empty", 3.0)
+        allowed += int(decision.allowed)
+        coordinator.complete_dispatch(decision.token, True)
+    return allowed
+
+
+def bench_tab_state_intents_100(_iterations: int) -> int:
+    return _bench_tab_state_intents(100)
+
+
+def bench_tab_state_intents_1000(_iterations: int) -> int:
+    return _bench_tab_state_intents(1_000)
+
+
+def bench_scheduled_dispatch(iterations: int) -> float:
+    total_lateness = 0.0
+    for index in range(iterations):
+        now = [100 * NS_PER_SECOND]
+        coordinator = RefreshCoordinator(clock_ns=lambda: now[0])
+        deadline = now[0] + NS_PER_SECOND
+        coordinator.arm_scheduled(f"sale-{index}", deadline)
+        now[0] = deadline
+        decision = coordinator.begin_dispatch(
+            "refresh_datetime_trigger",
+            5.0,
+            priority="scheduled",
+        )
+        total_lateness += float(decision.lateness_ms or 0.0)
+    return total_lateness
+
+
 BENCHMARKS: dict[str, BenchmarkFunc] = {
     "default_config": bench_default_config,
     "config_migration": bench_config_migration,
@@ -266,6 +330,11 @@ BENCHMARKS: dict[str, BenchmarkFunc] = {
     "source_selection": bench_source_selection,
     "platform_interval_helpers": bench_platform_interval_helpers,
     "url_classification": bench_url_classification,
+    "refresh_coordinator_idle": bench_refresh_coordinator_idle,
+    "same_document_no_ticket": bench_same_document_no_ticket,
+    "tab_state_intents_100": bench_tab_state_intents_100,
+    "tab_state_intents_1000": bench_tab_state_intents_1000,
+    "scheduled_dispatch": bench_scheduled_dispatch,
 }
 
 
