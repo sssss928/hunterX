@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.4.8
+
+- Add one deterministic `RefreshCoordinator` per browser tab. Every automatic
+  reload passes the existing protected-page/single-flight guard and the same
+  monotonic minimum-interval owner; delayed loops never catch up in bursts.
+- Parse runtime sale targets with millisecond precision in `Asia/Taipei` by
+  default, map wall time once to a monotonic one-shot deadline, coalesce nearby
+  periodic intents, and keep DOM/CDP health probes off the final dispatch path.
+- Fix TixCraft-family soft-block recovery falling back to a hard-coded one
+  second. Each confirmed incident now owns one immutable configured/default
+  wait, suppresses ordinary refresh intents, and permits one guarded recovery.
+- Make leak-watch scan an unchanged TixCraft document at most once after a
+  completed no-ticket scan, then wait for the next deterministic refresh
+  generation. On-sale and leak-watch continue into the same purchase handlers.
+- Route legacy platform reload calls through the most recent atomic per-tab
+  config snapshot, so KKTIX, TicketPlus, KHAM, iBon, Cityline, HKTicketing,
+  FamiTicket, FunOne and FANSI GO also obey the shared interval coordinator.
+- Correct Ticketmaster detail-page dispatch and ticket-count selection. Exact
+  quantity is required by default; `allow_less_tickets` selects only the
+  largest available value below the target and never a larger value.
+- Add throttled Ticketmaster stale-ticket reload recovery and limit tab closing
+  to tabs registered as bot-created.
+- Sequence KKTIX qualification handling as ticket selection, scoped
+  qualification choice, enabled member-code field, fill, form-state recheck,
+  then next. Waiting-room, challenge, missing field/submit and CDP errors now
+  produce distinct fail-closed diagnostics.
+- Scope iBon DMP blocking to two exact event collector endpoints, add `愛心` to
+  new-config exclusions without overwriting existing user exclusions, remove
+  dead overheat settings through migration, and make launchers explicitly use
+  argv plus `shell=False`.
+- Stop safely after 30 seconds of persistent empty URL/CDP state, with
+  rate-limited diagnostics and a manual restart instruction rather than an
+  unbounded silent loop.
+- Preserve manual CAPTCHA, waiting-room/challenge and payment handoff. No queue
+  bypass, CAPTCHA bypass, anti-bot evasion or automated payment was added.
+- Validation remains offline: unit/synthetic DOM, scheduler soak, security,
+  archive and packaged smoke tests do not guarantee inventory, site uptime,
+  browser/network latency or a successful real purchase.
+
 ## v0.4.7
 
 - Fix the TixCraft post-submit race that could return a valid in-flight order
@@ -33,17 +72,6 @@
   blocks, concurrent tabs, guarded navigation and long-run scheduler liveness.
 - Update the pinned `cryptography` runtime dependency to 50.0.0 to address the
   advisories reported against 48.0.1 by the release security gate.
-- Keep Zendriver's CDP listener alive when Chrome returns a result or protocol
-  error after the corresponding asyncio transaction was cancelled during a
-  document replacement. The transport-only guard discards only responses whose
-  Future is already done and preserves normal results and protocol exceptions.
-- Keep each TixCraft leak-watch AREA document to one complete DOM scan; after
-  a no-ticket scan, later main-loop iterations wait for the existing reload
-  deadline instead of repeatedly querying the same DOM/CDP document.
-- Avoid repeated page-JavaScript URL probes during the safe AREA refresh cycle:
-  after a known successful reload/recovery and while an already-scanned document
-  waits for the next reload, use CDP TargetInfo.url. Normal JavaScript URL
-  detection resumes immediately for click/navigation/submit/purchase transitions.
 - Known validation limit: no real ticket order, captcha bypass, queue bypass or
   payment was attempted. Site behavior was validated with unit/integration
   fixtures and production handlers; external DOM changes remain possible.
