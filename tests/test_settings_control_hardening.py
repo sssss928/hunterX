@@ -822,6 +822,18 @@ def test_control_session_uses_constant_time_per_launch_secret() -> None:
     assert not settings.control_secret_matches(handler.application, "")
 
 
+def test_settings_static_page_does_not_mint_control_session_without_bootstrap() -> None:
+    source = Path(settings.__file__).read_text(encoding="utf-8")
+
+    assert "supplied_nonce = self.get_query_argument" in source
+    assert "invalid or consumed control bootstrap" in source
+    assert "self.application.bootstrap_consumed = True" in source
+    assert "self.application.bootstrap_nonce = \"\"" in source
+    assert "self.redirect(\"/settings.html\")" in source
+    assert "webbrowser.open_new(bootstrap_url)" in source
+    assert "print(\"goto url:\", clean_url)" in source
+
+
 def test_config_secret_mask_round_trip_preserves_old_values_and_allows_clear() -> None:
     existing = {
         "accounts": {
@@ -1132,18 +1144,25 @@ def test_settings_server_shutdown_closes_listener(
         lambda: ("settings.json", {"advanced": {"server_port": port}}),
     )
     monkeypatch.setattr(settings, "_create_ocr_engine", lambda: None)
-    monkeypatch.setattr(settings.webbrowser, "open_new", lambda _url: False)
+    opened_urls: list[str] = []
+    monkeypatch.setattr(
+        settings.webbrowser,
+        "open_new",
+        lambda url: opened_urls.append(url) or False,
+    )
 
     thread = settings.start_web_server_background(startup_timeout=3.0)
     assert isinstance(thread, threading.Thread)
     assert settings.util.is_connectable(port, host="127.0.0.1")
 
     session = settings.requests.Session()
-    bootstrap = session.get(
-        f"http://127.0.0.1:{port}/settings.html",
-        timeout=2.0,
-    )
+    assert len(opened_urls) == 1
+    assert f"{settings.CONST_CONTROL_BOOTSTRAP_QUERY}=" in opened_urls[0]
+    bootstrap = session.get(opened_urls[0], timeout=2.0)
     assert bootstrap.status_code == 200
+    assert bootstrap.url == f"http://127.0.0.1:{port}/settings.html"
+    replay = settings.requests.Session().get(opened_urls[0], timeout=2.0)
+    assert replay.status_code == 403
     response = session.post(f"http://127.0.0.1:{port}/shutdown", timeout=2.0)
     assert response.status_code == 200
     assert response.json() == {"shutdown": True}

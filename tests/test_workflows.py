@@ -52,10 +52,11 @@ def test_ci_workflow_covers_required_branch_families() -> None:
     assert "project-version --metadata src/hunter_metadata.py" in workflow
     assert 'steps.project.outputs.version' in workflow
     assert 'steps.project.outputs.artifact_name' in workflow
+    assert "--require-hashes -r requirements-lock-windows-py311.txt" in workflow
+    assert "pytest --cov-fail-under=30" in workflow
     assert workflow.count("continue-on-error: true") == 3
     assert workflow.count("retention-days: 3") == 3
     assert "0.1.0" not in workflow
-
 
 def test_windows_build_script_requires_metadata_version_match() -> None:
     script = (REPO_ROOT / "scripts/build_windows.ps1").read_text(encoding="utf-8")
@@ -68,3 +69,8 @@ def test_windows_build_script_requires_metadata_version_match() -> None:
     assert validation < first_build
     assert validation < first_delete
     assert "verify_release_archive.py windows" in script
+
+    build_and_test = (REPO_ROOT / "build_scripts/build_and_test.bat").read_text(
+        encoding="utf-8"
+    )
+    assert "--require-hashes -r requirements-lock-windows-py311.txt" in build_and_test

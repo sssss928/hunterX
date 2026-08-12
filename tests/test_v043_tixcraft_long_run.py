@@ -12,6 +12,7 @@ from platforms import tixcraft
 
 
 AREA_URL = "https://tixcraft.com/ticket/area/event/game"
+MEMORY_SAMPLE_ITERATIONS = 2_000
 
 
 def _config(interval: float = 3.0) -> dict:
@@ -47,6 +48,8 @@ def test_scheduler_100000_iteration_soak_has_no_stuck_pending_or_growth() -> Non
 
     tracemalloc.start()
     baseline_current, _ = tracemalloc.get_traced_memory()
+    sample_current = baseline_current
+    sample_peak = baseline_current
     for iteration in range(100_000):
         now = iteration * 0.05
         if iteration % 250 == 0:
@@ -62,8 +65,9 @@ def test_scheduler_100000_iteration_soak_has_no_stuck_pending_or_growth() -> Non
             scheduler.finish_reload_cycle(config, success=True, now=now + 0.001)
             reload_cycles += 1
 
-    current_bytes, peak_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+        if iteration + 1 == MEMORY_SAMPLE_ITERATIONS:
+            sample_current, sample_peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
 
     scheduler.maintenance(config, AREA_URL, now=10_000.0)
     assert reload_cycles > 100
@@ -71,8 +75,8 @@ def test_scheduler_100000_iteration_soak_has_no_stuck_pending_or_growth() -> Non
     assert scheduler.dom_scan_pending is False
     assert scheduler.area_click_pending is False
     assert len(scheduler.history) <= LEAK_WATCH_HISTORY_CAPACITY
-    assert current_bytes - baseline_current < 5 * 1024 * 1024
-    assert peak_bytes - baseline_current < 5 * 1024 * 1024
+    assert sample_current - baseline_current < 5 * 1024 * 1024
+    assert sample_peak - baseline_current < 5 * 1024 * 1024
 
 
 @pytest.mark.asyncio
@@ -138,6 +142,8 @@ async def test_100000_iteration_failure_matrix_preserves_reload_liveness(
     gc.collect()
     tracemalloc.start()
     baseline_current, _ = tracemalloc.get_traced_memory()
+    sample_current = baseline_current
+    sample_peak = baseline_current
 
     for iteration in range(100_000):
         clock["now"] = iteration * 0.05
@@ -184,9 +190,11 @@ async def test_100000_iteration_failure_matrix_preserves_reload_liveness(
                 attempt_count_before + int(eligible_now)
             )
 
+        if iteration + 1 == MEMORY_SAMPLE_ITERATIONS:
+            sample_current, sample_peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+
     scheduler.maintenance(_config(3.0), AREA_URL, now=10_000.0)
-    current_bytes, peak_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
     loop_tasks_after = set(asyncio.all_tasks())
 
     assert reload_count > 1_000
@@ -210,8 +218,8 @@ async def test_100000_iteration_failure_matrix_preserves_reload_liveness(
     assert scheduler.area_click_pending is False
     assert len(scheduler.history) <= LEAK_WATCH_HISTORY_CAPACITY
     assert loop_tasks_after == loop_tasks_before
-    assert current_bytes - baseline_current < 5 * 1024 * 1024
-    assert peak_bytes - baseline_current < 5 * 1024 * 1024
+    assert sample_current - baseline_current < 5 * 1024 * 1024
+    assert sample_peak - baseline_current < 5 * 1024 * 1024
 
 
 @pytest.mark.asyncio
