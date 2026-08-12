@@ -24,7 +24,7 @@ import webbrowser
 from collections import deque
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
 import tornado
 from tornado.ioloop import IOLoop
@@ -85,6 +85,7 @@ CONST_SERVER_PORT = 16888
 CONST_SERVER_ADDRESS = "127.0.0.1"
 CONST_SERVER_STARTUP_TIMEOUT_SEC = 5.0
 CONST_CONTROL_COOKIE_NAME = "hunterx_control_session"
+CONST_CONTROL_BOOTSTRAP_QUERY = "bootstrap"
 CONST_SENDKEY_TOKEN_RE = r"^[A-Za-z0-9_-]{1,64}$"
 CONST_SECRET_MASK = "__HUNTERX_SECRET_MASKED__"
 CONST_SECRET_SOURCE_PROFILE_KEY = "__hunterx_secret_source_profile"
@@ -1007,8 +1008,31 @@ class NoCacheStaticFileHandler(StaticFileHandler):
     async def get(self, path, include_body=True):
         normalized_path = str(path or "").replace("\\", "/").lstrip("/")
         if normalized_path in {"", "settings.html"}:
-            secret = getattr(self.application, "control_secret", "")
-            if secret:
+            supplied_nonce = self.get_query_argument(
+                CONST_CONTROL_BOOTSTRAP_QUERY,
+                "",
+            )
+            if supplied_nonce:
+                expected_nonce = getattr(self.application, "bootstrap_nonce", "")
+                nonce_available = bool(
+                    isinstance(expected_nonce, str)
+                    and expected_nonce
+                    and not getattr(self.application, "bootstrap_consumed", False)
+                )
+                if not nonce_available or not hmac.compare_digest(
+                    expected_nonce,
+                    supplied_nonce,
+                ):
+                    raise tornado.web.HTTPError(
+                        403,
+                        reason="invalid or consumed control bootstrap",
+                    )
+                secret = getattr(self.application, "control_secret", "")
+                if not secret:
+                    raise tornado.web.HTTPError(
+                        503,
+                        reason="control session unavailable",
+                    )
                 self.set_cookie(
                     CONST_CONTROL_COOKIE_NAME,
                     secret,
@@ -1016,6 +1040,10 @@ class NoCacheStaticFileHandler(StaticFileHandler):
                     samesite="Strict",
                     path="/",
                 )
+                self.application.bootstrap_consumed = True
+                self.application.bootstrap_nonce = ""
+                self.redirect("/settings.html")
+                return
         return await super().get(path, include_body=include_body)
 
     def set_extra_headers(self, path):
@@ -2495,6 +2523,8 @@ async def main_server(startup_event=None, startup_result=None):
     app.ocr = None
     app.version = CONST_APP_VERSION
     app.control_secret = secrets.token_urlsafe(32)
+    app.bootstrap_nonce = secrets.token_urlsafe(32)
+    app.bootstrap_consumed = False
     app.shutdown_event = asyncio.Event()
 
     # Get server_port from config, fallback to default (Issue #156)
@@ -2521,10 +2551,13 @@ async def main_server(startup_event=None, startup_result=None):
     _signal_server_startup(startup_event, startup_result, True)
     print("server running on port:", server_port)
 
-    url = f"http://{CONST_SERVER_ADDRESS}:{server_port}/settings.html"
-    print("goto url:", url)
+    clean_url = f"http://{CONST_SERVER_ADDRESS}:{server_port}/settings.html"
+    bootstrap_url = f"{clean_url}?{urlencode({CONST_CONTROL_BOOTSTRAP_QUERY: app.bootstrap_nonce})}"
+    # Do not print the bootstrap URL: it is a one-time credential. The handler
+    # immediately redirects to clean_url after issuing the HttpOnly cookie.
+    print("goto url:", clean_url)
     try:
-        webbrowser.open_new(url)
+        webbrowser.open_new(bootstrap_url)
     except Exception as exc:
         print("[WARNING] Failed to open settings page:", util.redact_sensitive_text(str(exc)))
     try:
