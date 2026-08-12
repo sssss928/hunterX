@@ -1,9 +1,12 @@
 # HunterX v0.4.9 release notes
 
-HunterX v0.4.9 is a reliability and release-hardening update based on remote
-`main` commit `982d766561aa7f37d2f7810a928b69d9f164d568`. It preserves the
-existing platform-specific selection and purchase handlers while tightening the
-shared attempt, refresh, browser and packaging boundaries.
+HunterX v0.4.9 is a reliability and release-hardening update based on the
+uploaded HunterX v0.4.7 source package. It integrates and audits the official
+v0.4.8 compatibility baseline (`94bc78862000170537331446196effd6a031b86e`)
+and the repository main line through
+`65496f56c59dc0a71f42f74e8ac76fa5899194fc`. It preserves the existing
+platform-specific selection and purchase handlers while tightening the shared
+attempt, refresh, browser and packaging boundaries.
 
 The Windows package now uses canonical root-relative ZIP member names. The
 release verifier rejects synthetic `./` roots and other non-portable paths that
