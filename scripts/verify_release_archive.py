@@ -63,11 +63,15 @@ def _normalized_file_entries(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipI
         path = PurePosixPath(raw_name)
         if (
             not raw_name
+            or info.filename != raw_name
+            or raw_name.startswith("./")
+            or "//" in raw_name
+            or path.as_posix() != raw_name.rstrip("/")
             or raw_name.startswith("/")
             or path.is_absolute()
             or ".." in path.parts
         ):
-            raise ValueError(f"Unsafe ZIP path: {info.filename!r}")
+            raise ValueError(f"Unsafe or non-portable ZIP path: {info.filename!r}")
         normalized = path.as_posix().rstrip("/")
         if not normalized or info.is_dir():
             continue
@@ -249,6 +253,18 @@ def working_tree_source_files(
             if item
         }
     )
+    deleted_result = subprocess.run(
+        ["git", "ls-files", "-z", "--deleted"],
+        cwd=repo_root,
+        capture_output=True,
+        check=True,
+    )
+    deleted_names = {
+        item.decode("utf-8", errors="strict").replace("\\", "/")
+        for item in deleted_result.stdout.split(b"\0")
+        if item
+    }
+    relative_names = [name for name in relative_names if name not in deleted_names]
     archive_names = {f"{prefix}{name}" for name in relative_names}
     _assert_no_denied_source_paths(archive_names, prefix)
 

@@ -6,29 +6,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Compress-WithRetry {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $SourcePath,
-        [Parameter(Mandatory = $true)]
-        [string] $DestinationPath,
-        [int] $Attempts = 5
-    )
-
-    for ($Attempt = 1; $Attempt -le $Attempts; $Attempt++) {
-        try {
-            Compress-Archive -Path $SourcePath -DestinationPath $DestinationPath -Force
-            return
-        } catch {
-            if ($Attempt -ge $Attempts) {
-                throw
-            }
-            Write-Warning "Compress-Archive failed on attempt $Attempt/${Attempts}: $($_.Exception.Message)"
-            Start-Sleep -Seconds ([Math]::Min(10, $Attempt * 2))
-        }
-    }
-}
-
 function Copy-DirectoryFailClosed {
     param(
         [Parameter(Mandatory = $true)]
@@ -133,13 +110,23 @@ if (Test-Path -LiteralPath $ArtifactPath) {
     Remove-Item -LiteralPath $ArtifactPath -Force
 }
 
-Compress-WithRetry -SourcePath (Join-Path $PackageDir "*") -DestinationPath $ArtifactPath
+python scripts/build_windows_archive.py `
+    --source $PackageDir `
+    --output $ArtifactPath
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows release archive build failed (python exit code $LASTEXITCODE)."
+}
 
 python scripts/verify_release_archive.py windows `
     --archive $ArtifactPath `
     --version $Version
 if ($LASTEXITCODE -ne 0) {
     throw "Windows release archive verification failed (python exit code $LASTEXITCODE)."
+}
+
+& cscript.exe //nologo scripts/verify_windows_shell_zip.js $ArtifactPath
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows Shell ZIP verification failed (cscript exit code $LASTEXITCODE)."
 }
 
 Get-ChildItem -LiteralPath $ArtifactPath | Select-Object FullName, Length
