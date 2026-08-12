@@ -31,7 +31,9 @@ python scripts\release_utils.py validate-project-version --version "%VERSION%" -
 if errorlevel 1 exit /b 1
 
 echo [1/8] Installing bounded project dependencies...
-python -m pip install -r requirement.txt -r requirements-dev.txt
+python -m pip install --require-hashes -r requirements-lock-windows-py311.txt
+if errorlevel 1 exit /b 1
+python -m pip install -r requirements-dev.txt
 if errorlevel 1 exit /b 1
 
 echo [2/8] Compiling source...
