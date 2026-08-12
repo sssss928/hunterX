@@ -59,7 +59,7 @@ def classify_page(url: str = "", text: str = "") -> PageClass:
         or "/ticket/verify/" in url_lower
     ):
         return PageClass.TICKET
-    if "/ticket/area/" in url_lower:
+    if normalized_path == "/ticket/area" or normalized_path.startswith("/ticket/area/"):
         return PageClass.AREA
     if "/activity/game/" in url_lower:
         return PageClass.DATE

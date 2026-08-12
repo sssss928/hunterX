@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from time import perf_counter_ns
 from typing import Any
@@ -17,7 +18,8 @@ CONST_TIXCRAFT_TM_MODEL_PATH = "assets/model/tixcraft_tm"
 CONST_DEFAULT_UNIVERSAL_PATH = "assets/model/universal"
 
 _TIXCRAFT_DOMAINS = ("tixcraft.com", "indievox.com", "ticketmaster.")
-_OCR_CACHE: dict["OcrProfile", Any] = {}
+OCR_CACHE_CAPACITY = 16
+_OCR_CACHE: OrderedDict["OcrProfile", Any] = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,15 @@ def _create_from_profile(profile: OcrProfile) -> Any:
     return ocr
 
 
+def _remember_ocr(profile: OcrProfile, ocr: Any) -> None:
+    """Keep expensive OCR models reusable without allowing an unbounded cache."""
+
+    _OCR_CACHE[profile] = ocr
+    _OCR_CACHE.move_to_end(profile)
+    while len(_OCR_CACHE) > OCR_CACHE_CAPACITY:
+        _OCR_CACHE.popitem(last=False)
+
+
 def get_ocr_instance(
     config_dict: dict[str, Any],
     platform_hint: str | None = None,
@@ -138,6 +149,7 @@ def get_ocr_instance(
 
     cached = _OCR_CACHE.get(profile)
     if cached is not None:
+        _OCR_CACHE.move_to_end(profile)
         _log(debug, f"[OCR CACHE] Reusing OCR instance: mode={profile.mode} path={profile.model_path or 'default'}")
         return cached
 
@@ -147,7 +159,7 @@ def get_ocr_instance(
         _log(debug, "[OCR CACHE] ddddocr component unavailable")
         return None
 
-    _OCR_CACHE[profile] = ocr
+    _remember_ocr(profile, ocr)
     _log(
         debug,
         "[OCR CACHE] Initialized OCR instance:",
@@ -176,13 +188,14 @@ def create_universal_ocr(config_dict: dict[str, Any], debug: Any = None) -> Any:
         return None
     cached = _OCR_CACHE.get(profile)
     if cached is not None:
+        _OCR_CACHE.move_to_end(profile)
         return cached
     started_ns = perf_counter_ns()
     ocr = _create_from_profile(profile)
     if ocr is None:
         _log(debug, "[OCR CACHE] ddddocr component unavailable")
         return None
-    _OCR_CACHE[profile] = ocr
+    _remember_ocr(profile, ocr)
     _log(debug, "[OCR CACHE] Initialized universal OCR:", f"path={profile.model_path}", f"elapsed_ms={_elapsed_ms(started_ns):.3f}")
     return ocr
 

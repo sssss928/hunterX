@@ -34,7 +34,7 @@ import util
 import performance
 import runtime_health
 from leak_watch import LeakWatchScheduler, should_use_leak_watch
-from platforms.common_async import get_auto_reload_interval
+from platforms.common_async import bounded_poll, get_auto_reload_interval, run_cpu_bound
 from action_ledger import ActionLedger
 from notification_context import clean_event_name, make_notification_context
 from page_classifier import PageClass, classify_page
@@ -242,6 +242,15 @@ class TixCraftAttemptPhase(str, Enum):
     CLOSED = "closed"
 
 
+class TixCraftTicketFormState(str, Enum):
+    """Readiness evidence for the dynamically rendered verification form."""
+
+    NOT_RENDERED_YET = "not_rendered_yet"
+    READY = "ready"
+    UNAVAILABLE = "unavailable"
+    INVALID_PAGE = "invalid_page"
+
+
 class TixCraftAreaOutcome(str, Enum):
     PAGE_NOT_READY = "page_not_ready"
     DOM_SCAN_BUSY = "dom_scan_busy"
@@ -343,6 +352,8 @@ _TIXCRAFT_SOFT_BLOCK_NORMAL_PROBE_INTERVAL_SECONDS = 0.25
 _TIXCRAFT_CLICK_DISPATCH_TIMEOUT_SECONDS = 1.0
 _TIXCRAFT_SEAT_EVALUATE_TIMEOUT_SECONDS = 0.4
 _TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS = 20.0
+_TIXCRAFT_VERIFY_READY_TIMEOUT_SECONDS = 0.75
+_TIXCRAFT_VERIFY_READY_INTERVAL_SECONDS = 0.05
 _TIXCRAFT_SOFT_BLOCK_EVIDENCE_WINDOW_SECONDS = 5.0
 _TIXCRAFT_NAVIGATION_CONFIRMATION_DEFAULT_SECONDS = 3.0
 _TIXCRAFT_NAVIGATION_CONFIRMATION_MIN_SECONDS = 1.0
@@ -1459,6 +1470,7 @@ def _tixcraft_state_defaults():
         "captcha_alert_detected": False,
         "captcha_submit_until": 0,
         "ocr_completed_url": "",
+        "ocr_completed_attempt_id": None,
         "last_valid_area_url": "",
         "recent_area_route_url": "",
         "last_selected_area": "",
@@ -1515,6 +1527,9 @@ def _tixcraft_state_defaults():
         "ticketmaster_captcha_processed_url": "",
         "ticketmaster_area_reload_next_at": 0,
         "ticketmaster_date_reload_next_at": 0,
+        "tixcraft_detail_reload_next_at": 0,
+        "tixcraft_detail_reload_url": "",
+        "tixcraft_detail_reload_last_wait_log": 0,
         "tixcraft_area_reload_next_at": 0,
         "tixcraft_area_reload_url": "",
         "tixcraft_date_reload_next_at": 0,
@@ -1615,6 +1630,16 @@ def _get_tixcraft_purchase_attempt():
     return attempt if isinstance(attempt, TixCraftPurchaseAttempt) else None
 
 
+def _clear_tixcraft_attempt_scoped_actions():
+    """Discard completion evidence that must never cross attempt boundaries."""
+
+    _state["ocr_completed_url"] = ""
+    _state["ocr_completed_attempt_id"] = None
+    for key in list(_state.keys()):
+        if str(key).startswith("ticket_assigned_"):
+            _state.pop(key, None)
+
+
 def _close_tixcraft_purchase_attempt(reason="closed"):
     attempt = _get_tixcraft_purchase_attempt()
     if attempt is None:
@@ -1627,6 +1652,7 @@ def _close_tixcraft_purchase_attempt(reason="closed"):
     _state["last_ticket_count_confirmed"] = False
     _state["notification_submit_started_at"] = 0.0
     _state["notification_order_probe_next_at"] = 0.0
+    _clear_tixcraft_attempt_scoped_actions()
 
 
 def _begin_tixcraft_purchase_attempt(trigger, url="", seat_area="", force_new=False):
@@ -1685,6 +1711,7 @@ def _begin_tixcraft_purchase_attempt(trigger, url="", seat_area="", force_new=Fa
     _state["is_popup_checkout"] = False
     _state["played_sound_order"] = False
     _state["notification_retry_at"] = {}
+    _clear_tixcraft_attempt_scoped_actions()
     _record_action("attempt_started", f"{sequence}:{trigger}")
     return attempt
 
@@ -2012,6 +2039,56 @@ def _clear_tixcraft_submit_in_flight(reason=""):
             "submit_cleared",
             f"{getattr(context, 'attempt_id', '')}:{reason or 'unspecified'}",
         )
+
+
+def _tixcraft_submit_owner_is_invalid(tab=None):
+    """Return True only when identity evidence disproves submit ownership."""
+
+    context = _state.get("submit_in_flight")
+    if not isinstance(context, TixCraftSubmitInFlight):
+        return context is not None
+    attempt = _get_tixcraft_purchase_attempt()
+    if attempt is None or attempt.attempt_id != context.attempt_id:
+        return True
+    if context.flow_generation != int(
+        _state.get("notification_flow_generation", 0) or 0
+    ):
+        return True
+    if context.token != int(_state.get("submit_generation", 0) or 0):
+        return True
+    return bool(tab is not None and context.tab_identity and context.tab_identity != id(tab))
+
+
+async def _reconcile_tixcraft_submit_ownership(tab, page_class, url, config_dict):
+    """Keep slow legitimate submits, but release ownership on proven recovery.
+
+    Elapsed time alone is deliberately insufficient. A submit is cleared when
+    its attempt/generation/tab identity is impossible, or when an interactive
+    AREA document is positively confirmed after the browser returned there.
+    """
+
+    context = _state.get("submit_in_flight")
+    if context is None:
+        return False
+    if _tixcraft_submit_owner_is_invalid(tab):
+        _clear_tixcraft_submit_in_flight("identity_invalid")
+        return False
+    current_page = PageClass(page_class)
+    if current_page is not PageClass.AREA:
+        return True
+    snapshot = await _read_tixcraft_page_health(tab, config_dict)
+    if not _is_tixcraft_recovery_health_confirmed(snapshot, PageClass.AREA):
+        return True
+    attempt = _get_tixcraft_purchase_attempt()
+    if attempt is not None:
+        attempt.phase = TixCraftAttemptPhase.RECOVERING_TO_AREA
+    _close_tixcraft_purchase_attempt("confirmed_area_recovery")
+    _state["last_selected_area"] = ""
+    _state["selected_area_candidate"] = ""
+    _state["selected_area_metadata"] = {}
+    _refresh_coordinator_for_tab(tab).reset_purchase_guard()
+    _record_action("submit_owner_released", _tixcraft_route_key(url))
+    return False
 
 
 def _has_confirmed_tixcraft_submit_context(now=None):
@@ -2370,13 +2447,10 @@ def _is_retryable_alert(message):
 
 def _reset_tixcraft_submit_state():
     _state["captcha_submit_until"] = 0
-    _state["ocr_completed_url"] = ""
+    _clear_tixcraft_attempt_scoped_actions()
     _state["captcha_alert_detected"] = False
     _state["manual_intervention_required"] = False
     _clear_tixcraft_submit_in_flight("reset")
-    for key in list(_state.keys()):
-        if str(key).startswith("ticket_assigned_"):
-            _state.pop(key, None)
 
 
 def _reset_tixcraft_area_retry_state():
@@ -3463,6 +3537,7 @@ async def _recover_to_last_valid_area(tab, config_dict, reason):
             )
             return False
         _mark_tixcraft_recovery_landed(config_dict, last_area_url)
+        _refresh_coordinator_for_tab(tab).reset_purchase_guard()
         _record_action("rejected_recover_to_area" if reason != "manual_cancel" else "manual_cancel_recover_to_area")
         return True
     except Exception as exc:
@@ -3668,7 +3743,9 @@ async def nodriver_tixcraft_home_close_window(tab):
     except Exception:
         pass
 
-async def nodriver_tixcraft_redirect(tab, url):
+async def nodriver_tixcraft_redirect(tab, url, config_dict=None):
+    """Enter the date page when its purchase control appears, otherwise refresh."""
+
     ret = False
     game_name = ""
     url_split = url.split("/")
@@ -3680,7 +3757,10 @@ async def nodriver_tixcraft_redirect(tab, url):
             # opens there is no anchor to /activity/game/{id}. Redirecting
             # blindly drops the user on an empty gameList page and makes manual
             # F5 look broken. Only redirect once the buy link actually exists.
-            selector = 'a[href*="/activity/game/%s"]' % game_name
+            selector = (
+                'a[href*="/activity/game/%s"],'
+                '[data-href*="/activity/game/%s"]'
+            ) % (game_name, game_name)
             js = 'document.querySelector(%s) !== null' % json.dumps(selector)
             has_buy_link = False
             try:
@@ -3688,17 +3768,30 @@ async def nodriver_tixcraft_redirect(tab, url):
             except Exception:
                 has_buy_link = False
             if not has_buy_link:
+                if config_dict is not None:
+                    await _reload_page_when_due(
+                        tab,
+                        config_dict,
+                        "tixcraft_detail_reload",
+                        "[ACTIVITY DETAIL]",
+                    )
                 return ret
             entry_url = url.replace("/activity/detail/","/activity/game/").split("#")[0].split("?")[0]
             print("redirec to new url:", entry_url)
             try:
-                await _guarded_tixcraft_get(tab, entry_url, reason="TIXCRAFT_DETAIL_REDIRECT")
+                await _guarded_tixcraft_get(
+                    tab,
+                    entry_url,
+                    config_dict,
+                    reason="TIXCRAFT_DETAIL_REDIRECT",
+                )
                 # 等待日期列表出現，確保頁面載入完成
                 try:
                     await tab.wait_for('#gameList > table > tbody > tr', timeout=5)
                 except Exception:
                     pass  # timeout 沒關係，讓後續邏輯處理
                 ret = True
+                _state["tixcraft_detail_reload_next_at"] = 0
             except Exception as exec1:
                 pass
     return ret
@@ -5741,11 +5834,13 @@ async def _dispatch_tixcraft_area_click(
 
 async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
     """Run one area iteration and always return through the reload finalizer."""
+    perf_trace = performance.PerformanceTrace("tixcraft_area")
     try:
         return await _nodriver_tixcraft_area_auto_select_impl(
             tab,
             url,
             config_dict,
+            perf_trace=perf_trace,
         )
     except asyncio.CancelledError:
         _release_tixcraft_area_dom_scan()
@@ -5775,9 +5870,22 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 current_url=url,
             )
         return False
+    finally:
+        performance.log_trace(
+            util.create_debug_logger(config_dict),
+            perf_trace,
+            "[TIXCRAFT AREA PERF]",
+        )
 
 
-async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
+async def _nodriver_tixcraft_area_auto_select_impl(
+    tab,
+    url,
+    config_dict,
+    *,
+    perf_trace=None,
+):
+    route_started_ns = performance.perf_counter_ns()
     # 函數開始時檢查暫停
     if await check_and_handle_pause(config_dict):
         return False
@@ -5787,6 +5895,11 @@ async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
     valid_area_url = _normalize_tixcraft_area_url(url)
     if valid_area_url:
         _state["last_valid_area_url"] = valid_area_url
+    performance.record_elapsed(
+        perf_trace,
+        performance.ROUTE_OBSERVATION_STAGE,
+        route_started_ns,
+    )
     if _state.get("manual_intervention_required"):
         debug.log("[AREA SELECT] Manual intervention cleared after returning to area page")
         _reset_tixcraft_submit_state()
@@ -5915,6 +6028,7 @@ async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
     auto_select_mode = config_dict["area_auto_select"]["mode"]
     area_auto_fallback = config_dict.get('area_auto_fallback', False)  # T021: Safe access for new field
 
+    dom_started_ns = performance.perf_counter_ns()
     try:
         if leak_dom_guard:
             el = await runtime_health.query_selector_with_timeout(
@@ -6010,11 +6124,17 @@ async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
     finally:
         if leak_dom_guard:
             leak_scheduler.mark_dom_scan_end(now=time.monotonic())
+        performance.record_elapsed(
+            perf_trace,
+            performance.AREA_DOM_SNAPSHOT_STAGE,
+            dom_started_ns,
+        )
 
     is_need_refresh = False
     outcome = TixCraftAreaOutcome.NO_AVAILABLE_AREA
     matched_blocks = None
 
+    selection_started_ns = performance.perf_counter_ns()
     if area_keyword:
         # Parse keywords using JSON to avoid splitting keywords containing commas (e.g., "5,600")
         # Format: "\"keyword1\",\"keyword2\"" → ['keyword1', 'keyword2']
@@ -6083,6 +6203,11 @@ async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
         debug.log("[AREA SELECT] Auto-select mode: most remaining")
     else:
         target_area = util.get_target_item_from_matched_list(matched_blocks, auto_select_mode)
+    performance.record_elapsed(
+        perf_trace,
+        performance.CANDIDATE_SELECTION_STAGE,
+        selection_started_ns,
+    )
     if target_area:
         area_text = await _read_selected_area_name(
             target_area,
@@ -6103,11 +6228,17 @@ async def _nodriver_tixcraft_area_auto_select_impl(tab, url, config_dict):
                 current_url=url,
             )
 
+        click_started_ns = performance.perf_counter_ns()
         click_succeeded = await _dispatch_tixcraft_area_click(
             target_area,
             tab,
             valid_area_url or url,
             config_dict,
+        )
+        performance.record_elapsed(
+            perf_trace,
+            performance.CANDIDATE_CLICK_STAGE,
+            click_started_ns,
         )
 
         if click_succeeded:
@@ -6269,7 +6400,9 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
         else:
             debug.log(f"[AREA KEYWORD]   No keyword filter, accepting this area")
 
-        # Check seat availability for multiple tickets
+        # Check seat availability for multiple tickets. The old 1-9 shortcut
+        # rejected every single-digit remainder even when it satisfied the
+        # requested count (for example 2 tickets with 9 remaining).
         allow_less_tickets = config_dict.get("tixcraft", {}).get("allow_less_tickets", False)
         if config_dict["ticket_number"] > 1 and not allow_less_tickets:
             try:
@@ -6303,17 +6436,18 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
                                 or ""
                             )
                 if font_text:
-                    font_text = "@%s@" % font_text
-
-                    debug.log(f"[AREA KEYWORD]   Checking seats: {font_text.strip('@')}")
-
-                    # Skip if only 1-9 seats remaining
-                    SEATS_1_9 = ["@%d@" % i for i in range(1, 10)]
-                    if any(seat in font_text for seat in SEATS_1_9):
-                        debug.log(f"[AREA KEYWORD]   Insufficient seats (need {config_dict['ticket_number']}, only {font_text.strip('@')} available)")
+                    remaining_count = _extract_remaining_count(font_text)
+                    debug.log(f"[AREA KEYWORD]   Checking seats: {font_text}")
+                    if (
+                        remaining_count is not None
+                        and remaining_count < int(config_dict["ticket_number"])
+                    ):
+                        debug.log(
+                            "[AREA KEYWORD]   Insufficient seats "
+                            f"(need {config_dict['ticket_number']}, only {remaining_count} available)"
+                        )
                         continue
-                    else:
-                        debug.log(f"[AREA KEYWORD]   Sufficient seats available")
+                    debug.log(f"[AREA KEYWORD]   Sufficient seats available")
             except Exception:
                 pass
 
@@ -6784,6 +6918,8 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
     if await check_and_handle_pause(config_dict):
         return False
     debug = util.create_debug_logger(config_dict)
+    ticket_trace = performance.PerformanceTrace("tixcraft_ticket")
+    ticket_ready_started_ns = performance.perf_counter_ns()
 
     # 檢查是否已經設定過票券數量（方案 B：狀態標記）
     current_url, _ = await nodriver_current_url(tab)
@@ -6800,9 +6936,15 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
             token=int(_state.get("submit_generation", 0) or 0),
         )
         return
+    attempt = _get_tixcraft_purchase_attempt()
+    if attempt is None:
+        attempt = _begin_tixcraft_purchase_attempt("ticket_page", current_url)
     ticket_number = str(config_dict["ticket_number"])
     allow_less_tickets = config_dict.get("tixcraft", {}).get("allow_less_tickets", False)
-    ticket_state_key = f"ticket_assigned_{current_url}_{ticket_number}_{int(allow_less_tickets)}"
+    ticket_state_key = (
+        f"ticket_assigned_{attempt.attempt_id}_{current_url}_"
+        f"{ticket_number}_{int(allow_less_tickets)}"
+    )
     for stale_key in list(_state.keys()):
         if (
             str(stale_key).startswith("ticket_assigned_")
@@ -6822,6 +6964,13 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
             await _recover_to_last_valid_area(tab, config_dict, "ticket_count_cache_stale")
             return
 
+        performance.record_elapsed(
+            ticket_trace,
+            performance.TICKET_READY_STAGE,
+            ticket_ready_started_ns,
+        )
+        performance.log_trace(debug, ticket_trace, "[TIXCRAFT TICKET PERF]")
+
         debug.log(f"Ticket number already set ({ticket_number}), skipping")
 
         # Ensure agreement checkbox is checked (even if ticket number already set)
@@ -6830,11 +6979,16 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
         # Reset OCR state if captcha alert detected (wrong answer submitted)
         if _state.get("captcha_alert_detected", False):
             _state["ocr_completed_url"] = ""
+            _state["ocr_completed_attempt_id"] = None
             _state["captcha_alert_detected"] = False
 
         # Skip OCR if already completed on this URL (non-force_submit mode only)
         is_force_submit = config_dict["ocr_captcha"]["force_submit"]
-        if is_force_submit or _state.get("ocr_completed_url", "") != current_url:
+        ocr_completed_for_attempt = bool(
+            _state.get("ocr_completed_url", "") == current_url
+            and _state.get("ocr_completed_attempt_id") == attempt.attempt_id
+        )
+        if is_force_submit or not ocr_completed_for_attempt:
             await nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Browser, domain_name)
         return
 
@@ -6864,6 +7018,13 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
             _state[ticket_state_key] = False
             await _recover_to_last_valid_area(tab, config_dict, "ticket_count_validation_failed")
             return
+
+        performance.record_elapsed(
+            ticket_trace,
+            performance.TICKET_READY_STAGE,
+            ticket_ready_started_ns,
+        )
+        performance.log_trace(debug, ticket_trace, "[TIXCRAFT TICKET PERF]")
 
         _state[ticket_state_key] = True
         _state["tixcraft_ticket_reload_next_at"] = 0
@@ -7142,7 +7303,8 @@ async def nodriver_tixcraft_get_ocr_answer(
 
         if ocr_captcha_image_source == CONST_OCR_CAPTCH_IMAGE_SOURCE_NON_BROWSER:
             if not Captcha_Browser is None:
-                img_base64 = base64.b64decode(Captcha_Browser.request_captcha())
+                captcha_payload = await run_cpu_bound(Captcha_Browser.request_captcha)
+                img_base64 = base64.b64decode(captcha_payload)
 
         if ocr_captcha_image_source == CONST_OCR_CAPTCH_IMAGE_SOURCE_CANVAS:
             image_id = 'TicketForm_verifyCode-image'
@@ -7182,7 +7344,8 @@ async def nodriver_tixcraft_get_ocr_answer(
                 if img_base64 is None:
                     if not Captcha_Browser is None:
                         debug.log("[TIXCRAFT OCR] Failed to get image from canvas, using fallback: NonBrowser")
-                        img_base64 = base64.b64decode(Captcha_Browser.request_captcha())
+                        captcha_payload = await run_cpu_bound(Captcha_Browser.request_captcha)
+                        img_base64 = base64.b64decode(captcha_payload)
 
             except Exception as exc:
                 debug.log("[TIXCRAFT OCR] Canvas error:", str(exc))
@@ -7192,12 +7355,48 @@ async def nodriver_tixcraft_get_ocr_answer(
         if not img_base64 is None:
             try:
                 ocr_started_ns = performance.perf_counter_ns()
-                ocr_answer = ocr.classification(img_base64)
+                ocr_answer = await run_cpu_bound(ocr.classification, img_base64)
                 performance.record_elapsed(perf_trace, performance.OCR_STAGE, ocr_started_ns)
             except Exception as exc:
                 debug.log("[TIXCRAFT OCR] Classification error:", str(exc))
 
     return ocr_answer
+
+
+async def _wait_for_tixcraft_verify_input(
+    tab,
+    *,
+    timeout=_TIXCRAFT_VERIFY_READY_TIMEOUT_SECONDS,
+    interval=_TIXCRAFT_VERIFY_READY_INTERVAL_SECONDS,
+):
+    """Wait for a real verification element without confusing lookup with existence."""
+
+    async def probe():
+        current_url = _get_cached_tab_url(tab)
+        if classify_page(current_url) is not PageClass.TICKET:
+            return TixCraftTicketFormState.INVALID_PAGE
+        try:
+            element = await tab.query_selector("#TicketForm_verifyCode")
+        except Exception as exc:
+            if runtime_health.is_browser_connection_closed_error(exc):
+                raise
+            return None
+        if element is None:
+            return None
+        return TixCraftTicketFormState.READY
+
+    state = await bounded_poll(
+        probe,
+        timeout=timeout,
+        interval=interval,
+        description="TixCraft verification input",
+    )
+    if state is not None:
+        return state
+    if classify_page(_get_cached_tab_url(tab)) is not PageClass.TICKET:
+        return TixCraftTicketFormState.INVALID_PAGE
+    return TixCraftTicketFormState.UNAVAILABLE
+
 
 async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enable,
                                      previous_answer, Captcha_Browser,
@@ -7208,19 +7407,21 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
     is_need_redo_ocr = False
     is_form_submitted = False
 
-    is_input_box_exist = False
+    form_state = TixCraftTicketFormState.NOT_RENDERED_YET
+    perf_trace = None
     if not ocr is None:
-        form_verifyCode = None
-        try:
-            form_verifyCode = await tab.query_selector('#TicketForm_verifyCode')
-            is_input_box_exist = True
-        except Exception as exc:
-            pass
+        perf_trace = performance.PerformanceTrace("tixcraft_captcha")
+        ready_started_ns = performance.perf_counter_ns()
+        form_state = await _wait_for_tixcraft_verify_input(tab)
+        performance.record_elapsed(
+            perf_trace,
+            performance.CAPTCHA_READY_STAGE,
+            ready_started_ns,
+        )
     else:
         debug.log("[TIXCRAFT OCR] ddddocr component unavailable, you may be running on ARM")
 
-    if is_input_box_exist:
-        perf_trace = performance.PerformanceTrace("tixcraft_captcha")
+    if form_state is TixCraftTicketFormState.READY:
         debug.log("[TIXCRAFT OCR] away_from_keyboard_enable:", away_from_keyboard_enable)
         debug.log("[TIXCRAFT OCR] previous_answer:", previous_answer)
         debug.log("[TIXCRAFT OCR] ocr_captcha_image_source:", ocr_captcha_image_source)
@@ -7283,9 +7484,9 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
                         if ocr_captcha_image_source == CONST_OCR_CAPTCH_IMAGE_SOURCE_CANVAS:
                             await asyncio.sleep(0.3)
     else:
-        debug.log("[TIXCRAFT OCR] Input box not found, exiting OCR...")
+        debug.log(f"[TIXCRAFT OCR] Verification form state: {form_state.value}")
 
-    if "perf_trace" in locals():
+    if perf_trace is not None:
         performance.log_trace(debug, perf_trace, "[TIXCRAFT PERF]")
 
     return is_need_redo_ocr, previous_answer, is_form_submitted
@@ -7367,6 +7568,10 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
         # Mark OCR completed for this URL only when form was actually submitted
         if is_form_submitted:
             _state["ocr_completed_url"] = current_url
+            attempt = _get_tixcraft_purchase_attempt()
+            _state["ocr_completed_attempt_id"] = (
+                attempt.attempt_id if attempt is not None else None
+            )
 
 async def _nodriver_ticketmaster_check_ip_block_impl(tab, config_dict, current_url=""):
     """Detect PerimeterX EPS block page on tixcraft/ticketmaster domains.
@@ -7545,7 +7750,12 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
     await nodriver_tixcraft_home_close_window(tab)
 
     page_class = classify_page(url)
-    submit_was_active = _is_tixcraft_submit_in_flight(tab)
+    submit_was_active = await _reconcile_tixcraft_submit_ownership(
+        tab,
+        page_class,
+        url,
+        config_dict,
+    )
     protected_submit_transition = bool(
         submit_was_active
         and page_class in {PageClass.ORDER, PageClass.CHECKOUT, PageClass.PAYMENT}
@@ -7682,7 +7892,7 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
     # TixCraft detail -> game redirect.  Its date handler claims this page.
     if _should_redirect_tixcraft_detail(url):
         _state["start_time"] = time.monotonic()
-        is_redirected = await nodriver_tixcraft_redirect(tab, url)
+        is_redirected = await nodriver_tixcraft_redirect(tab, url, config_dict)
 
     is_date_selected = False
     # Check if this is a Ticketmaster page before using TixCraft logic
@@ -7712,7 +7922,7 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
                     debug.log("[TICKETMASTER] Date selection failed or no match")
 
     # choose area
-    if '/ticket/area/' in url:
+    if page_class is PageClass.AREA:
         domain_name = url.split('/')[2]
         if config_dict["area_auto_select"]["enable"]:
             if not 'ticketmaster' in domain_name:

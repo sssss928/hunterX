@@ -5,12 +5,14 @@ import base64
 import binascii
 import concurrent.futures
 import copy
+import hmac
 import ipaddress
 import json
 import math
 import os
 import platform
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -82,6 +84,7 @@ CONST_MAXBOT_QUESTION_FILE = "MAXBOT_QUESTION.txt"
 CONST_SERVER_PORT = 16888
 CONST_SERVER_ADDRESS = "127.0.0.1"
 CONST_SERVER_STARTUP_TIMEOUT_SEC = 5.0
+CONST_CONTROL_COOKIE_NAME = "hunterx_control_session"
 CONST_SENDKEY_TOKEN_RE = r"^[A-Za-z0-9_-]{1,64}$"
 CONST_SECRET_MASK = "__HUNTERX_SECRET_MASKED__"
 CONST_SECRET_SOURCE_PROFILE_KEY = "__hunterx_secret_source_profile"
@@ -1000,6 +1003,21 @@ def _track_run_instance_startup(instance_id, process):
 
 class NoCacheStaticFileHandler(StaticFileHandler):
     """Custom StaticFileHandler that prevents stale settings UI assets."""
+
+    async def get(self, path, include_body=True):
+        normalized_path = str(path or "").replace("\\", "/").lstrip("/")
+        if normalized_path in {"", "settings.html"}:
+            secret = getattr(self.application, "control_secret", "")
+            if secret:
+                self.set_cookie(
+                    CONST_CONTROL_COOKIE_NAME,
+                    secret,
+                    httponly=True,
+                    samesite="Strict",
+                    path="/",
+                )
+        return await super().get(path, include_body=include_body)
+
     def set_extra_headers(self, path):
         # Keep settings UI assets uncached so help text and translations update immediately.
         if path in {'settings.html', 'help-content.js', 'settings.js'}:
@@ -1487,14 +1505,29 @@ def calibrate_time_by_mode(body):
     return calibrate_time_source_url(body.get("url", ""), body.get("samples", 5))
 
 
+def control_secret_matches(application, supplied_secret):
+    expected = getattr(application, "control_secret", "")
+    if not isinstance(expected, str) or not expected:
+        return False
+    if not isinstance(supplied_secret, str) or not supplied_secret:
+        return False
+    return hmac.compare_digest(expected, supplied_secret)
+
+
 class LocalControlHandler(tornado.web.RequestHandler):
     """Reject DNS-rebinding and cross-origin access to the local control API."""
+
+    requires_control_auth = True
 
     def prepare(self):
         if not is_allowed_control_request(self.request):
             raise tornado.web.HTTPError(403, reason="loopback same-origin request required")
         if len(self.request.body or b"") > CONST_CONTROL_MAX_BODY_BYTES:
             raise tornado.web.HTTPError(413, reason="request body too large")
+        if getattr(self, "requires_control_auth", True):
+            supplied = self.get_cookie(CONST_CONTROL_COOKIE_NAME, "")
+            if not control_secret_matches(self.application, supplied):
+                raise tornado.web.HTTPError(403, reason="control session required")
 
 
 class QuestionHandler(LocalControlHandler):
@@ -1523,6 +1556,8 @@ class QuestionHandler(LocalControlHandler):
         })
 
 class VersionHandler(LocalControlHandler):
+    requires_control_auth = False
+
     def get(self):
         self.write({"version":self.application.version})
 
@@ -2459,6 +2494,7 @@ async def main_server(startup_event=None, startup_result=None):
     ])
     app.ocr = None
     app.version = CONST_APP_VERSION
+    app.control_secret = secrets.token_urlsafe(32)
     app.shutdown_event = asyncio.Event()
 
     # Get server_port from config, fallback to default (Issue #156)
@@ -2599,7 +2635,12 @@ def handle_cli_command(argv):
         server_port = get_server_port()
         shutdown_url = f"http://127.0.0.1:{server_port}/shutdown"
         try:
-            response = requests.post(shutdown_url, timeout=1.5)
+            session = requests.Session()
+            session.get(
+                f"http://127.0.0.1:{server_port}/settings.html",
+                timeout=1.5,
+            )
+            response = session.post(shutdown_url, timeout=1.5)
             print(f"shutdown requested: HTTP {response.status_code}")
         except requests.RequestException:
             print("shutdown requested: no running settings server")

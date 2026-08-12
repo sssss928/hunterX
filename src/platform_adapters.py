@@ -11,6 +11,7 @@ from platform_contract import (
     RouteRule,
     complete_capabilities,
 )
+from platform_registry import platform_spec_for_key
 
 
 def _rules(page_class: PageClass, *markers: str) -> RouteRule:
@@ -19,11 +20,17 @@ def _rules(page_class: PageClass, *markers: str) -> RouteRule:
 
 _COMPLETE = complete_capabilities()
 
+
+def _identity(key: str) -> tuple[str, tuple[str, ...]]:
+    spec = platform_spec_for_key(key)
+    if spec is None:
+        raise RuntimeError(f"Missing PlatformSpec for adapter: {key}")
+    return spec.display_name, spec.hosts
+
 ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     DeclarativePlatformAdapter(
         "tixcraft",
-        "TixCraft / IndieVox / Ticketmaster",
-        ("tixcraft.com", "indievox.com", "ticketmaster.sg"),
+        *_identity("tixcraft"),
         (
             _rules(PageClass.AREA, "/ticket/area/"),
             _rules(PageClass.DATE, "/activity/game/", "/activity/game"),
@@ -40,8 +47,7 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     ),
     DeclarativePlatformAdapter(
         "kktix",
-        "KKTIX",
-        ("kktix.com", "kktix.cc"),
+        *_identity("kktix"),
         (
             _rules(PageClass.AREA, "/registrations/new"),
             _rules(PageClass.DATE, "/events/"),
@@ -56,8 +62,7 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     ),
     DeclarativePlatformAdapter(
         "ticketplus",
-        "TicketPlus",
-        ("ticketplus.com.tw", "ticketplus.com"),
+        *_identity("ticketplus"),
         (
             _rules(PageClass.AREA, "/order/"),
             _rules(PageClass.DATE, "/activity/"),
@@ -72,8 +77,7 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     ),
     DeclarativePlatformAdapter(
         "ibon",
-        "iBon",
-        ("ibon.com.tw", "ibon.com"),
+        *_identity("ibon"),
         (
             _rules(PageClass.AREA, "/performance/", "/ticket/"),
             _rules(PageClass.DATE, "/activity/", "/activityinfo/", "/event/"),
@@ -88,8 +92,7 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     ),
     DeclarativePlatformAdapter(
         "kham",
-        "KHAM / ticket.com.tw / UDN",
-        ("kham.com.tw", "ticket.com.tw", "tickets.udnfunlife.com"),
+        *_identity("kham"),
         (
             _rules(PageClass.AREA, "performance", "salestable"),
             _rules(PageClass.DATE, "product", "activity"),
@@ -111,8 +114,7 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     ),
     DeclarativePlatformAdapter(
         "famiticket",
-        "FamiTicket",
-        ("famiticket.com.tw", "famiticket.com"),
+        *_identity("famiticket"),
         (
             _rules(PageClass.AREA, "/ticket", "/home/activity"),
             _rules(PageClass.DATE, "/activity/"),
@@ -127,8 +129,7 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     ),
     DeclarativePlatformAdapter(
         "funone",
-        "FunOne",
-        ("tickets.funone.io",),
+        *_identity("funone"),
         (
             _rules(PageClass.AREA, "/sales/", "/ticket"),
             _rules(PageClass.DATE, "/events/"),
@@ -143,8 +144,7 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     ),
     DeclarativePlatformAdapter(
         "fansigo",
-        "FANSI GO",
-        ("go.fansi.me", "fansidev.auth.ap-southeast-1.amazoncognito.com"),
+        *_identity("fansigo"),
         (
             _rules(PageClass.AREA, "/ticket"),
             _rules(PageClass.DATE, "/events/", "/event/"),
@@ -159,8 +159,7 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     ),
     DeclarativePlatformAdapter(
         "cityline",
-        "Cityline",
-        ("cityline.com", "cityline.com.hk"),
+        *_identity("cityline"),
         (
             _rules(PageClass.AREA, "/performance", "/utsvinternet/"),
             _rules(PageClass.DATE, "/event"),
@@ -176,8 +175,7 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
     ),
     DeclarativePlatformAdapter(
         "hkticketing",
-        "HKTicketing / Galaxy Macau / Ticketek",
-        ("hkticketing.com", "galaxymacau.com", "ticketek.com.sg", "ticketek.com"),
+        *_identity("hkticketing"),
         (
             _rules(PageClass.AREA, "/performance", "/secure/selection"),
             _rules(PageClass.DATE, "/events/", "/event/"),

@@ -20,7 +20,7 @@ class ValidationLevel(IntEnum):
 
 
 @dataclass(frozen=True)
-class PlatformCapabilities:
+class PlatformValidation:
     onsale: ValidationLevel
     leak_watch: ValidationLevel
     protected_pages: ValidationLevel
@@ -28,11 +28,11 @@ class PlatformCapabilities:
 
 
 @dataclass(frozen=True)
-class PlatformFamily:
+class PlatformSpec:
     key: str
     display_name: str
     hosts: tuple[str, ...]
-    capabilities: PlatformCapabilities
+    validation: PlatformValidation
 
     def matches_url(self, url: str) -> bool:
         try:
@@ -46,74 +46,77 @@ _PUBLIC = ValidationLevel.PUBLIC_PAGE_TESTED
 _FIXTURE = ValidationLevel.FIXTURE_TESTED
 _SOURCE = ValidationLevel.SOURCE_REVIEWED
 
-PLATFORM_FAMILIES: tuple[PlatformFamily, ...] = (
-    PlatformFamily(
+PLATFORM_SPECS: tuple[PlatformSpec, ...] = (
+    PlatformSpec(
         "tixcraft",
         "TixCraft / IndieVox / Ticketmaster",
         ("tixcraft.com", "indievox.com", "ticketmaster.sg"),
-        PlatformCapabilities(_PUBLIC, _FIXTURE, _FIXTURE, _FIXTURE),
+        PlatformValidation(_PUBLIC, _FIXTURE, _FIXTURE, _FIXTURE),
     ),
-    PlatformFamily(
+    PlatformSpec(
         "kktix",
         "KKTIX",
         ("kktix.com", "kktix.cc"),
-        PlatformCapabilities(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
+        PlatformValidation(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
     ),
-    PlatformFamily(
+    PlatformSpec(
         "famiticket",
         "FamiTicket",
         ("famiticket.com.tw", "famiticket.com"),
-        PlatformCapabilities(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
+        PlatformValidation(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
     ),
-    PlatformFamily(
+    PlatformSpec(
         "ibon",
         "iBon",
         ("ibon.com.tw", "ibon.com"),
-        PlatformCapabilities(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
+        PlatformValidation(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
     ),
-    PlatformFamily(
+    PlatformSpec(
         "kham",
         "KHAM / ticket.com.tw / UDN",
         ("kham.com.tw", "ticket.com.tw", "tickets.udnfunlife.com"),
-        PlatformCapabilities(_PUBLIC, _SOURCE, _FIXTURE, _SOURCE),
+        PlatformValidation(_PUBLIC, _SOURCE, _FIXTURE, _SOURCE),
     ),
-    PlatformFamily(
+    PlatformSpec(
         "ticketplus",
         "TicketPlus",
         ("ticketplus.com.tw", "ticketplus.com"),
-        PlatformCapabilities(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
+        PlatformValidation(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
     ),
-    PlatformFamily(
+    PlatformSpec(
         "cityline",
         "Cityline",
         ("cityline.com", "cityline.com.hk"),
-        PlatformCapabilities(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
+        PlatformValidation(_SOURCE, _SOURCE, _FIXTURE, _SOURCE),
     ),
-    PlatformFamily(
+    PlatformSpec(
         "hkticketing",
         "HKTicketing / Galaxy Macau / Ticketek",
         ("hkticketing.com", "galaxymacau.com", "ticketek.com.sg", "ticketek.com"),
-        PlatformCapabilities(_PUBLIC, _SOURCE, _FIXTURE, _SOURCE),
+        PlatformValidation(_PUBLIC, _SOURCE, _FIXTURE, _SOURCE),
     ),
-    PlatformFamily(
+    PlatformSpec(
         "funone",
         "FunOne",
         ("tickets.funone.io",),
-        PlatformCapabilities(_PUBLIC, _SOURCE, _FIXTURE, _SOURCE),
+        PlatformValidation(_PUBLIC, _SOURCE, _FIXTURE, _SOURCE),
     ),
-    PlatformFamily(
+    PlatformSpec(
         "fansigo",
         "FANSI GO",
         ("go.fansi.me", "fansidev.auth.ap-southeast-1.amazoncognito.com"),
-        PlatformCapabilities(_PUBLIC, _SOURCE, _FIXTURE, _SOURCE),
+        PlatformValidation(_PUBLIC, _SOURCE, _FIXTURE, _SOURCE),
     ),
 )
 
 
-def platform_for_url(url: str) -> PlatformFamily | None:
+PLATFORM_FAMILIES = PLATFORM_SPECS
+
+
+def platform_for_url(url: str) -> PlatformSpec | None:
     """Return the single owning platform family for an absolute URL."""
 
-    matches = tuple(platform for platform in PLATFORM_FAMILIES if platform.matches_url(url))
+    matches = tuple(platform for platform in PLATFORM_SPECS if platform.matches_url(url))
     if len(matches) > 1:
         raise RuntimeError(f"Ambiguous platform ownership for URL: {url!r}")
     return matches[0] if matches else None
@@ -122,3 +125,8 @@ def platform_for_url(url: str) -> PlatformFamily | None:
 def platform_key_for_url(url: str) -> str | None:
     platform = platform_for_url(url)
     return platform.key if platform else None
+
+
+def platform_spec_for_key(key: str) -> PlatformSpec | None:
+    normalized = str(key or "").casefold()
+    return next((spec for spec in PLATFORM_SPECS if spec.key == normalized), None)

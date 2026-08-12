@@ -135,7 +135,7 @@ class CapabilityStatus(str, Enum):
 
 
 @dataclass(frozen=True)
-class PlatformCapabilities:
+class RuntimeCapabilities:
     onsale: CapabilityStatus
     leak_watch: CapabilityStatus
     inventory_scan: CapabilityStatus
@@ -208,7 +208,7 @@ class PlatformAdapter(Protocol):
     def is_protected_page(self, url: str, text: str = "") -> bool: ...
     def detect_queue(self, url: str, text: str = "") -> bool: ...
     def detect_retryable_failure(self, url: str, text: str = "") -> bool: ...
-    def capabilities(self) -> PlatformCapabilities: ...
+    def capabilities(self) -> RuntimeCapabilities: ...
     async def wait_until_ready(self, context: BrowserContext) -> bool: ...
     async def scan_inventory(self, context: BrowserContext) -> Any: ...
     async def refresh_inventory(self, context: BrowserContext) -> bool: ...
@@ -224,7 +224,7 @@ class DeclarativePlatformAdapter:
     hosts: tuple[str, ...]
     safe_rules: tuple[RouteRule, ...]
     protected_rules: tuple[RouteRule, ...]
-    capability_set: PlatformCapabilities
+    capability_set: RuntimeCapabilities
     home_paths: tuple[str, ...] = ("/",)
     queue_markers: tuple[str, ...] = (
         "queue-it",
@@ -324,7 +324,7 @@ class DeclarativePlatformAdapter:
         lowered = (text or "").casefold()
         return bool(lowered) and any(marker.casefold() in lowered for marker in self.retryable_text)
 
-    def capabilities(self) -> PlatformCapabilities:
+    def capabilities(self) -> RuntimeCapabilities:
         return self.capability_set
 
     @staticmethod
@@ -415,8 +415,8 @@ class DeclarativePlatformAdapter:
         }
 
 
-def complete_capabilities() -> PlatformCapabilities:
-    return PlatformCapabilities(
+def complete_capabilities() -> RuntimeCapabilities:
+    return RuntimeCapabilities(
         onsale=CapabilityStatus.COMPLETE,
         leak_watch=CapabilityStatus.COMPLETE,
         inventory_scan=CapabilityStatus.COMPLETE,
@@ -427,8 +427,8 @@ def complete_capabilities() -> PlatformCapabilities:
     )
 
 
-def partial_capabilities() -> PlatformCapabilities:
-    return PlatformCapabilities(
+def partial_capabilities() -> RuntimeCapabilities:
+    return RuntimeCapabilities(
         onsale=CapabilityStatus.COMPLETE,
         leak_watch=CapabilityStatus.PARTIAL,
         inventory_scan=CapabilityStatus.COMPLETE,
