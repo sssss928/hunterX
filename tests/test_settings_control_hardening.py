@@ -33,6 +33,8 @@ class _FakeHandler:
         method: str = "POST",
         host: str = "127.0.0.1:16888",
         origin: str | None = None,
+        control_secret: str = "",
+        cookie_secret: str = "",
     ) -> None:
         encoded_body = b"" if body is None else json.dumps(body).encode("utf-8")
         headers = {} if origin is None else {"Origin": origin}
@@ -48,6 +50,8 @@ class _FakeHandler:
         self.headers: dict[str, str] = {}
         self.responses: list[object] = []
         self.finished = False
+        self.application = SimpleNamespace(control_secret=control_secret)
+        self.cookie_secret = cookie_secret
 
     def get_query_argument(self, name: str, default: str = "") -> str:
         return self.query.get(name, default)
@@ -57,6 +61,9 @@ class _FakeHandler:
 
     def set_status(self, status_code: int) -> None:
         self.status_code = status_code
+
+    def get_cookie(self, _name: str, default: str = "") -> str:
+        return self.cookie_secret or default
 
     def write(self, value: object) -> None:
         self.responses.append(value)
@@ -792,10 +799,27 @@ def test_non_loopback_host_is_rejected() -> None:
     assert exc_info.value.status_code == 403
 
 
-def test_same_origin_loopback_control_request_is_allowed() -> None:
+def test_same_origin_loopback_control_request_still_requires_session_secret() -> None:
     handler = _FakeHandler(origin="http://127.0.0.1:16888")
 
+    with pytest.raises(tornado.web.HTTPError) as exc_info:
+        settings.LocalControlHandler.prepare(handler)
+
+    assert exc_info.value.status_code == 403
+
+
+def test_control_session_uses_constant_time_per_launch_secret() -> None:
+    secret = settings.secrets.token_urlsafe(32)
+    handler = _FakeHandler(
+        origin="http://127.0.0.1:16888",
+        control_secret=secret,
+        cookie_secret=secret,
+    )
+
     settings.LocalControlHandler.prepare(handler)
+    assert settings.control_secret_matches(handler.application, secret)
+    assert not settings.control_secret_matches(handler.application, secret + "x")
+    assert not settings.control_secret_matches(handler.application, "")
 
 
 def test_config_secret_mask_round_trip_preserves_old_values_and_allows_clear() -> None:
@@ -885,17 +909,25 @@ def test_save_endpoint_restores_masked_secret_before_atomic_write(monkeypatch: p
 
 
 def test_shutdown_cli_uses_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, float]] = []
+    calls: list[tuple[str, str, float]] = []
 
-    def fake_post(url: str, timeout: float) -> SimpleNamespace:
-        calls.append((url, timeout))
-        return SimpleNamespace(status_code=200)
+    class FakeSession:
+        def get(self, url: str, timeout: float) -> SimpleNamespace:
+            calls.append(("GET", url, timeout))
+            return SimpleNamespace(status_code=200)
+
+        def post(self, url: str, timeout: float) -> SimpleNamespace:
+            calls.append(("POST", url, timeout))
+            return SimpleNamespace(status_code=200)
 
     monkeypatch.setattr(settings, "get_server_port", lambda: 16991)
-    monkeypatch.setattr(settings.requests, "post", fake_post)
+    monkeypatch.setattr(settings.requests, "Session", FakeSession)
 
     assert settings.handle_cli_command(["--shutdown"]) is True
-    assert calls == [("http://127.0.0.1:16991/shutdown", 1.5)]
+    assert calls == [
+        ("GET", "http://127.0.0.1:16991/settings.html", 1.5),
+        ("POST", "http://127.0.0.1:16991/shutdown", 1.5),
+    ]
 
 
 def test_profile_clone_restores_masked_secrets_from_source_profile(
@@ -1106,10 +1138,13 @@ def test_settings_server_shutdown_closes_listener(
     assert isinstance(thread, threading.Thread)
     assert settings.util.is_connectable(port, host="127.0.0.1")
 
-    response = settings.requests.post(
-        f"http://127.0.0.1:{port}/shutdown",
+    session = settings.requests.Session()
+    bootstrap = session.get(
+        f"http://127.0.0.1:{port}/settings.html",
         timeout=2.0,
     )
+    assert bootstrap.status_code == 200
+    response = session.post(f"http://127.0.0.1:{port}/shutdown", timeout=2.0)
     assert response.status_code == 200
     assert response.json() == {"shutdown": True}
 

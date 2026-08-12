@@ -49,6 +49,18 @@ def test_standard_ocr_cache_rebuilds_when_ranges_change(monkeypatch) -> None:
     assert len(FakeDdddOcr.instances) == 2
 
 
+def test_ocr_cache_is_bounded_and_evicts_least_recently_used(monkeypatch) -> None:
+    _install_fake_ocr(monkeypatch)
+    config = {"ocr_captcha": {"enable": True, "use_universal": False, "beta": False}}
+
+    first = ocr_cache.get_ocr_instance(config, fallback_ranges=0)
+    for ranges in range(1, ocr_cache.OCR_CACHE_CAPACITY + 1):
+        ocr_cache.get_ocr_instance(config, fallback_ranges=ranges)
+
+    assert ocr_cache.get_ocr_cache_stats() == {"size": ocr_cache.OCR_CACHE_CAPACITY}
+    assert ocr_cache.get_ocr_instance(config, fallback_ranges=0) is not first
+
+
 def test_tixcraft_profile_prefers_platform_model(monkeypatch, tmp_path) -> None:
     _install_fake_ocr(monkeypatch)
     model_dir = tmp_path / "assets" / "model" / "tixcraft_tm"

@@ -4,6 +4,7 @@ from platform_registry import (
     platform_for_url,
     platform_key_for_url,
 )
+from platform_adapters import ADAPTERS
 
 
 def test_every_host_has_one_owner() -> None:
@@ -46,5 +47,15 @@ def test_current_dispatch_families_are_resolved() -> None:
 
 def test_capability_levels_are_explicit_and_not_boolean_claims() -> None:
     for platform in PLATFORM_FAMILIES:
-        assert isinstance(platform.capabilities.leak_watch, ValidationLevel)
-        assert platform.capabilities.leak_watch >= ValidationLevel.SOURCE_REVIEWED
+        assert isinstance(platform.validation.leak_watch, ValidationLevel)
+        assert platform.validation.leak_watch >= ValidationLevel.SOURCE_REVIEWED
+
+
+def test_every_platform_spec_has_one_matching_runtime_adapter() -> None:
+    adapters_by_key = {adapter.key: adapter for adapter in ADAPTERS}
+
+    assert set(adapters_by_key) == {spec.key for spec in PLATFORM_FAMILIES}
+    for spec in PLATFORM_FAMILIES:
+        adapter = adapters_by_key[spec.key]
+        assert adapter.display_name == spec.display_name
+        assert adapter.hosts == spec.hosts

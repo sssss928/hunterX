@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -7,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from build_source_archive import build_source_archive
-from write_release_checksums import write_checksums
+from build_windows_archive import build_windows_archive
+from verify_release_archive import verify_windows_archive
+from write_release_checksums import verify_checksums, write_checksums
 
 
 def test_write_release_checksums_records_each_asset(tmp_path: Path) -> None:
@@ -28,6 +31,67 @@ def test_write_release_checksums_records_each_asset(tmp_path: Path) -> None:
 def test_write_release_checksums_fails_closed_for_missing_asset(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Release asset is missing"):
         write_checksums([tmp_path / "missing.zip"], tmp_path / "SHA256SUMS_v0.4.7.txt")
+
+
+def test_verify_release_checksums_detects_tampering(tmp_path: Path) -> None:
+    asset = tmp_path / "hunterX.zip"
+    asset.write_bytes(b"original")
+    manifest = write_checksums([asset], tmp_path / "checksums.txt")
+
+    assert verify_checksums(manifest, tmp_path) == [asset]
+    asset.write_bytes(b"tampered")
+
+    with pytest.raises(ValueError, match="verification failed"):
+        verify_checksums(manifest, tmp_path)
+
+
+def test_build_windows_archive_uses_explorer_compatible_member_names(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    (package / "www").mkdir(parents=True)
+    (package / "README.md").write_text("HunterX\n", encoding="utf-8")
+    (package / "www" / "settings.html").write_text("settings\n", encoding="utf-8")
+    output = tmp_path / "hunterX_windows_0.4.9.zip"
+
+    build_windows_archive(package, output)
+
+    with zipfile.ZipFile(output) as archive:
+        assert archive.namelist() == ["README.md", "www/settings.html"]
+        assert all(not name.startswith("./") for name in archive.namelist())
+
+
+def test_windows_verifier_rejects_dot_prefixed_members(tmp_path: Path) -> None:
+    output = tmp_path / "hunterX_windows_0.4.9.zip"
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("./README.md", "HunterX\n")
+
+    with pytest.raises(ValueError, match="non-portable ZIP path"):
+        verify_windows_archive(output, "0.4.9")
+
+
+@pytest.mark.skipif(
+    shutil.which("cscript.exe") is None,
+    reason="Windows Shell namespace is unavailable",
+)
+def test_windows_shell_namespace_can_see_built_archive(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    (package / "www").mkdir(parents=True)
+    (package / "settings.exe").write_bytes(b"exe")
+    (package / "www" / "settings.html").write_text("settings\n", encoding="utf-8")
+    output = tmp_path / "hunterX_windows_0.4.9.zip"
+    build_windows_archive(package, output)
+
+    verifier = Path(__file__).parents[1] / "scripts" / "verify_windows_shell_zip.js"
+    result = subprocess.run(
+        ["cscript.exe", "//nologo", str(verifier), str(output)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert '"root_items":2' in result.stdout
+    assert '"names":"settings|www"' in result.stdout
 
 
 def test_build_source_archive_verifies_exact_git_commit(tmp_path: Path) -> None:
@@ -65,11 +129,13 @@ def test_build_source_archive_can_verify_local_working_tree(tmp_path: Path) -> N
     subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE)
     (repo / ".gitignore").write_text("settings.json\n", encoding="utf-8")
     (repo / "README.md").write_text("tracked source\n", encoding="utf-8")
+    (repo / "removed.py").write_text("REMOVE_ME = True\n", encoding="utf-8")
     subprocess.run(
-        ["git", "add", ".gitignore", "README.md"],
+        ["git", "add", ".gitignore", "README.md", "removed.py"],
         cwd=repo,
         check=True,
     )
+    (repo / "removed.py").unlink()
     (repo / "new-feature.py").write_text("VERSION = 'working-tree'\n", encoding="utf-8")
     (repo / "settings.json").write_text('{"token": "secret"}', encoding="utf-8")
 
@@ -84,5 +150,6 @@ def test_build_source_archive_can_verify_local_working_tree(tmp_path: Path) -> N
         names = set(source_zip.namelist())
         assert "hunterX-0.4.8/README.md" in names
         assert "hunterX-0.4.8/new-feature.py" in names
+        assert "hunterX-0.4.8/removed.py" not in names
         assert all("settings.json" not in name for name in names)
         assert all("/.git/" not in name for name in names)

@@ -28,8 +28,11 @@ def test_release_workflow_has_required_triggers_permissions_and_artifact() -> No
     assert "gh release create" in workflow
     assert "gh release upload" in workflow
     assert "--clobber" in workflow
-    assert "actions/upload-artifact" not in workflow
-    assert "actions/download-artifact" not in workflow
+    assert "build-assets:" in workflow
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in workflow
+    assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in workflow
+    assert "needs.build-assets.outputs.release_commit" in workflow
+    assert "--verify-manifest" in workflow
     assert "RELEASE_INPUT_VERSION: ${{ inputs.version }}" in workflow
     assert '--input-version "${{ inputs.version }}"' not in workflow
     assert "0.1.0" not in workflow
