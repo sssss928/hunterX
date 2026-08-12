@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.4.9
+
+- Build Windows releases with canonical root-relative ZIP members and reject
+  `./`, backslash and other non-portable archive names, so Windows File
+  Explorer displays and extracts the package instead of reporting it empty;
+  release builds now fail unless the Windows Shell namespace sees root items.
+- Refresh TixCraft activity-detail pages at the configured on-sale/leak-watch
+  interval until a real purchase entry appears, then enter the game/date page;
+  accept both link and data-href controls.
+- Dispatch AREA selection from root or event-specific `/ticket/area` routes in
+  both modes, and compare parsed remaining inventory to the requested quantity
+  instead of rejecting every single-digit remainder.
+- Scope TixCraft ticket-count and OCR completion evidence to the authoritative
+  per-tab purchase-attempt identity, so a failed attempt cannot poison a second
+  attempt on the same URL or area.
+- Release submit ownership only from proven attempt/generation/tab mismatch or
+  a positively identified interactive AREA document. Slow TICKET transitions
+  and ORDER/CHECKOUT/PAYMENT remain protected regardless of elapsed time.
+- Treat verification readiness as explicit bounded states; a successful
+  selector call returning `None` is no longer mistaken for a rendered form.
+- Run blocking CAPTCHA retrieval and OCR inference off the asyncio browser loop,
+  bound the shared OCR model cache with LRU eviction, and extend the existing
+  performance trace across route, area, ticket and CAPTCHA stages.
+- Add per-launch localhost control authentication using a random process-memory
+  secret, constant-time comparison and an HttpOnly SameSite session cookie,
+  while retaining loopback and same-origin checks.
+- Consolidate platform identity into immutable `PlatformSpec` records and keep
+  validation evidence distinct from runtime capabilities without rewriting the
+  existing site-specific purchase handlers.
+- Add a fully resolved, hashed Windows CPython 3.11 runtime lock; remove the
+  duplicate full OpenCV wheel because ddddocr supplies the headless runtime and
+  HunterX uses no OpenCV GUI API.
+- Pin GitHub Actions by commit SHA, enforce medium/high Bandit findings, expand
+  strict mypy coverage, preserve the measured branch-coverage floor in CI, and
+  split release build from the write-authorized publish job with checksum
+  re-verification after artifact transfer.
+- Preserve manual CAPTCHA/queue/challenge/payment boundaries. No bypass,
+  risk-control evasion, automated payment or successful-ticket guarantee is
+  added.
+
 ## v0.4.8
 
 - Install an idempotent Zendriver transaction guard before browser startup.

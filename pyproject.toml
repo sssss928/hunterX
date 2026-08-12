@@ -46,8 +46,19 @@ show_missing = true
 [tool.mypy]
 python_version = "3.11"
 files = [
+  "src/action_ledger.py",
+  "src/leak_watch.py",
+  "src/page_classifier.py",
+  "src/performance.py",
+  "src/platform_contract.py",
+  "src/platform_engine.py",
+  "src/platform_registry.py",
   "src/platforms/common_async.py",
   "src/platforms/facebook.py",
+  "src/refresh_coordinator.py",
+  "src/run_modes.py",
+  "src/submit_guard.py",
+  "src/zendriver_hardening.py",
   "scripts",
 ]
 ignore_missing_imports = true
