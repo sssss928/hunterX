@@ -319,11 +319,19 @@ def verify_source_archive(
             if archive.read(entries[name]) != expected[name]
         )
         if missing or extra or mismatch:
+            details = []
+            if missing:
+                details.append(f"missing_files={missing[:10]}")
+            if extra:
+                details.append(f"extra_files={extra[:10]}")
+            if mismatch:
+                details.append(f"mismatch_files={mismatch[:10]}")
+            detail_text = " " + " ".join(details) if details else ""
             raise ValueError(
                 "Source archive differs from "
                 f"{'working tree' if working_tree else 'commit ' + commit}: "
                 f"missing={len(missing)} extra={len(extra)} "
-                f"mismatch={len(mismatch)}"
+                f"mismatch={len(mismatch)}{detail_text}"
             )
         return {
             "archive": str(path.resolve()),
