@@ -219,3 +219,36 @@ def test_source_archive_rejects_top_level_generated_or_sensitive_directories(
 
     with pytest.raises(ValueError, match="Denied source top-level directory"):
         verify_source_archive(archive_path, VERSION, repo, commit)
+
+def test_source_archive_mismatch_error_reports_file_names(tmp_path: Path) -> None:
+    archive_path, repo, commit = _create_git_source_archive(
+        tmp_path,
+        {
+            "README.md": b"source readme\n",
+            "src/app.py": b"VALUE = 1\n",
+        },
+    )
+
+    tampered_path = tmp_path / f"tampered-{archive_path.name}"
+    with zipfile.ZipFile(archive_path) as source_zip:
+        members = {
+            info.filename: source_zip.read(info)
+            for info in source_zip.infolist()
+            if not info.is_dir()
+        }
+    members[f"hunterX-{VERSION}/src/app.py"] = b"VALUE = 2\n"
+    with zipfile.ZipFile(tampered_path, "w") as output_zip:
+        for name, content in members.items():
+            output_zip.writestr(name, content)
+
+    # The verifier requires the canonical release filename before comparing
+    # contents, so replace the original archive with the tampered fixture.
+    archive_path.unlink()
+    tampered_path.rename(archive_path)
+
+    with pytest.raises(ValueError) as exc_info:
+        verify_source_archive(archive_path, VERSION, repo, commit)
+
+    message = str(exc_info.value)
+    assert "mismatch=1" in message
+    assert f"hunterX-{VERSION}/src/app.py" in message

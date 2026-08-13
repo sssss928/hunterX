@@ -37,6 +37,24 @@ def test_release_workflow_has_required_triggers_permissions_and_artifact() -> No
     assert '--input-version "${{ inputs.version }}"' not in workflow
     assert "0.1.0" not in workflow
 
+    build_start = workflow.index("  build-assets:")
+    publish_start = workflow.index("  publish-release:")
+    build_section = workflow[build_start:publish_start]
+    publish_section = workflow[publish_start:]
+
+    # The Windows runner owns only the Windows binary.  Building the source
+    # archive on the Ubuntu publish runner avoids cross-OS git-archive byte
+    # conversion mismatches while still pinning everything to release_commit.
+    assert "Build source package" not in build_section
+    assert "write_release_checksums.py" not in build_section
+    assert "verified-windows-release-" in build_section
+    assert "Build source package from exact release commit" in publish_section
+    assert "Write release checksum manifest" in publish_section
+    assert "Verify final release assets" in publish_section
+    assert publish_section.index("Build source package from exact release commit") < publish_section.index(
+        "Write release checksum manifest"
+    ) < publish_section.index("Verify final release assets")
+
     source_builder = (REPO_ROOT / "scripts/build_source_archive.py").read_text(encoding="utf-8")
     assert "verify_source_archive" in source_builder
 
