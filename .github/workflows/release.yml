@@ -137,44 +137,15 @@ jobs:
           }
           "release_commit=$ReleaseCommit" >> $env:GITHUB_OUTPUT
 
-      - name: Build source package
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          python scripts/build_source_archive.py `
-            --version "${{ needs.validate.outputs.version }}" `
-            --output "dist/release/${{ needs.validate.outputs.source_artifact_name }}" `
-            --repo-root . `
-            --commit "${{ steps.commit.outputs.release_commit }}"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Source release archive build failed (python exit code $LASTEXITCODE)."
-          }
-
       - name: Build Windows package
         shell: pwsh
         run: ./scripts/build_windows.ps1 -Version "${{ needs.validate.outputs.version }}"
 
-      - name: Write checksum manifest
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          python scripts/write_release_checksums.py `
-            --version "${{ needs.validate.outputs.version }}" `
-            --output "dist/release/${{ needs.validate.outputs.checksum_name }}" `
-            "dist/release/${{ needs.validate.outputs.artifact_name }}" `
-            "dist/release/${{ needs.validate.outputs.source_artifact_name }}"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Release checksum manifest generation failed (python exit code $LASTEXITCODE)."
-          }
-
-      - name: Upload verified release assets
+      - name: Upload verified Windows release asset
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: verified-release-assets-${{ needs.validate.outputs.version }}
-          path: |
-            dist/release/${{ needs.validate.outputs.artifact_name }}
-            dist/release/${{ needs.validate.outputs.source_artifact_name }}
-            dist/release/${{ needs.validate.outputs.checksum_name }}
+          name: verified-windows-release-${{ needs.validate.outputs.version }}
+          path: dist/release/${{ needs.validate.outputs.artifact_name }}
           if-no-files-found: error
           retention-days: 3
 
@@ -200,13 +171,33 @@ jobs:
         with:
           python-version: "3.11.9"
 
-      - name: Download verified release assets
+      - name: Download verified Windows release asset
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: verified-release-assets-${{ needs.validate.outputs.version }}
+          name: verified-windows-release-${{ needs.validate.outputs.version }}
           path: dist/release
 
-      - name: Re-verify transferred assets
+      - name: Build source package from exact release commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_source_archive.py \
+            --version "${{ needs.validate.outputs.version }}" \
+            --output "dist/release/${{ needs.validate.outputs.source_artifact_name }}" \
+            --repo-root . \
+            --commit "${{ needs.build-assets.outputs.release_commit }}"
+
+      - name: Write release checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/write_release_checksums.py \
+            --version "${{ needs.validate.outputs.version }}" \
+            --output "dist/release/${{ needs.validate.outputs.checksum_name }}" \
+            "dist/release/${{ needs.validate.outputs.artifact_name }}" \
+            "dist/release/${{ needs.validate.outputs.source_artifact_name }}"
+
+      - name: Verify final release assets
         shell: bash
         run: |
           set -euo pipefail
