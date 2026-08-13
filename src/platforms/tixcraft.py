@@ -700,8 +700,18 @@ def _update_tixcraft_probe_failure_state(
     )
 
 
-async def _read_tixcraft_page_health(tab, config_dict=None):
+async def _read_tixcraft_page_health(
+    tab,
+    config_dict=None,
+    *,
+    timeout_seconds=None,
+):
     try:
+        effective_timeout = (
+            _TIXCRAFT_EVALUATE_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else max(0.05, float(timeout_seconds))
+        )
         result = await runtime_health.evaluate_with_timeout(
             tab,
             r"""
@@ -845,7 +855,7 @@ async def _read_tixcraft_page_health(tab, config_dict=None):
                 })()
             """,
             config_dict,
-            timeout_seconds=_TIXCRAFT_EVALUATE_TIMEOUT_SECONDS,
+            timeout_seconds=effective_timeout,
             reason="SOFT_BLOCK_PAGE_HEALTH",
             default={"probeFailed": True},
             log_success=False,

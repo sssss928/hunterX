@@ -1027,14 +1027,85 @@ def _refresh_soft_block_probe_token(state, current_url, boundary_name):
     )
 
 
+def _clear_refresh_gate_health_evidence(state) -> None:
+    """Clear cached page-health evidence for the current document."""
+
+    state["refresh_gate_health_status"] = ""
+    state["refresh_gate_health_route"] = ""
+    state["refresh_gate_health_observed_at"] = 0.0
+    # Backward-compatible aliases retained for existing runtime state/tests.
+    state["refresh_gate_health_ready_route"] = ""
+    state["refresh_gate_health_ready_at"] = 0.0
+
+
+def _set_refresh_gate_health_evidence(state, current_url, status) -> None:
+    """Record one route-scoped, short-lived page-health observation."""
+
+    normalized = str(status or "").strip().lower()
+    if normalized not in {"ready", "blocked"}:
+        _clear_refresh_gate_health_evidence(state)
+        return
+    route_key = _refresh_route_key(current_url)
+    if not route_key:
+        _clear_refresh_gate_health_evidence(state)
+        return
+    observed_at = time.monotonic()
+    state["refresh_gate_health_status"] = normalized
+    state["refresh_gate_health_route"] = route_key
+    state["refresh_gate_health_observed_at"] = observed_at
+    if normalized == "ready":
+        state["refresh_gate_health_ready_route"] = route_key
+        state["refresh_gate_health_ready_at"] = observed_at
+    else:
+        state["refresh_gate_health_ready_route"] = ""
+        state["refresh_gate_health_ready_at"] = 0.0
+
+
+def _get_cached_refresh_gate_health(state, current_url) -> str:
+    """Return fresh route-matched health evidence, otherwise an empty string."""
+
+    route_key = _refresh_route_key(current_url)
+    cached_route = str(state.get("refresh_gate_health_route", "") or "")
+    try:
+        observed_at = float(
+            state.get("refresh_gate_health_observed_at", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        observed_at = 0.0
+    if (
+        route_key
+        and cached_route == route_key
+        and observed_at > 0.0
+        and time.monotonic() - observed_at <= REFRESH_GATE_HEALTH_CACHE_SECONDS
+    ):
+        status = str(state.get("refresh_gate_health_status", "") or "")
+        if status in {"ready", "blocked"}:
+            return status
+
+    # Accept the legacy ready-only cache during an in-process upgrade.  New
+    # writes always populate the tri-state fields above.
+    legacy_route = str(state.get("refresh_gate_health_ready_route", "") or "")
+    try:
+        legacy_at = float(state.get("refresh_gate_health_ready_at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        legacy_at = 0.0
+    if (
+        route_key
+        and legacy_route == route_key
+        and legacy_at > 0.0
+        and time.monotonic() - legacy_at <= REFRESH_GATE_HEALTH_CACHE_SECONDS
+    ):
+        return "ready"
+    return ""
+
+
 def _invalidate_refresh_gate_health_evidence(state) -> None:
     """Discard page-health evidence whenever a reload replaces the document."""
 
     state["refresh_soft_block_preflight_token"] = None
     state["refresh_soft_block_preflight_reason"] = ""
     state["refresh_gate_health_next_probe_at"] = 0.0
-    state["refresh_gate_health_ready_route"] = ""
-    state["refresh_gate_health_ready_at"] = 0.0
+    _clear_refresh_gate_health_evidence(state)
 
 
 async def _preflight_tixcraft_refresh_boundary(
@@ -1057,34 +1128,26 @@ async def _preflight_tixcraft_refresh_boundary(
         current_url,
         boundary_name,
     )
-    cached_health_route = state.get("refresh_gate_health_ready_route", "")
-    cached_health_at = float(
-        state.get("refresh_gate_health_ready_at", 0.0) or 0.0
-    )
-    if (
-        cached_health_route == _refresh_route_key(current_url)
-        and time.monotonic() - cached_health_at
-        <= REFRESH_GATE_HEALTH_CACHE_SECONDS
-    ):
+    cached_health = _get_cached_refresh_gate_health(state, current_url)
+    if cached_health == "blocked":
+        state["refresh_soft_block_preflight_token"] = token
+        state["refresh_soft_block_preflight_reason"] = "soft_block_detected"
+        return TriggerReloadDecision(
+            attempted=False,
+            reloaded=False,
+            reason="soft_block_detected",
+            page_class=classify_page(current_url),
+        )
+    if cached_health == "ready":
         state["refresh_soft_block_preflight_token"] = token
         state["refresh_soft_block_preflight_reason"] = "ready"
         return None
     controller = state.get("controller")
-    if (
+    hard_boundary = bool(
         boundary_name in {"initial_trigger", "public_sale_target"}
         and isinstance(controller, RefreshTriggerController)
         and controller.remaining_ns() <= 0
-    ):
-        # The final deadline path must not start a DOM/CDP round trip.  The
-        # watchdog obtains fresh evidence before the arm window and caches it
-        # for this boundary; missing evidence fails closed without making the
-        # scheduled dispatch hundreds of milliseconds late.
-        return TriggerReloadDecision(
-            attempted=False,
-            reloaded=False,
-            reason="health_probe_unavailable",
-            page_class=classify_page(current_url),
-        )
+    )
     if token == state.get("refresh_soft_block_preflight_token"):
         cached_reason = state.get("refresh_soft_block_preflight_reason", "")
         if cached_reason == "order_processing_detected":
@@ -1103,6 +1166,7 @@ async def _preflight_tixcraft_refresh_boundary(
         snapshot = await tixcraft_platform._read_tixcraft_page_health(
             tab,
             config_dict,
+            timeout_seconds=(0.20 if hard_boundary else None),
         )
     except asyncio.CancelledError:
         raise
@@ -1132,7 +1196,32 @@ async def _preflight_tixcraft_refresh_boundary(
         snapshot.get("kind", "") if isinstance(snapshot, dict) else ""
     )
     if reason == "ready":
+        _set_refresh_gate_health_evidence(state, current_url, "ready")
         return None
+    if reason == "soft_block_detected":
+        _set_refresh_gate_health_evidence(state, current_url, "blocked")
+    elif reason == "health_probe_unavailable":
+        _clear_refresh_gate_health_evidence(state)
+        retry_boundary = bool(
+            boundary_name == "trigger_retry"
+            and isinstance(controller, RefreshTriggerController)
+            and controller.remaining_ns() <= 0
+        )
+        if hard_boundary or retry_boundary:
+            # The page-health read was attempted but unavailable.  There is no
+            # fresh blocked evidence, so the probe failure must not own the
+            # schedule indefinitely.  The user-requested one-shot refresh is
+            # allowed to continue after this single bounded attempt.
+            runtime_health.runtime_log(
+                "[REFRESH] boundary_health_unavailable_fail_open",
+                config_dict,
+                boundary=boundary_name,
+                current_url=current_url,
+            )
+            state["refresh_soft_block_preflight_reason"] = (
+                "health_probe_unavailable_fail_open"
+            )
+            return None
     return TriggerReloadDecision(
         attempted=False,
         reloaded=False,
@@ -1155,8 +1244,7 @@ async def _run_refresh_gate_health_watchdog(
         or classify_page(current_url)
         not in {PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA}
     ):
-        state["refresh_gate_health_ready_route"] = ""
-        state["refresh_gate_health_ready_at"] = 0.0
+        _clear_refresh_gate_health_evidence(state)
         return False
 
     now = time.monotonic()
@@ -1185,6 +1273,7 @@ async def _run_refresh_gate_health_watchdog(
         tixcraft_platform._state.reset_binding(token)
     blocked = bool(detection.get("blocked", False))
     if blocked:
+        _set_refresh_gate_health_evidence(state, current_url, "blocked")
         state["refresh_recovery_dispatch_required"] = True
         state["last_refresh_reload_decision"] = "soft_block_detected"
     route_key = _refresh_route_key(current_url)
@@ -1195,11 +1284,9 @@ async def _run_refresh_gate_health_watchdog(
         > 0
     )
     if health_confirmed:
-        state["refresh_gate_health_ready_route"] = route_key
-        state["refresh_gate_health_ready_at"] = time.monotonic()
-    else:
-        state["refresh_gate_health_ready_route"] = ""
-        state["refresh_gate_health_ready_at"] = 0.0
+        _set_refresh_gate_health_evidence(state, current_url, "ready")
+    elif not blocked:
+        _clear_refresh_gate_health_evidence(state)
     return bool(blocked)
 
 
@@ -1217,17 +1304,19 @@ async def _defer_refresh_trigger_for_page_recovery(
     state["refresh_recovery_dispatch_required"] = True
     state["refresh_soft_block_preflight_token"] = None
     state["refresh_soft_block_preflight_reason"] = ""
-    state["refresh_gate_health_ready_route"] = ""
-    state["refresh_gate_health_ready_at"] = 0.0
+    _clear_refresh_gate_health_evidence(state)
     state["refresh_retry_pending"] = True
     state["refresh_retry_not_before_monotonic_ns"] = (
         now_ns + REFRESH_PREFLIGHT_RECOVERY_RETRY_DELAY_NS
     )
-    # The soft-block handler may legitimately spend the configured wait time
-    # recovering. Start a fresh bounded reload window after it returns.
-    state["refresh_retry_deadline_monotonic_ns"] = (
-        now_ns + REFRESH_TRIGGER_RETRY_WINDOW_NS
-    )
+    # Establish the retry budget once.  Repeated preflight failures must never
+    # move this deadline forward, otherwise a two-second retry window becomes
+    # an unbounded loop.
+    if state.get("refresh_retry_deadline_monotonic_ns") is None:
+        boundary_ns = controller.trigger_deadline_monotonic_ns or now_ns
+        state["refresh_retry_deadline_monotonic_ns"] = (
+            max(now_ns, int(boundary_ns)) + REFRESH_TRIGGER_RETRY_WINDOW_NS
+        )
     state["last_refresh_reload_decision"] = decision.reason
 
 
@@ -1432,19 +1521,18 @@ async def _execute_refresh_trigger_reload(
     current_url,
     controller,
     reason,
+    *,
+    boundary_name="initial_trigger",
 ) -> TriggerReloadDecision:
     preflight = await _preflight_tixcraft_refresh_boundary(
         tab,
         current_url,
         config_dict,
         state,
-        "initial_trigger",
+        boundary_name,
     )
     if preflight is not None:
-        if preflight.reason in {
-            "soft_block_detected",
-            "health_probe_unavailable",
-        }:
+        if preflight.reason == "soft_block_detected":
             await _defer_refresh_trigger_for_page_recovery(
                 tab,
                 current_url,
@@ -1573,8 +1661,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
         state["refresh_soft_block_preflight_token"] = None
         state["refresh_soft_block_preflight_reason"] = ""
         state["refresh_gate_health_next_probe_at"] = 0.0
-        state["refresh_gate_health_ready_route"] = ""
-        state["refresh_gate_health_ready_at"] = 0.0
+        _clear_refresh_gate_health_evidence(state)
         state["onsale_preflight_reported"] = False
         _reset_refresh_trigger_retry(state)
 
@@ -1802,8 +1889,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
                 )
                 if (
                     decision is not None
-                    and decision.reason
-                    in {"soft_block_detected", "health_probe_unavailable"}
+                    and decision.reason == "soft_block_detected"
                 ):
                     state["target_boundary_done"] = False
                     state["reached"] = False
@@ -1866,6 +1952,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state, current_url=""):
             current_url,
             controller,
             "refresh_datetime_trigger_retry",
+            boundary_name="trigger_retry",
         )
         if decision.reloaded:
             print(
@@ -2287,6 +2374,10 @@ async def _run_main(args, resources):
                     config_dict,
                     current_url=url,
                 )
+                # Recovery can replace or materially change the document.  Do
+                # not reuse pre-recovery blocked/ready evidence; force the next
+                # ARMED/FROZEN watchdog or TRIGGERED retry to validate again.
+                _invalidate_refresh_gate_health_evidence(refresh_datetime_state)
             await asyncio.sleep(0.1)
             continue
 

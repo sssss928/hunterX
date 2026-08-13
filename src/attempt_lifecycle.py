@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -76,7 +76,7 @@ class PurchaseAttempt:
     
     def with_state(self, new_state: AttemptState) -> PurchaseAttempt:
         """Transition to a new state, creating a new immutable attempt."""
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "state": new_state,
         }
         
@@ -92,7 +92,7 @@ class PurchaseAttempt:
         if new_state == AttemptState.RECOVERING_TO_AREA and self.recovery_started_at is None:
             kwargs["recovery_started_at"] = time.monotonic()
         
-        return self._replace(**kwargs)  # type: ignore[attr-defined]
+        return replace(self, **kwargs)
     
     def elapsed_since_creation(self, now: float | None = None) -> float:
         """Seconds since attempt was created."""
