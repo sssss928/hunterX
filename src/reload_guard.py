@@ -37,12 +37,39 @@ class ReloadGuard:
                 maxlen=RELOAD_GUARD_HISTORY_CAPACITY,
             )
 
-    def can_reload(self, url: str = "", reason: str = "", recovery: bool = False) -> ReloadDecision:
-        page_class = classify_page(url)
-        allowed = True
-        if is_protected_after_ticket(page_class) and not recovery:
-            allowed = False
-        decision = ReloadDecision(allowed=allowed, reason=reason or "unspecified", page_class=page_class)
+    def can_reload(
+        self,
+        url: str = "",
+        reason: str = "",
+        recovery: bool = False,
+        page_class: PageClass | None = None,
+    ) -> ReloadDecision:
+        """Return whether ``url`` may be reloaded.
+
+        ``page_class`` lets the owning platform adapter resolve routes whose
+        names have platform-specific meaning. TicketPlus ``/order/...`` is a
+        ticket-selection page, for example, while TixCraft ``/ticket/order``
+        is a protected post-submit page. Callers without an adapter keep the
+        conservative shared-classifier fallback.
+        """
+
+        resolved_page_class = (
+            page_class if isinstance(page_class, PageClass) else classify_page(url)
+        )
+        protected = is_protected_after_ticket(resolved_page_class)
+        # Queue documents must never be refreshed out from under the provider.
+        # An adapter-supplied UNKNOWN is also deliberately fail-closed: it is a
+        # known ticketing host on a route the adapter cannot prove is safe.
+        if resolved_page_class is PageClass.QUEUE:
+            protected = True
+        if page_class is not None and resolved_page_class is PageClass.UNKNOWN:
+            protected = True
+        allowed = not protected or recovery
+        decision = ReloadDecision(
+            allowed=allowed,
+            reason=reason or "unspecified",
+            page_class=resolved_page_class,
+        )
         self.history.append(decision)
         return decision
 
@@ -55,9 +82,15 @@ class ReloadGuard:
         config_dict: dict[str, Any] | None = None,
         coordinator: Any | None = None,
         priority: str = "periodic",
+        page_class: PageClass | None = None,
     ) -> bool:
         url = getattr(getattr(tab, "target", None), "url", "") or ""
-        decision = self.can_reload(url=url, reason=reason, recovery=recovery)
+        decision = self.can_reload(
+            url=url,
+            reason=reason,
+            recovery=recovery,
+            page_class=page_class,
+        )
         if not decision.allowed:
             runtime_log(
                 "[RELOAD] blocked",
@@ -168,10 +201,16 @@ async def guarded_reload(
     coordinator = platform_engine.refresh_coordinator_for(tab)
     effective_config = config_dict
     runtime_state = None
+    adapter_page_class = None
     if adapter is not None:
         runtime_state = platform_engine.state_for(tab, adapter)
         if effective_config is None:
             effective_config = runtime_state.config_snapshot
+        # Trust an adapter override only for routes it explicitly declares
+        # safe or protected. Unknown routes on known hosts still use the
+        # conservative shared classifier.
+        if adapter.is_safe_watch_page(url) or adapter.is_protected_page(url):
+            adapter_page_class = adapter.classify_page(url)
     leak_mode = is_leak_watch_mode(effective_config)
     if leak_mode and adapter is None:
         runtime_log(
@@ -230,6 +269,7 @@ async def guarded_reload(
             config_dict=effective_config,
             coordinator=coordinator,
             priority=priority,
+            page_class=adapter_page_class,
         )
         return success
     finally:

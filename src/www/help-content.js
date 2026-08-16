@@ -362,7 +362,7 @@ const HELP_CONTENT = {
     detail: `
       <p><strong>正式搶票模式：</strong>驗證並鎖定指定開賣時間，以一次性 monotonic deadline 刷新，接著進入共用的日期、選區、票數、資格、驗證與送出流程。</p>
       <p><strong>撿漏模式：</strong>只在尚未進入訂單/付款的安全頁使用撿漏刷新間隔。每份新頁面最多完成一次無票掃描；有票時立即取消待執行刷新並進入同一購票流程。</p>
-      <p class="text-warning-emphasis small mb-0"><strong>注意：</strong>撿漏模式不會繞過驗證碼、Cloudflare、Queue-it 或其他防護；ticket、order、checkout、payment 頁不會因撿漏模式刷新。</p>`,
+      <p class="text-warning-emphasis small mb-0"><strong>注意：</strong>撿漏模式不會繞過驗證碼、Cloudflare、Queue-it 或其他防護。已送單、確認、checkout、payment 與排隊頁不會刷新；TicketPlus 的 <code>/order/</code> 是送單前選票頁，因此屬於可安全刷新範圍。</p>`,
     link: null
   },
 
@@ -1267,7 +1267,7 @@ const HELP_CONTENT_EN_META = {
     detailHtml: `
       <p><strong>Onsale mode:</strong> validates and freezes the configured sale time, performs one monotonic-deadline refresh, then enters the shared date, area, quantity, qualification, verification, and submit flow.</p>
       <p><strong>Leak-watch mode:</strong> uses the leak-watch interval only on safe pages before order/payment. It completes at most one no-ticket scan per new document and enters the same purchase flow as soon as inventory is found.</p>
-      <p class="text-warning-emphasis small mb-0"><strong>Note:</strong> leak-watch mode does not bypass CAPTCHA, Cloudflare, Queue-it, or other protections. Ticket/order/checkout/payment pages are not reloaded by leak-watch mode.</p>`,
+      <p class="text-warning-emphasis small mb-0"><strong>Note:</strong> leak-watch mode does not bypass CAPTCHA, Cloudflare, Queue-it, or other protections. Submitted-order, confirmation, checkout, payment and queue pages are not reloaded. TicketPlus <code>/order/</code> is its pre-submit ticket-selection route and is therefore refresh-safe.</p>`,
   },
   leak_refresh_interval_seconds: {
     title: 'Leak-watch refresh interval',

@@ -654,11 +654,63 @@ async def nodriver_current_url(tab, config_dict=None, *, prefer_cached=False):
             return url, is_quit_bot
 
         url = read_js_url(url_payload)
+        target_url = read_target_url()
         if not url:
             # A navigation race can produce a successful JS call with an empty
             # or partially serialized result. The cached CDP target URL remains
             # non-blocking and is safer than skipping platform dispatch.
-            url = read_target_url()
+            url = target_url
+        elif target_url and target_url != url:
+            # While a cross-document navigation is committing, the previous
+            # JavaScript context can still answer after CDP TargetInfo has
+            # advanced. Prefer the browser-owned target only when both values
+            # are valid absolute HTTP(S) URLs.
+            try:
+                parsed_target = urlparse(target_url)
+                parsed_js = urlparse(url)
+            except ValueError:
+                parsed_target = urlparse("")
+                parsed_js = urlparse("")
+            target_valid = (
+                parsed_target.scheme.casefold() in {"http", "https"}
+                and bool(parsed_target.hostname)
+            )
+            js_valid = (
+                parsed_js.scheme.casefold() in {"http", "https"}
+                and bool(parsed_js.hostname)
+            )
+            if target_valid and js_valid:
+                # Neither observation is universally newer: TargetInfo can
+                # lag after a document commit, while the previous JavaScript
+                # context can answer during a navigation. Prefer TargetInfo
+                # only when it represents a strictly later purchase stage;
+                # equal or earlier stages keep the live JavaScript URL.
+                from page_classifier import PageClass, classify_page
+                from platform_adapters import adapter_for_url
+
+                def navigation_stage(candidate_url):
+                    adapter = adapter_for_url(candidate_url)
+                    page = (
+                        adapter.classify_page(candidate_url)
+                        if adapter is not None
+                        else classify_page(candidate_url)
+                    )
+                    ranks = {
+                        PageClass.UNKNOWN: -1,
+                        PageClass.HOME: 0,
+                        PageClass.ACTIVITY: 1,
+                        PageClass.DATE: 2,
+                        PageClass.AREA: 3,
+                        PageClass.TICKET: 4,
+                        PageClass.ORDER: 5,
+                        PageClass.CHECKOUT: 6,
+                        PageClass.PAYMENT: 7,
+                        PageClass.QUEUE: 8,
+                    }
+                    return ranks.get(page, -1)
+
+                if navigation_stage(target_url) > navigation_stage(url):
+                    url = target_url
     return url, is_quit_bot
 
 async def nodriver_resize_window(tab, config_dict):

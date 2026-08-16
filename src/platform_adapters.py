@@ -70,7 +70,12 @@ ADAPTERS: tuple[DeclarativePlatformAdapter, ...] = (
         ),
         (
             _rules(PageClass.PAYMENT, "/payment"),
-            _rules(PageClass.CHECKOUT, "/checkout", "/confirm/"),
+            _rules(
+                PageClass.CHECKOUT,
+                "/checkout",
+                "/confirm/",
+                "/confirmseat/",
+            ),
             _rules(PageClass.TICKET, "/ticket/"),
         ),
         _COMPLETE,

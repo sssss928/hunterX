@@ -329,7 +329,7 @@ function applyOrRestore(selector, property, englishValue) {
 function renderReadmePane() {
     const englishHtml = `
 <div class="alert alert-info" role="alert">
-        <p class="mb-0"><strong>Version</strong>: HunterX (0.4.9) | <strong>Technical support</strong>: Codex AI-assisted development</p>
+        <p class="mb-0"><strong>Version</strong>: HunterX (0.5.0) | <strong>Technical support</strong>: Codex AI-assisted development</p>
 </div>
 
 <div class="accordion mb-3" id="devStatusAccordion">

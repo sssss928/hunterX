@@ -64,6 +64,16 @@ def _ticketplus_state_defaults():
         "signin_form_filled": False,
         "purchase_completed": False,
         "order_page_visited": False,
+        "refresh_deadlines": {},
+        "refresh_identities": {},
+        "refresh_last_wait_log": {},
+        "failure_retry_pending": False,
+        "failure_retry_text": "",
+        "failure_retry_last_log": 0.0,
+        "submission_pending": False,
+        "submission_deadline": 0.0,
+        "submission_next_probe_at": 0.0,
+        "queue_active": False,
     }
 
 
@@ -549,15 +559,141 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
 async def _ticketplus_click_refresh_button(tab, debug):
     """Click float-btn refresh button for partial DOM update; return True if clicked."""
     try:
-        btn = await tab.query_selector('button.float-btn')
-        if btn:
-            await btn.click()
-            await asyncio.sleep(0.3)
-            debug.log("[REFRESH] Clicked update button (partial refresh)")
+        clicked_raw = await tab.evaluate('''
+            (function() {
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        style.opacity !== '0' &&
+                        rect.width > 0 && rect.height > 0;
+                }
+                const buttons = Array.from(document.querySelectorAll(
+                    'button, [role="button"]'
+                )).filter(btn => {
+                    const label = String(
+                        btn.getAttribute('aria-label') ||
+                        btn.getAttribute('title') ||
+                        btn.textContent || ''
+                    ).toLowerCase();
+                    return btn.matches('button.float-btn') ||
+                        Boolean(btn.querySelector('.mdi-refresh, [class*="refresh"]')) ||
+                        label.includes('刷新') ||
+                        label.includes('重新整理') ||
+                        label.includes('refresh');
+                });
+                const button = buttons.find(btn =>
+                    isVisible(btn) &&
+                    !btn.disabled &&
+                    btn.getAttribute('aria-disabled') !== 'true'
+                );
+                if (!button) return false;
+                button.scrollIntoView({ block: 'center', inline: 'center' });
+                button.click();
+                return true;
+            })();
+        ''')
+        if bool(util.parse_nodriver_result(clicked_raw)):
+            debug.log("[REFRESH] TicketPlus partial refresh dispatched")
             return True
-    except Exception:
-        pass
+    except Exception as exc:
+        debug.log(f"[REFRESH] TicketPlus partial refresh unavailable: {exc}")
     return False
+
+
+def _ticketplus_current_url(tab):
+    try:
+        value = getattr(getattr(tab, "target", None), "url", "") or ""
+    except Exception:
+        value = ""
+    if not value:
+        try:
+            value = getattr(tab, "url", "") or ""
+        except Exception:
+            value = ""
+    return str(value or "")
+
+
+async def _ticketplus_refresh_inventory(tab, config_dict, debug, reason):
+    """Dispatch one observable TicketPlus inventory refresh."""
+
+    if await _ticketplus_click_refresh_button(tab, debug):
+        return True
+
+    try:
+        reloaded = await guarded_reload(
+            tab,
+            reason=reason,
+            config_dict=config_dict,
+        )
+    except Exception as exc:
+        debug.log(f"[REFRESH] TicketPlus full reload raised: {exc}")
+        return False
+
+    if reloaded:
+        debug.log("[REFRESH] TicketPlus full page reload completed")
+    else:
+        debug.log("[REFRESH] TicketPlus full page reload was not dispatched")
+    return bool(reloaded)
+
+
+async def _ticketplus_refresh_when_due(
+    tab,
+    config_dict,
+    debug,
+    state_key,
+    reason,
+):
+    """Request a mode-aware refresh without blocking the main event loop."""
+
+    interval = get_auto_reload_interval(config_dict)
+    if interval <= 0:
+        debug.log("[REFRESH] TicketPlus automatic refresh is disabled")
+        return False
+
+    now = time.monotonic()
+    current_url = _ticketplus_current_url(tab)
+    try:
+        parsed = urllib.parse.urlsplit(current_url)
+        route = f"{parsed.scheme.lower()}://{(parsed.hostname or '').lower()}{parsed.path}"
+    except ValueError:
+        route = current_url
+    identity = f"{route}|{interval:.6f}"
+    identities = _state.setdefault("refresh_identities", {})
+    deadlines = _state.setdefault("refresh_deadlines", {})
+    wait_logs = _state.setdefault("refresh_last_wait_log", {})
+
+    if identities.get(state_key) != identity:
+        identities[state_key] = identity
+        deadlines[state_key] = now + interval
+
+    deadline = float(deadlines.get(state_key, now + interval) or 0.0)
+    if now < deadline:
+        if now - float(wait_logs.get(state_key, 0.0) or 0.0) >= 1.0:
+            wait_logs[state_key] = now
+            debug.log(
+                f"[REFRESH] TicketPlus waiting {deadline - now:.1f}s "
+                f"for {state_key}"
+            )
+        return False
+
+    # Derive the next deadline from the actual dispatch attempt. Delayed loops
+    # never catch up with a burst of requests.
+    deadlines[state_key] = now + interval
+    refreshed = await _ticketplus_refresh_inventory(
+        tab,
+        config_dict,
+        debug,
+        reason,
+    )
+    if not refreshed:
+        # A transient browser-action collision must not silently consume the
+        # entire configured interval. Retry soon, still without a catch-up
+        # burst or a blocking sleep.
+        deadlines[state_key] = now + min(interval, 0.25)
+    return refreshed
 
 
 async def nodriver_ticketplus_date_auto_select(tab, config_dict):
@@ -907,19 +1043,24 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
             elif not formated_area_list or len(formated_area_list) == 0:
                 debug.log("[TicketPlus DATE] No available tickets (all sold out), waiting for refresh...")
 
-        if auto_reload_coming_soon_page_enable and is_vue_ready and (not formated_area_list or len(formated_area_list) == 0):
+        no_available_date = not formated_area_list or len(formated_area_list) == 0
+        keyword_unmatched = bool(
+            date_keyword
+            and formated_area_list
+            and len(formated_area_list) > 0
+            and (not matched_blocks or len(matched_blocks) == 0)
+        )
+        if auto_reload_coming_soon_page_enable and (
+            not is_vue_ready or no_available_date or keyword_unmatched
+        ):
             try:
-                reload_interval = get_auto_reload_interval(config_dict)
-                if reload_interval > 0:
-                    debug.log(f"[TicketPlus DATE] Waiting {reload_interval}s before auto-reload...")
-                    await asyncio.sleep(reload_interval)
-                    clicked = await _ticketplus_click_refresh_button(tab, debug)
-                    if not clicked:
-                        await guarded_reload(tab, reason="legacy_platform_reload")
-                        debug.log("[TicketPlus DATE] Page reloaded, waiting for content...")
-                        await asyncio.sleep(0.5)
-                else:
-                    debug.log("[TicketPlus DATE] Auto reload disabled")
+                await _ticketplus_refresh_when_due(
+                    tab,
+                    config_dict,
+                    debug,
+                    "ticketplus_date_refresh",
+                    "ticketplus_date_inventory_refresh",
+                )
             except Exception as exc:
                 debug.log(f"[TicketPlus DATE] Auto reload failed: {exc}")
 
@@ -1578,71 +1719,164 @@ async def nodriver_ticketplus_accept_other_activity(tab):
     return is_button_clicked
 
 
-async def nodriver_ticketplus_accept_order_fail(tab, debug=None):
-    """Detect and dismiss order failure popup (e.g. "Purchase failed / Sold out").
+async def _ticketplus_order_failure_action(tab, debug=None):
+    """Detect, dismiss and verify a TicketPlus purchase-failure dialog.
 
-    Uses text-driven detection: scans visible dialogs for failure keywords, then
-    clicks any button whose label looks like a dismissal action. CSS selectors
-    for Vuetify dialogs vary across versions, so text matching is more robust.
-
-    Returns:
-        True  -- failure popup detected (and dismissed if possible)
-        False -- no failure popup found
-        None  -- evaluate failed; popup state unknown (caller should skip order submission)
+    The returned ``status`` is one of ``absent``, ``dismissed``, ``blocked``
+    or ``unknown``. A dialog is never reported as dismissed merely because it
+    was detected; its removal from the visible DOM is verified first.
     """
-    try:
-        js_result = await tab.evaluate('''
-            (function() {
-                const failureTexts = [
-                    '購票失敗',
-                    '您選擇的票種已售完',
-                    '已售完',
-                    '別人搶先一步',
-                    '已無可配座位',
-                    '本活動有限制購票總張數',
-                    '已被購買',
-                    '系統忙碌',
-                    '無法購票'
-                ];
-                const buttonTexts = [
-                    '我知道了',
-                    '知道了',
-                    '確定',
-                    'OK',
-                    'Ok'
-                ];
-                const dialogs = document.querySelectorAll('[role="dialog"], .v-dialog, .v-dialog__content');
-                for (const dialog of dialogs) {
-                    if (dialog.offsetParent === null) continue;
-                    const text = (dialog.textContent || '').trim();
-                    if (!failureTexts.some(t => text.includes(t))) continue;
-                    const buttons = dialog.querySelectorAll('button');
-                    for (const btn of buttons) {
-                        const btnText = (btn.textContent || '').trim();
-                        if (buttonTexts.some(t => btnText.includes(t))) {
-                            btn.click();
-                            return { foundFailure: true, buttonClicked: true, dialogText: text.slice(0, 80) };
-                        }
-                    }
-                    return { foundFailure: true, buttonClicked: false, dialogText: text.slice(0, 80) };
-                }
-                return { foundFailure: false, buttonClicked: false, dialogText: '' };
-            })();
-        ''')
 
-        if isinstance(js_result, dict) and js_result.get('foundFailure'):
+    script = '''
+        (function() {
+            function isVisible(el) {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    style.opacity !== '0' &&
+                    el.getAttribute('aria-hidden') !== 'true' &&
+                    rect.width > 0 && rect.height > 0;
+            }
+            function isEnabled(el) {
+                return isVisible(el) &&
+                    !el.disabled &&
+                    el.getAttribute('aria-disabled') !== 'true' &&
+                    !String(el.className || '').includes('disabled');
+            }
+            const failureTexts = [
+                '購票失敗',
+                '您選擇的票種已售完',
+                '已售完',
+                '別人搶先一步',
+                '已無可配座位',
+                '本活動有限制購票總張數',
+                '已被購買',
+                '系統忙碌',
+                '無法購票'
+            ];
+            const buttonTexts = [
+                '我知道了', '我瞭解了', '知道了', '瞭解', '確定', '關閉',
+                'OK', 'Ok'
+            ];
+            const dialogs = Array.from(document.querySelectorAll(
+                '[role="dialog"], .v-dialog, .v-dialog__content, .v-overlay__content'
+            )).filter(isVisible);
+            const dialog = dialogs.find(item => {
+                const text = (item.textContent || '').trim();
+                return failureTexts.some(keyword => text.includes(keyword));
+            });
+            if (!dialog) {
+                return {
+                    foundFailure: false,
+                    buttonClicked: false,
+                    dialogText: '',
+                    buttonText: ''
+                };
+            }
+            const dialogText = (dialog.textContent || '').trim();
+            const buttons = Array.from(dialog.querySelectorAll(
+                'button, input[type="button"], input[type="submit"], [role="button"], a.v-btn, .v-btn, .swal2-confirm'
+            )).filter(isEnabled);
+            const button = buttons.find(item => {
+                const text = (item.textContent || item.value || '').trim();
+                return buttonTexts.some(keyword => text.includes(keyword));
+            });
+            if (!button) {
+                return {
+                    foundFailure: true,
+                    buttonClicked: false,
+                    dialogText: dialogText.slice(0, 160),
+                    buttonText: ''
+                };
+            }
+            const buttonText = (button.textContent || button.value || '').trim();
+            button.scrollIntoView({ block: 'center', inline: 'center' });
+            try { button.focus({ preventScroll: true }); } catch (_) {}
+            button.click();
+            return {
+                foundFailure: true,
+                buttonClicked: true,
+                dialogText: dialogText.slice(0, 160),
+                buttonText: buttonText
+            };
+        })();
+    '''
+
+    last_result = None
+    detected_dialog_text = ""
+    for attempt in range(3):
+        try:
+            raw_result = await tab.evaluate(script)
+            result = util.parse_nodriver_result(raw_result)
+        except Exception as exc:
             if debug is not None:
-                debug.log(f"[ORDER FAIL] Detected popup: {js_result.get('dialogText', '')}")
-                if js_result.get('buttonClicked'):
-                    debug.log("[ORDER FAIL] Dismissed via dialog button")
-                else:
-                    debug.log("[ORDER FAIL] Dismiss button not found in dialog")
-            return True
+                debug.log(
+                    f"[ORDER FAIL][DEGRADED] evaluate failed on attempt "
+                    f"{attempt + 1}: {exc}"
+                )
+            return {"status": "unknown", "dialog_text": ""}
+
+        if not isinstance(result, dict):
+            if debug is not None:
+                debug.log("[ORDER FAIL][DEGRADED] unexpected evaluate result")
+            return {"status": "unknown", "dialog_text": ""}
+
+        last_result = result
+        if not result.get("foundFailure", False):
+            if attempt == 0:
+                return {"status": "absent", "dialog_text": ""}
+            if debug is not None:
+                debug.log("[ORDER FAIL] Dialog dismissed and closure verified")
+            return {
+                "status": "dismissed",
+                "dialog_text": detected_dialog_text,
+            }
+
+        dialog_text = str(result.get("dialogText", "") or "")
+        if dialog_text:
+            detected_dialog_text = dialog_text
+        if debug is not None and attempt == 0:
+            debug.log(f"[ORDER FAIL] Detected popup: {dialog_text}")
+        if not result.get("buttonClicked", False):
+            if debug is not None:
+                debug.log("[ORDER FAIL] Dismiss button not found in visible dialog")
+            return {"status": "blocked", "dialog_text": dialog_text}
+
+        # Vuetify closes dialogs asynchronously. Yield briefly and then verify
+        # the same failure dialog is no longer visible before reporting success.
+        await asyncio.sleep(0.06)
+
+    dialog_text = str((last_result or {}).get("dialogText", "") or "")
+    if debug is not None:
+        debug.log("[ORDER FAIL] Click dispatched but dialog remained visible")
+    return {"status": "blocked", "dialog_text": dialog_text}
+
+
+async def nodriver_ticketplus_accept_order_fail(tab, debug=None):
+    """Compatibility wrapper for the existing tri-state popup API."""
+
+    result = await _ticketplus_order_failure_action(tab, debug)
+    status = result.get("status") if isinstance(result, dict) else "unknown"
+    if status == "dismissed":
+        return True
+    if status == "absent":
         return False
-    except Exception as exc:
-        if debug is not None:
-            debug.log(f"[ORDER FAIL][DEGRADED] evaluate failed, popup state unknown: {exc}")
-        return None
+    return None
+
+
+def _ticketplus_queue_evidence_is_active(result):
+    """Require positive queue evidence; a generic overlay is insufficient."""
+
+    if not isinstance(result, dict) or result.get("hasFailureDialog", False):
+        return False
+    found_keywords = result.get("foundKeywords", [])
+    return bool(
+        result.get("hasQueueDialog", False)
+        or result.get("explicitQueueRoute", False)
+        or (isinstance(found_keywords, (list, tuple)) and found_keywords)
+    )
 
 
 async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_debug=False):
@@ -1663,6 +1897,14 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
                     '\u6b63\u5728\u8655\u7406',
                     '\u8655\u7406\u4e2d'
                 ];
+                const failureKeywords = [
+                    '\u8cfc\u7968\u5931\u6557',
+                    '\u5df2\u552e\u5b8c',
+                    '\u5225\u4eba\u6436\u5148\u4e00\u6b65',
+                    '\u5df2\u7121\u53ef\u914d\u5ea7\u4f4d',
+                    '\u672c\u6d3b\u52d5\u6709\u9650\u5236\u8cfc\u7968\u7e3d\u5f35\u6578',
+                    '\u7121\u6cd5\u8cfc\u7968'
+                ];
 
                 const bodyText = document.body.textContent || '';
 
@@ -1674,15 +1916,30 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
                 const dialogText = document.querySelector('.v-dialog')?.textContent || '';
                 const hasQueueDialog = dialogText.includes('\u6392\u968a') ||
                                        dialogText.includes('\u8acb\u7a0d\u5019');
+                const hasFailureDialog = failureKeywords.some(
+                    keyword => dialogText.includes(keyword)
+                );
+
+                const currentUrl = String(window.location.href || '').toLowerCase();
+                const explicitQueueRoute =
+                    currentUrl.includes('queue-it.net') ||
+                    currentUrl.includes('/queue/') ||
+                    currentUrl.includes('/waiting-room');
 
                 const foundKeywords = queueKeywords.filter(keyword => bodyText.includes(keyword));
 
                 return {
-                    inQueue: hasQueueKeyword || hasOverlay || hasQueueDialog,
+                    // A Vuetify overlay is shared by purchase failures and
+                    // ordinary notices. It is supporting evidence only and
+                    // must never classify a page as a queue by itself.
+                    inQueue: !hasFailureDialog &&
+                        (hasQueueKeyword || hasQueueDialog || explicitQueueRoute),
                     queueTitle: '',
                     foundKeywords: foundKeywords,
                     hasOverlay: hasOverlay,
                     hasQueueDialog: hasQueueDialog,
+                    hasFailureDialog: hasFailureDialog,
+                    explicitQueueRoute: explicitQueueRoute,
                     dialogText: hasQueueDialog ? dialogText.trim() : ''
                 };
             })();
@@ -1691,7 +1948,7 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
         result = util.parse_nodriver_result(result)
 
         if isinstance(result, dict):
-            is_in_queue = result.get('inQueue', False)
+            is_in_queue = _ticketplus_queue_evidence_is_active(result)
             if is_in_queue and force_show_debug:
                 debug.log("[QUEUE] Queue status detected")
                 if result.get('hasOverlay'):
@@ -1713,6 +1970,151 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
     except Exception as exc:
         debug.log(f"Queue status check error: {exc}")
         return False
+
+
+def _ticketplus_clear_submission_watch():
+    _state["submission_pending"] = False
+    _state["submission_deadline"] = 0.0
+    _state["submission_next_probe_at"] = 0.0
+    _state["queue_active"] = False
+
+
+def _ticketplus_arm_submission_watch():
+    now = time.monotonic()
+    _state["submission_pending"] = True
+    # This is a liveness deadline, not a ticket-site timeout. A genuine queue
+    # is allowed to extend it while it remains positively identified.
+    _state["submission_deadline"] = now + 30.0
+    _state["submission_next_probe_at"] = now
+    _state["queue_active"] = False
+
+
+def _ticketplus_schedule_failure_retry(config_dict, dialog_text=""):
+    _ticketplus_clear_submission_watch()
+    _state["failure_retry_pending"] = True
+    _state["failure_retry_text"] = str(dialog_text or "")[:160]
+    # Force a fresh interval window from the moment the rejection was closed.
+    identities = _state.setdefault("refresh_identities", {})
+    identities.pop("ticketplus_failure_refresh", None)
+
+
+async def _ticketplus_probe_submission_outcome(tab, config_dict, debug):
+    current_url = _ticketplus_current_url(tab).lower()
+    if "/confirm/" in current_url or "/confirmseat/" in current_url:
+        return {"status": "confirmed", "dialog_text": ""}
+
+    failure_result = await _ticketplus_order_failure_action(tab, debug)
+    failure_status = failure_result.get("status", "unknown")
+    if failure_status == "dismissed":
+        return {
+            "status": "failure",
+            "dialog_text": failure_result.get("dialog_text", ""),
+        }
+    if failure_status == "blocked":
+        return {
+            "status": "failure_blocked",
+            "dialog_text": failure_result.get("dialog_text", ""),
+        }
+    if failure_status == "unknown":
+        return {"status": "unknown", "dialog_text": ""}
+
+    if await nodriver_ticketplus_check_queue_status(
+        tab,
+        config_dict,
+        force_show_debug=False,
+    ):
+        return {"status": "queue", "dialog_text": ""}
+    return {"status": "pending", "dialog_text": ""}
+
+
+async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=False):
+    """Advance a submitted TicketPlus form without an inner infinite loop."""
+
+    if not _state.get("submission_pending", False):
+        return False
+
+    now = time.monotonic()
+    next_probe_at = float(_state.get("submission_next_probe_at", 0.0) or 0.0)
+    if not force and now < next_probe_at:
+        return True
+
+    outcome = await _ticketplus_probe_submission_outcome(tab, config_dict, debug)
+    status = outcome.get("status", "unknown")
+    if status == "confirmed":
+        debug.log("[SUBMIT] TicketPlus confirmation route observed")
+        _ticketplus_clear_submission_watch()
+        return True
+    if status == "failure":
+        _ticketplus_schedule_failure_retry(
+            config_dict,
+            outcome.get("dialog_text", ""),
+        )
+        return True
+    if status == "failure_blocked":
+        # Keep ownership of the submitted attempt and retry only the exact
+        # failure dialog on the next bounded probe. Never submit underneath it.
+        _state["submission_next_probe_at"] = now + 0.15
+        return True
+    if status == "queue":
+        if not _state.get("queue_active", False):
+            debug.log("[QUEUE] TicketPlus queue positively identified")
+        _state["queue_active"] = True
+        _state["submission_deadline"] = now + 30.0
+        _state["submission_next_probe_at"] = now + 1.0
+        return True
+
+    _state["submission_next_probe_at"] = now + 0.20
+    deadline = float(_state.get("submission_deadline", 0.0) or 0.0)
+    if status == "unknown":
+        # A transient CDP result must not release submit ownership and create a
+        # duplicate order. Retry only within the same bounded window.
+        if now < deadline:
+            return True
+        debug.log(
+            "[SUBMIT] TicketPlus outcome remained unavailable; scheduling a "
+            "fresh inventory scan"
+        )
+        _ticketplus_schedule_failure_retry(
+            config_dict,
+            "submission outcome unavailable",
+        )
+        return True
+    if now < deadline:
+        return True
+
+    debug.log("[SUBMIT] TicketPlus outcome timed out; scheduling a fresh inventory scan")
+    _ticketplus_schedule_failure_retry(config_dict, "submission outcome timeout")
+    return True
+
+
+async def _ticketplus_handle_failure_retry(tab, config_dict, debug):
+    if not _state.get("failure_retry_pending", False):
+        return False
+
+    interval = get_auto_reload_interval(config_dict)
+    if interval <= 0:
+        now = time.monotonic()
+        last_log = float(_state.get("failure_retry_last_log", 0.0) or 0.0)
+        if now - last_log >= 5.0:
+            _state["failure_retry_last_log"] = now
+            debug.log(
+                "[ORDER FAIL] Dialog dismissed; automatic refresh is disabled, "
+                "holding the rejected attempt"
+            )
+        return True
+
+    refreshed = await _ticketplus_refresh_when_due(
+        tab,
+        config_dict,
+        debug,
+        "ticketplus_failure_refresh",
+        "ticketplus_failure_inventory_refresh",
+    )
+    if refreshed:
+        _state["failure_retry_pending"] = False
+        _state["failure_retry_text"] = ""
+        _state["order_page_visited"] = False
+    return True
 
 
 async def nodriver_ticketplus_confirm(tab, config_dict):
@@ -1864,63 +2266,24 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
         is_form_submitted = await nodriver_ticketplus_click_next_button_unified(tab, config_dict)
 
         if is_form_submitted:
-            await tab.sleep(random.uniform(5.0, 10.0))
-
-            is_in_queue = await nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_debug=False)
-            if is_in_queue:
-                debug.log("Entered queue monitoring (check every 5 seconds, display only on status change)")
-
-                last_url = ""
-
-                while True:
-                    if await check_and_handle_pause(config_dict):
-                        break
-
-                    try:
-                        current_url = tab.url
-
-                        if '/confirm/' in current_url.lower() or '/confirmseat/' in current_url.lower():
-                            debug.log("Detected entry to confirmation page, exiting queue monitoring")
-                            break
-
-                        if current_url != last_url:
-                            debug.log(f"Page status update - URL: {current_url}")
-                            last_url = current_url
-
-                        is_still_in_queue = await nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_debug=False)
-
-                        if not is_still_in_queue:
-                            if '/confirm/' in current_url.lower() or '/confirmseat/' in current_url.lower():
-                                debug.log("Queue ended, entered confirmation page")
-                                break
-                            else:
-                                debug.log("[QUEUE END] Queue ended, continuing page processing")
-                                break
-
-                        await tab.sleep(random.uniform(5.0, 10.0))
-
-                    except Exception as exc:
-                        debug.log(f"Queue monitoring error: {exc}")
-                        break
+            _ticketplus_arm_submission_watch()
+            await _ticketplus_handle_submission_watch(
+                tab,
+                config_dict,
+                debug,
+                force=True,
+            )
 
         debug.log(f"Form submission: {'Success' if is_form_submitted else 'Failed'}")
     else:
         debug.log("Ticket selection failed, cannot continue")
-
-        auto_reload_interval = get_auto_reload_interval(config_dict)
-        if auto_reload_interval > 0:
-            debug.log(f"[AUTO RELOAD] Waiting {auto_reload_interval} seconds before reload...")
-            await asyncio.sleep(auto_reload_interval)
-            debug.log("[AUTO RELOAD] Refreshing ticket count...")
-            try:
-                clicked = await _ticketplus_click_refresh_button(tab, debug)
-                if not clicked:
-                    await guarded_reload(tab, reason="legacy_platform_reload")
-                    debug.log("[AUTO RELOAD] Full page reload (button not found)")
-            except Exception as reload_exc:
-                debug.log(f"[AUTO RELOAD] Reload failed: {reload_exc}")
-        else:
-            debug.log("[AUTO RELOAD] Auto reload disabled")
+        await _ticketplus_refresh_when_due(
+            tab,
+            config_dict,
+            debug,
+            "ticketplus_order_refresh",
+            "ticketplus_order_inventory_refresh",
+        )
 
     debug.log("=== TicketPlus Simplified Booking Ended ===")
 
@@ -2138,6 +2501,9 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
         if is_event_page:
             _state["is_popup_confirm"] = False
             _state["order_page_visited"] = False
+            _ticketplus_clear_submission_watch()
+            _state["failure_retry_pending"] = False
+            _state["failure_retry_text"] = ""
 
             is_button_pressed = await nodriver_ticketplus_accept_realname_card(tab)
             debug.log(f"[TICKETPLUS] Realname Card: {is_button_pressed}")
@@ -2156,6 +2522,29 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
 
         if is_event_page:
             _state["start_time"] = time.monotonic()
+
+            # Resolve a previous submit before Vue readiness or ticket
+            # selection. This prevents a visible rejection dialog from being
+            # treated as a queue overlay and prevents duplicate submissions.
+            failure_result = await _ticketplus_order_failure_action(tab, debug)
+            failure_status = failure_result.get("status", "unknown")
+            if failure_status == "dismissed":
+                _ticketplus_schedule_failure_retry(
+                    config_dict,
+                    failure_result.get("dialog_text", ""),
+                )
+                return _get_status()
+            if failure_status in {"blocked", "unknown"}:
+                debug.log(
+                    "[ORDER FAIL][DEGRADED] Failure dialog could not be safely "
+                    "resolved; skipping order submission this cycle"
+                )
+                return _get_status()
+
+            if await _ticketplus_handle_submission_watch(tab, config_dict, debug):
+                return _get_status()
+            if await _ticketplus_handle_failure_retry(tab, config_dict, debug):
+                return _get_status()
 
             is_first_visit = not _state.get("order_page_visited", False)
             if is_first_visit:
@@ -2178,20 +2567,6 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
                 await asyncio.sleep(fallback_delay)
 
             is_button_pressed = await nodriver_ticketplus_accept_realname_card(tab)
-            is_order_fail_handled = await nodriver_ticketplus_accept_order_fail(tab, debug)
-
-            if is_order_fail_handled is True:
-                debug.log("[ORDER FAIL] Reloading page to refresh ticket availability")
-                try:
-                    await guarded_reload(tab, reason="legacy_platform_reload")
-                    await asyncio.sleep(0.5)
-                except Exception as reload_exc:
-                    debug.log(f"[ORDER FAIL] Reload failed: {reload_exc}")
-                _state["order_page_visited"] = False
-                return _get_status()
-            elif is_order_fail_handled is None:
-                debug.log("[ORDER FAIL][DEGRADED] Detection unavailable, skipping order submission this cycle")
-                return _get_status()
 
             await nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser)
 
@@ -2209,6 +2584,9 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
 
         if is_event_page:
             _state["is_ticket_assigned"] = True
+            _ticketplus_clear_submission_watch()
+            _state["failure_retry_pending"] = False
+            _state["failure_retry_text"] = ""
 
             if not _state["is_popup_confirm"]:
                 _state["is_popup_confirm"] = True

@@ -33,7 +33,12 @@ class LeakWatchPolicy:
 LEAK_WATCH_POLICIES: tuple[LeakWatchPolicy, ...] = (
     LeakWatchPolicy("TixCraft", ("tixcraft.com", "indievox.com", "ticketmaster."), ("/activity/", "/ticket/area/", "/ticket/check-captcha/"), ("/ticket/ticket/", "/ticket/order", "/ticket/checkout", "/payment")),
     LeakWatchPolicy("KKTIX", ("kktix.",), ("/events/", "/registrations/new", "/registrations/", "/events/"), ("/orders/", "/checkout", "/payment")),
-    LeakWatchPolicy("TicketPlus", ("ticketplus.com",), ("/activity/", "/order/", "/ticket/"), ("/confirm/", "/checkout", "/payment")),
+    LeakWatchPolicy(
+        "TicketPlus",
+        ("ticketplus.com",),
+        ("/activity/", "/order/", "/ticket/"),
+        ("/confirm/", "/confirmseat/", "/checkout", "/payment"),
+    ),
     LeakWatchPolicy("iBon", ("ibon.com",), ("/activity/", "/event/", "/ticket/", "/performance/"), ("/checkout", "/payment", "/order")),
     LeakWatchPolicy("KHAM", ("kham.com.tw",), ("/application/UTK", "/event/", "/performance/"), ("/checkout", "/payment", "/order")),
     LeakWatchPolicy("ticket.com.tw", ("ticket.com.tw",), ("/application/UTK", "/event/", "/performance/"), ("/checkout", "/payment", "/order")),
@@ -74,7 +79,12 @@ def is_protected_url(url: str) -> bool:
 
         adapter = adapter_for_url(url)
         if adapter is not None:
-            return bool(adapter.is_protected_page(url))
+            if adapter.is_protected_page(url):
+                return True
+            if adapter.is_safe_watch_page(url):
+                return False
+            # Unknown routes on a known host remain fail-closed through the
+            # shared classifier below.
     except ImportError:
         pass
     page_class = classify_page(url)
