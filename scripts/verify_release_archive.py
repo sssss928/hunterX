@@ -44,7 +44,9 @@ WINDOWS_VENDOR_DIST_PREFIXES = frozenset(
     {
         ("www", "dist"),
         ("_nodriver_internal", "www", "dist"),
+        ("_nodriver_internal", "app_src", "www", "dist"),
         ("_settings_internal", "www", "dist"),
+        ("_settings_internal", "app_src", "www", "dist"),
     }
 )
 WINDOWS_ALLOWED_PUBLIC_CERTIFICATES = frozenset(
@@ -160,8 +162,13 @@ def verify_windows_archive(path: Path, version: str) -> dict[str, object]:
             "www/settings.html",
             "www/settings.js",
             "_nodriver_internal/base_library.zip",
+            "_nodriver_internal/app_src/hunter_metadata.py",
+            "_nodriver_internal/app_src/nodriver_tixcraft.py",
+            "_nodriver_internal/app_src/platforms/ticketplus.py",
             "_nodriver_internal/python311.dll",
             "_settings_internal/base_library.zip",
+            "_settings_internal/app_src/hunter_metadata.py",
+            "_settings_internal/app_src/settings.py",
             "_settings_internal/python311.dll",
         }
         missing = sorted(required - set(entries))
@@ -174,6 +181,9 @@ def verify_windows_archive(path: Path, version: str) -> dict[str, object]:
             raise ValueError("Legacy shared _internal runtime is forbidden")
         if not any(name.startswith("assets/") for name in entries):
             raise ValueError("Windows archive has no assets")
+        for executable_name in ("settings.exe", "nodriver_tixcraft.exe"):
+            if archive.read(entries[executable_name])[:2] != b"MZ":
+                raise ValueError(f"Windows executable is not a PE file: {executable_name}")
         expected_name = f"hunterX_windows_{version}.zip"
         if path.name != expected_name:
             raise ValueError(
@@ -233,38 +243,72 @@ def working_tree_source_files(
 ) -> dict[str, bytes]:
     """Read tracked plus non-ignored untracked files from the local tree."""
 
-    result = subprocess.run(
-        [
-            "git",
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-        cwd=repo_root,
-        capture_output=True,
-        check=True,
-    )
-    relative_names = sorted(
-        {
+    if (repo_root / ".git").exists():
+        result = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            check=True,
+        )
+        relative_names = sorted(
+            {
+                item.decode("utf-8", errors="strict").replace("\\", "/")
+                for item in result.stdout.split(b"\0")
+                if item
+            }
+        )
+        deleted_result = subprocess.run(
+            ["git", "ls-files", "-z", "--deleted"],
+            cwd=repo_root,
+            capture_output=True,
+            check=True,
+        )
+        deleted_names = {
             item.decode("utf-8", errors="strict").replace("\\", "/")
-            for item in result.stdout.split(b"\0")
+            for item in deleted_result.stdout.split(b"\0")
             if item
         }
-    )
-    deleted_result = subprocess.run(
-        ["git", "ls-files", "-z", "--deleted"],
-        cwd=repo_root,
-        capture_output=True,
-        check=True,
-    )
-    deleted_names = {
-        item.decode("utf-8", errors="strict").replace("\\", "/")
-        for item in deleted_result.stdout.split(b"\0")
-        if item
-    }
-    relative_names = [name for name in relative_names if name not in deleted_names]
+        relative_names = [name for name in relative_names if name not in deleted_names]
+    else:
+        # Uploaded source archives do not have Git metadata. Build the same
+        # fail-closed release input directly from regular files while excluding
+        # local environments, caches and generated artifacts.
+        denied_top_level = {
+            ".git",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            "build",
+            "dist",
+            "venv",
+        }
+        denied_generated_files = {".coverage", "coverage.xml"}
+        relative_names = []
+        for candidate in sorted(repo_root.rglob("*")):
+            relative = candidate.relative_to(repo_root)
+            parts = relative.parts
+            if not parts:
+                continue
+            if (
+                parts[0].casefold() in denied_top_level
+                or parts[0].casefold().startswith(".venv")
+                or "__pycache__" in {part.casefold() for part in parts}
+                or candidate.suffix.casefold() in {".pyc", ".pyo"}
+                or candidate.name.casefold() in denied_generated_files
+                or candidate.name.casefold().startswith(".coverage.")
+            ):
+                continue
+            if candidate.is_symlink():
+                raise ValueError(f"Source symlink is not allowed: {relative.as_posix()}")
+            if candidate.is_file():
+                relative_names.append(relative.as_posix())
     archive_names = {f"{prefix}{name}" for name in relative_names}
     _assert_no_denied_source_paths(archive_names, prefix)
 
@@ -319,19 +363,11 @@ def verify_source_archive(
             if archive.read(entries[name]) != expected[name]
         )
         if missing or extra or mismatch:
-            details = []
-            if missing:
-                details.append(f"missing_files={missing[:10]}")
-            if extra:
-                details.append(f"extra_files={extra[:10]}")
-            if mismatch:
-                details.append(f"mismatch_files={mismatch[:10]}")
-            detail_text = " " + " ".join(details) if details else ""
             raise ValueError(
                 "Source archive differs from "
                 f"{'working tree' if working_tree else 'commit ' + commit}: "
                 f"missing={len(missing)} extra={len(extra)} "
-                f"mismatch={len(mismatch)}{detail_text}"
+                f"mismatch={len(mismatch)}"
             )
         return {
             "archive": str(path.resolve()),
