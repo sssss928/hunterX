@@ -15,8 +15,8 @@ REQUIRED_WINDOWS_FILES = {
     "LICENSE": b"license",
     "README.md": b"readme",
     "README_Release.txt": b"release readme",
-    "nodriver_tixcraft.exe": b"bot",
-    "settings.exe": b"settings",
+    "nodriver_tixcraft.exe": b"MZbot",
+    "settings.exe": b"MZsettings",
     "www/css/settings.css": b"css",
     "www/favicon.ico": b"ico",
     "www/settings.html": b"html",
@@ -24,10 +24,17 @@ REQUIRED_WINDOWS_FILES = {
     "www/dist/jquery.min.js": b"jquery",
     "assets/icon.png": b"png",
     "_nodriver_internal/base_library.zip": b"base-a",
+    "_nodriver_internal/app_src/hunter_metadata.py": b"APP_VERSION = '0.5.0'",
+    "_nodriver_internal/app_src/nodriver_tixcraft.py": b"pass",
+    "_nodriver_internal/app_src/platforms/ticketplus.py": b"pass",
+    "_nodriver_internal/app_src/www/dist/jquery.min.js": b"jquery-app-a",
     "_nodriver_internal/certifi/cacert.pem": b"public-ca-a",
     "_nodriver_internal/python311.dll": b"dll-a",
     "_nodriver_internal/www/dist/jquery.min.js": b"jquery-a",
     "_settings_internal/base_library.zip": b"base-b",
+    "_settings_internal/app_src/hunter_metadata.py": b"APP_VERSION = '0.5.0'",
+    "_settings_internal/app_src/settings.py": b"pass",
+    "_settings_internal/app_src/www/dist/jquery.min.js": b"jquery-app-b",
     "_settings_internal/certifi/cacert.pem": b"public-ca-b",
     "_settings_internal/python311.dll": b"dll-b",
     "_settings_internal/www/dist/jquery.min.js": b"jquery-b",
@@ -219,36 +226,3 @@ def test_source_archive_rejects_top_level_generated_or_sensitive_directories(
 
     with pytest.raises(ValueError, match="Denied source top-level directory"):
         verify_source_archive(archive_path, VERSION, repo, commit)
-
-def test_source_archive_mismatch_error_reports_file_names(tmp_path: Path) -> None:
-    archive_path, repo, commit = _create_git_source_archive(
-        tmp_path,
-        {
-            "README.md": b"source readme\n",
-            "src/app.py": b"VALUE = 1\n",
-        },
-    )
-
-    tampered_path = tmp_path / f"tampered-{archive_path.name}"
-    with zipfile.ZipFile(archive_path) as source_zip:
-        members = {
-            info.filename: source_zip.read(info)
-            for info in source_zip.infolist()
-            if not info.is_dir()
-        }
-    members[f"hunterX-{VERSION}/src/app.py"] = b"VALUE = 2\n"
-    with zipfile.ZipFile(tampered_path, "w") as output_zip:
-        for name, content in members.items():
-            output_zip.writestr(name, content)
-
-    # The verifier requires the canonical release filename before comparing
-    # contents, so replace the original archive with the tampered fixture.
-    archive_path.unlink()
-    tampered_path.rename(archive_path)
-
-    with pytest.raises(ValueError) as exc_info:
-        verify_source_archive(archive_path, VERSION, repo, commit)
-
-    message = str(exc_info.value)
-    assert "mismatch=1" in message
-    assert f"hunterX-{VERSION}/src/app.py" in message

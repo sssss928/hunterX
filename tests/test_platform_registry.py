@@ -32,6 +32,8 @@ def test_hostname_matching_does_not_accept_substring_spoofing() -> None:
 def test_current_dispatch_families_are_resolved() -> None:
     expected = {
         "https://tixcraft.com/activity/detail/demo": "tixcraft",
+        "https://www.ticketmaster.com/event/demo": "tixcraft",
+        "https://www.ticketmaster.co.uk/event/demo": "tixcraft",
         "https://kktix.com/events/demo": "kktix",
         "https://ticket.ibon.com.tw/ActivityInfo/Details/demo": "ibon",
         "https://kham.com.tw/application/UTK02/demo": "kham",

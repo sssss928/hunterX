@@ -90,8 +90,8 @@ def test_settings_frontend_static_version_matches_release() -> None:
     html = Path("src/www/settings.html").read_text(encoding="utf-8")
     js = Path("src/www/settings.js").read_text(encoding="utf-8")
 
-    assert "HunterX (0.4.9)" in html
-    assert "HunterX (0.4.9)" in js
+    assert "HunterX (0.5.0)" in html
+    assert "HunterX (0.5.0)" in js
     assert "HunterX (0.4.4)" not in html
     assert "HunterX (0.4.4)" not in js
     assert "HunterX (0.4.3)" not in html
@@ -109,8 +109,8 @@ def test_release_helpers_and_packaged_readme_match_current_version() -> None:
     quick_start = Path("build_scripts/QUICK_START.md").read_text(encoding="utf-8")
     build_batch = Path("build_scripts/build_and_test.bat").read_text(encoding="utf-8")
 
-    assert "hunterX_windows_0.4.9.zip" in release_readme
-    assert "hunterX_windows_0.4.9.zip" in quick_start
+    assert "hunterX_windows_0.5.0.zip" in release_readme
+    assert "hunterX_windows_0.5.0.zip" in quick_start
     assert "hunterX_windows_%VERSION%.zip" in build_batch
     assert "project-version --metadata src\\hunter_metadata.py" in build_batch
     assert "validate-project-version --version" in build_batch
