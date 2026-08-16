@@ -121,30 +121,37 @@ def test_release_helpers_and_packaged_readme_match_current_version() -> None:
 
 def test_windows_build_isolates_runtimes_and_packages_license() -> None:
     build_script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
+    baseline_builder = Path("scripts/build_windows_from_base.py").read_text(
+        encoding="utf-8"
+    )
     build_batch = Path("build_scripts/build_and_test.bat").read_text(encoding="utf-8")
     bot_spec = Path("build_scripts/nodriver_tixcraft.spec").read_text(encoding="utf-8")
     settings_spec = Path("build_scripts/settings.spec").read_text(encoding="utf-8")
 
     assert build_script.count("$LASTEXITCODE -ne 0") >= 3
-    assert "nodriver_tixcraft PyInstaller build failed" in build_script
-    assert "settings PyInstaller build failed" in build_script
-    assert 'Test-Path -LiteralPath "LICENSE"' in build_script
-    assert 'Copy-Item -LiteralPath "LICENSE"' in build_script
-    assert "Copy-DirectoryFailClosed" in build_script
+    assert "Verified v0.4.9 Windows baseline archive is missing" in build_script
+    assert "python scripts/build_windows_from_base.py" in build_script
+    assert "--base-archive $ResolvedBaseArchive" in build_script
+    assert '"LEGAL_NOTICE.md"' in baseline_builder
+    assert '"LICENSE"' in baseline_builder
+    assert "extract_verified_baseline" in baseline_builder
+    assert "stage_application_source" in baseline_builder
+    assert "repack_entrypoints" in baseline_builder
+    assert "verify_windows_archive" in baseline_builder
+    assert '"_nodriver_internal"' in baseline_builder
+    assert '"_settings_internal"' in baseline_builder
     assert 'contents_directory=\'_nodriver_internal\'' in bot_spec
     assert 'contents_directory=\'_settings_internal\'' in settings_spec
-    assert 'dist\\nodriver_tixcraft\\_nodriver_internal' in build_script
-    assert 'dist\\settings\\_settings_internal' in build_script
-    assert 'Join-Path $PackageDir "_nodriver_internal"' in build_script
-    assert 'Join-Path $PackageDir "_settings_internal"' in build_script
     assert "python -m pytest" in build_batch
     assert "python -m pip_audit" in build_batch
+    assert 'BASE_ARCHIVE=dist\\base\\hunterX_windows_0.4.9.zip' in build_batch
+    assert '-BaseArchive "%BASE_ARCHIVE%"' in build_batch
     assert 'dist\\nodriver_tixcraft\\_internal' not in build_script
     assert 'dist\\settings\\_internal' not in build_script
     assert "taskkill" not in build_batch.lower()
     assert "tasklist" not in build_batch.lower()
-    assert 'Join-Path $PackageDir "_internal"' not in build_script
-    assert "Merge-DirectoryFailClosed" not in build_script
+    assert '"_internal"' not in baseline_builder
+    assert "Merge-DirectoryFailClosed" not in baseline_builder
     assert "Merging _internal directories" not in build_batch
     assert "playsound_pathex" not in bot_spec
     assert "playsound_pathex" not in settings_spec

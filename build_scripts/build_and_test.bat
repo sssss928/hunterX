@@ -27,6 +27,13 @@ if not defined VERSION (
     exit /b 1
 )
 
+if not defined BASE_ARCHIVE set "BASE_ARCHIVE=dist\base\hunterX_windows_0.4.9.zip"
+if not exist "%BASE_ARCHIVE%" (
+    echo [ERROR] Verified v0.4.9 Windows baseline not found: %BASE_ARCHIVE%
+    echo [ERROR] Download hunterX_windows_0.4.9.zip from the official v0.4.9 release first.
+    exit /b 1
+)
+
 python scripts\release_utils.py validate-project-version --version "%VERSION%" --metadata src\hunter_metadata.py
 if errorlevel 1 exit /b 1
 
@@ -59,7 +66,7 @@ python -m bandit -r src scripts -lll -c pyproject.toml
 if errorlevel 1 exit /b 1
 
 echo [7/8] Building through the canonical PowerShell workflow...
-powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\build_windows.ps1" -Version "%VERSION%"
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\build_windows.ps1" -Version "%VERSION%" -BaseArchive "%BASE_ARCHIVE%"
 if errorlevel 1 exit /b 1
 
 set "ZIP_NAME=hunterX_windows_%VERSION%.zip"
