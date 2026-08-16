@@ -1,23 +1,21 @@
 Project: HunterX
 Repository: https://github.com/sssss928/hunterX
-Artifact version: v0.4.9
-Base version: uploaded v0.4.7 SOURCE; official v0.4.8 compatibility baseline
-Git branch: candidate/v0.4.9
-Git commit SHA: recorded in the external candidate BUILD_INFO.txt
-Official v0.4.8 release commit: 94bc78862000170537331446196effd6a031b86e
-Audited main commit: 65496f56c59dc0a71f42f74e8ac76fa5899194fc
-Build date/time: 2026-08-12 (Asia/Taipei)
+Artifact version: v0.5.0
+Base tag: v0.4.9
+Base commit: b362df5d007d4cdb827e41ef98e100e6ffe3e4a6
+Base source ZIP SHA-256: FD4DB20E648698246C56D42024192CB44C29AAA5C942E832BE2811633B692920
+Base Windows ZIP SHA-256: 9482BE6A6E8E5DE39DDC19E7D95C088B7412F1F6FA6FB2D79CE2FC1E128EB666
+Change scope: TicketPlus refresh scheduling, failure-dialog handling, outcome liveness,
+              URL dispatch hardening, tests, and release packaging
+Unchanged scope: existing date/area/ticket/quantity selection, allow_less_tickets,
+                 CAPTCHA/manual fallback, queue/challenge boundaries, checkout/payment
+                 handoff, notifications, profiles, multi-instance behavior, and the
+                 original v0.4.9 TixCraft scheduled-refresh safety state machine
+Build date: 2026-08-16
 Timezone: Asia/Taipei (UTC+08:00)
-Python: 3.11.9
-pip: 26.1.2
-PyInstaller: 6.21.0
-Zendriver: 0.15.3
-requirements lock SHA-256: 718DB9A6D9256B4BE0239D44FFD8268A778C5FFBBEF518FE2750D4B933A16D7E
-requirement.txt SHA-256: F19E3BF76DB6FD6AAE0939BAE0D5798715424B8E6F8AA8B96952A7481DFFBAC5
-Operating system: Windows 10.0.26200 (64-bit)
-Build command: scripts\build_windows.ps1 -Version 0.4.9
-Source ZIP SHA-256: recorded in SHA256SUMS_v0.4.9.txt
-Windows ZIP SHA-256: recorded in SHA256SUMS_v0.4.9.txt
+Target Windows runtime: CPython 3.11 x64 / PyInstaller dual-executable layout
+requirements lock SHA-256: C2CBCF91CD7B234E064E6DC40B6F5C261233C08C6F7A7728D7E95AFCBE7DCB2F
+requirement.txt SHA-256: 970BE9534684995439FDD970BC4A99193712A4B634B4B6214802C5E0F98CFB48
+Native Windows build command: scripts\build_windows.ps1 -Version 0.5.0
 
-The ZIP hashes are external because embedding an archive's own final digest
-inside that archive would change the digest.
+Final archive SHA-256 values are recorded in SHA256SUMS_v0.5.0.txt.

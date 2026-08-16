@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.5.0
+
+- Restore the normal Windows distribution layout with directly launchable
+  `settings.exe` and `nodriver_tixcraft.exe`, plus their separate
+  `_settings_internal` and `_nodriver_internal` runtimes. The release ZIP no
+  longer requires Python installation or `run_*.bat` launchers.
+- Correct TicketPlus route ownership so `/order/...` ticket selection permits
+  scheduled and interval refreshes while confirmation, checkout, payment,
+  queues and unknown sensitive routes remain protected.
+- Replace TicketPlus blocking refresh sleeps and the unbounded post-submit
+  queue loop with monotonic deadlines and a single-submit outcome state
+  machine.
+- Detect, click and verify closure of TicketPlus purchase-failure dialogs;
+  distinguish failure overlays from queues and retry rejected inventory using
+  the active onsale or leak-watch interval.
+- Resolve JavaScript/CDP navigation disagreement by purchase-stage progression,
+  preserving valid live URLs when cached target data is stale.
+- Expand exact Ticketmaster country-domain dispatch and explicit PyInstaller
+  hidden imports for the shared runtime graph.
+- Add deterministic TicketPlus refresh, popup, queue, protected-route and
+  duplicate-submit regression coverage.
+
 ## v0.4.9
 
 - Build Windows releases with canonical root-relative ZIP members and reject

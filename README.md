@@ -9,10 +9,10 @@ Hunter is a maintained fork of [`bouob/tickets_hunter`](https://github.com/bouob
 
 This repository is not the upstream Tickets Hunter project. It is a HunterX fork maintained at [`sssss928/hunterX`](https://github.com/sssss928/hunterX). Upstream credit remains with the original Tickets Hunter maintainers and contributors. HunterX uses its own versioning, release assets, issue tracker, CI, and documentation.
 
-Current fork version: `HunterX (0.4.9)`
+Current fork version: `HunterX (0.5.0)`
 
-See [`RELEASE_NOTES_v0.4.9.md`](RELEASE_NOTES_v0.4.9.md) for the reliability
-refresh and soft-lock fixes,
+See [`RELEASE_NOTES_v0.5.0.md`](RELEASE_NOTES_v0.5.0.md) for the TicketPlus
+refresh/outcome fixes and shared dispatch hardening,
 [`guide/v0.4.9-operations.md`](guide/v0.4.9-operations.md) for setup and runtime
 diagnostics, and
 [`docs/04-implementation/platform-capability-matrix-v0.4.9.md`](docs/04-implementation/platform-capability-matrix-v0.4.9.md)
@@ -76,13 +76,13 @@ pip-audit -r requirement.txt
 The release package is built with PyInstaller and contains the Windows executables plus shared assets:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Version 0.4.9
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Version 0.5.0
 ```
 
 Expected output:
 
 ```text
-dist/release/hunterX_windows_0.4.9.zip
+dist/release/hunterX_windows_0.5.0.zip
 ```
 
 ## GitHub Releases
@@ -91,12 +91,12 @@ Users can download packaged Windows builds from:
 
 [`https://github.com/sssss928/hunterX/releases`](https://github.com/sssss928/hunterX/releases)
 
-For `v0.4.9`, the expected release artifacts are:
+For `v0.5.0`, the expected release artifacts are:
 
 ```text
-hunterX_windows_0.4.9.zip
-hunterX_source_0.4.9.zip
-SHA256SUMS_v0.4.9.txt
+hunterX_windows_0.5.0.zip
+hunterX_source_0.5.0.zip
+SHA256SUMS_v0.5.0.txt
 ```
 
 Extract the Windows ZIP on a Windows computer and run `settings.exe` to configure the application.
