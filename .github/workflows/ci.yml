@@ -120,18 +120,59 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Unable to read the project version (python exit code $LASTEXITCODE)."
           }
+
           $Version = ($VersionOutput | Out-String).Trim()
+
           $ArtifactNameOutput = & python scripts/release_utils.py artifact-name --version $Version
           if ($LASTEXITCODE -ne 0) {
             throw "Unable to resolve the artifact name (python exit code $LASTEXITCODE)."
           }
+
           $ArtifactName = ($ArtifactNameOutput | Out-String).Trim()
+
           "version=$Version" >> $env:GITHUB_OUTPUT
           "artifact_name=$ArtifactName" >> $env:GITHUB_OUTPUT
 
+      - name: Download and verify v0.5.0 Windows baseline
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $BaseDir = "dist/base"
+          $BaseArchive = Join-Path $BaseDir "hunterX_windows_0.5.0.zip"
+          $ExpectedSha256 = "400fe2732a1289acab4035ba341511a7695b942eb11ba8d7622842c3d24b9d1b"
+
+          New-Item -ItemType Directory -Path $BaseDir -Force | Out-Null
+
+          gh release download v0.5.0 `
+            --repo "${{ github.repository }}" `
+            --pattern "hunterX_windows_0.5.0.zip" `
+            --dir $BaseDir `
+            --clobber
+
+          if (-not (Test-Path -LiteralPath $BaseArchive -PathType Leaf)) {
+            throw "The v0.5.0 Windows baseline release asset was not downloaded."
+          }
+
+          $ActualSha256 = (
+            Get-FileHash -LiteralPath $BaseArchive -Algorithm SHA256
+          ).Hash.ToLowerInvariant()
+
+          if ($ActualSha256 -cne $ExpectedSha256) {
+            throw "The v0.5.0 Windows baseline SHA-256 does not match the approved artifact. Expected '$ExpectedSha256', got '$ActualSha256'."
+          }
+
+          Write-Host "Verified HunterX v0.5.0 Windows baseline."
+          Write-Host "SHA-256: $ActualSha256"
+
       - name: Build Windows package
         shell: pwsh
-        run: ./scripts/build_windows.ps1 -Version "${{ steps.project.outputs.version }}"
+        run: |
+          ./scripts/build_windows.ps1 `
+            -Version "${{ steps.project.outputs.version }}" `
+            -BaseArchive "dist/base/hunterX_windows_0.5.0.zip"
 
       - name: Upload build smoke artifact
         continue-on-error: true
