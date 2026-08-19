@@ -27,10 +27,10 @@ if not defined VERSION (
     exit /b 1
 )
 
-if not defined BASE_ARCHIVE set "BASE_ARCHIVE=dist\base\hunterX_windows_0.4.9.zip"
+if not defined BASE_ARCHIVE set "BASE_ARCHIVE=dist\base\hunterX_windows_0.5.0.zip"
 if not exist "%BASE_ARCHIVE%" (
-    echo [ERROR] Verified v0.4.9 Windows baseline not found: %BASE_ARCHIVE%
-    echo [ERROR] Download hunterX_windows_0.4.9.zip from the official v0.4.9 release first.
+    echo [ERROR] Verified v0.5.0 Windows runtime not found: %BASE_ARCHIVE%
+    echo [ERROR] Download hunterX_windows_0.5.0.zip from the official v0.5.0 release first.
     exit /b 1
 )
 
