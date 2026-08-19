@@ -137,32 +137,32 @@ jobs:
           }
           "release_commit=$ReleaseCommit" >> $env:GITHUB_OUTPUT
 
-      - name: Download and verify v0.4.9 Windows baseline
+      - name: Download and verify v0.5.0 Windows baseline
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
           $BaseDir = "dist/base"
-          $BaseArchive = Join-Path $BaseDir "hunterX_windows_0.4.9.zip"
-          $ExpectedSha256 = "9482be6a6e8e5de39ddc19e7d95c088b7412f1f6fa6fb2d79ce2fc1e128eb666"
+          $BaseArchive = Join-Path $BaseDir "hunterX_windows_0.5.0.zip"
+          $ExpectedSha256 = "400fe2732a1289acab4035ba341511a7695b942eb11ba8d7622842c3d24b9d1b"
           New-Item -ItemType Directory -Path $BaseDir -Force | Out-Null
-          gh release download v0.4.9 `
+          gh release download v0.5.0 `
             --repo "${{ github.repository }}" `
-            --pattern "hunterX_windows_0.4.9.zip" `
+            --pattern "hunterX_windows_0.5.0.zip" `
             --dir $BaseDir `
             --clobber
           if (-not (Test-Path -LiteralPath $BaseArchive -PathType Leaf)) {
-            throw "The v0.4.9 Windows baseline release asset was not downloaded."
+            throw "The v0.5.0 Windows baseline release asset was not downloaded."
           }
           $ActualSha256 = (Get-FileHash -LiteralPath $BaseArchive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($ActualSha256 -cne $ExpectedSha256) {
-            throw "The v0.4.9 Windows baseline SHA-256 does not match the approved artifact."
+            throw "The v0.5.0 Windows baseline SHA-256 does not match the approved artifact."
           }
 
       - name: Build Windows package
         shell: pwsh
-        run: ./scripts/build_windows.ps1 -Version "${{ needs.validate.outputs.version }}" -BaseArchive "dist/base/hunterX_windows_0.4.9.zip"
+        run: ./scripts/build_windows.ps1 -Version "${{ needs.validate.outputs.version }}" -BaseArchive "dist/base/hunterX_windows_0.5.0.zip"
 
       - name: Upload verified Windows release asset
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
