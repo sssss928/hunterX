@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import runtime_health
-from page_classifier import PageClass
-from platform_adapters import adapter_for_url
+from page_classifier import PageClass, classify_page
+from platform_adapters import adapter_for_key, adapter_for_url
 from platform_contract import (
     PlatformAdapter,
     PlatformRuntimeState,
@@ -26,6 +26,10 @@ class DispatchDecision:
     reason: str
     page_class: PageClass
     adapter: PlatformAdapter | None
+
+    @property
+    def platform_key(self) -> str | None:
+        return self.adapter.key if self.adapter is not None else None
 
 
 class PlatformEngine:
@@ -105,6 +109,29 @@ class PlatformEngine:
             ):
                 state.reset_attempt()
 
+    def _external_queue_owner(self, tab: Any) -> PlatformAdapter | None:
+        """Return one existing per-tab owner for a protected external queue.
+
+        External waiting-room hosts are intentionally absent from the platform
+        registry.  Preserve ownership only when exactly one platform on this
+        same tab already has an unresolved submit or guarded retry.  This keeps
+        state bounded without assigning arbitrary queue pages to a platform.
+        """
+
+        owners: list[PlatformAdapter] = []
+        for key, state in self._tab_states(tab).items():
+            state.backfill()
+            data = state.platform_data
+            if not state.previous_url or not (
+                data.get("submission_pending", False)
+                or data.get("failure_retry_pending", False)
+            ):
+                continue
+            adapter = adapter_for_key(key)
+            if adapter is not None:
+                owners.append(adapter)
+        return owners[0] if len(owners) == 1 else None
+
     def before_dispatch(
         self,
         tab: Any,
@@ -115,12 +142,21 @@ class PlatformEngine:
         now: float | None = None,
     ) -> DispatchDecision:
         adapter = adapter_for_url(url)
+        is_external_queue = (
+            adapter is None and classify_page(url, text) is PageClass.QUEUE
+        )
+        if is_external_queue:
+            adapter = self._external_queue_owner(tab)
         if adapter is None:
             self._reset_inactive_families(tab, None)
             clear_active_platform_state()
             return DispatchDecision(False, "unsupported_host", PageClass.UNKNOWN, None)
 
-        page_class = adapter.classify_page(url, text)
+        page_class = (
+            PageClass.QUEUE
+            if is_external_queue
+            else adapter.classify_page(url, text)
+        )
         self._reset_inactive_families(tab, adapter.key)
         state = self.state_for(tab, adapter)
         previous_page = state.current_page

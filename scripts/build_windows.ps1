@@ -30,7 +30,7 @@ $ResolvedBaseArchive = [System.IO.Path]::GetFullPath(
     (Join-Path $ProjectRoot $BaseArchive)
 )
 if (-not (Test-Path -LiteralPath $ResolvedBaseArchive -PathType Leaf)) {
-    throw "Verified v0.4.9 Windows baseline archive is missing: '$ResolvedBaseArchive'."
+    throw "Verified v0.5.0 Windows baseline archive is missing: '$ResolvedBaseArchive'."
 }
 
 $ArtifactNameOutput = & python scripts/release_utils.py artifact-name --version $Version
@@ -46,7 +46,7 @@ $PackageDir = Join-Path $ProjectRoot "dist\hunterX"
 $ReleaseDir = Join-Path $ProjectRoot "dist\release"
 $ArtifactPath = Join-Path $ReleaseDir $ArtifactName
 
-Write-Host "Building HunterX $Version from verified HunterX v0.4.9 Windows baseline"
+Write-Host "Building HunterX $Version as an overlay on the verified HunterX v0.5.0 Windows runtime"
 Write-Host "Baseline: $ResolvedBaseArchive"
 Write-Host "Artifact: $ArtifactPath"
 
@@ -57,7 +57,7 @@ python scripts/build_windows_from_base.py `
     --package-dir $PackageDir `
     --output $ArtifactPath
 if ($LASTEXITCODE -ne 0) {
-    throw "Windows v0.4.9-baseline build failed (python exit code $LASTEXITCODE)."
+    throw "Windows v0.5.0-runtime overlay build failed (python exit code $LASTEXITCODE)."
 }
 
 & cscript.exe //nologo scripts/verify_windows_shell_zip.js $ArtifactPath

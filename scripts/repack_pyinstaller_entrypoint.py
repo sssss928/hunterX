@@ -8,7 +8,7 @@ replacement script loads HunterX application modules from ``app_src`` inside
 the executable's existing PyInstaller contents directory.
 
 The helper must run with the same Python major/minor version as the packaged
-runtime.  HunterX v0.5.0 Windows packages use CPython 3.11.
+runtime. HunterX v0.5.1 Windows packages use CPython 3.11.
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ class _HunterXExternalSourceFinder(importlib.abc.MetaPathFinder):
 
 
 if not os.path.isfile(_HUNTERX_ENTRY):
-    raise RuntimeError("HunterX v0.5.0 application source is missing: " + _HUNTERX_ENTRY)
+    raise RuntimeError("HunterX v0.5.1 application source is missing: " + _HUNTERX_ENTRY)
 
 sys.meta_path.insert(0, _HunterXExternalSourceFinder())
 sys.path.insert(0, _HUNTERX_APP_SRC)

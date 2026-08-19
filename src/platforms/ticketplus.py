@@ -12,6 +12,7 @@ import urllib.parse
 from zendriver import cdp
 
 import util
+from page_classifier import PageClass, classify_page
 from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
@@ -53,6 +54,16 @@ __all__ = [
 _state = PlatformStateProxy("ticketplus")
 
 
+# Submission-outcome polling is deliberately independent from the user's
+# inventory refresh interval. These short monotonic deadlines only protect one
+# already-dispatched submit attempt; they do not change sale/leak-watch cadence.
+CONST_TICKETPLUS_SUBMISSION_SOFT_TIMEOUT = 30.0
+CONST_TICKETPLUS_FAILURE_BLOCKED_PROBE_INTERVAL = 0.15
+CONST_TICKETPLUS_SUBMISSION_PENDING_PROBE_INTERVAL = 0.20
+CONST_TICKETPLUS_QUEUE_PROBE_INTERVAL = 1.0
+CONST_TICKETPLUS_QUEUE_MONITOR_MAX = 600.0
+
+
 def _ticketplus_state_defaults():
     return {
         "fail_list": [],
@@ -71,9 +82,12 @@ def _ticketplus_state_defaults():
         "failure_retry_text": "",
         "failure_retry_last_log": 0.0,
         "submission_pending": False,
+        "submission_started_at": 0.0,
         "submission_deadline": 0.0,
         "submission_next_probe_at": 0.0,
         "queue_active": False,
+        "queue_started_at": 0.0,
+        "queue_deadline": 0.0,
     }
 
 
@@ -1871,9 +1885,32 @@ def _ticketplus_queue_evidence_is_active(result):
 
     if not isinstance(result, dict) or result.get("hasFailureDialog", False):
         return False
+    dialog_texts = result.get("visibleDialogTexts", [])
+    if not isinstance(dialog_texts, (list, tuple)):
+        dialog_texts = []
+    failure_keywords = (
+        "購票失敗",
+        "已售完",
+        "別人搶先一步",
+        "已無可配座位",
+        "本活動有限制購票總張數",
+        "無法購票",
+    )
+    if any(
+        keyword in str(dialog_text)
+        for dialog_text in dialog_texts
+        for keyword in failure_keywords
+    ):
+        return False
+    has_queue_dialog_text = any(
+        keyword in str(dialog_text)
+        for dialog_text in dialog_texts
+        for keyword in ("排隊", "請稍候")
+    )
     found_keywords = result.get("foundKeywords", [])
     return bool(
         result.get("hasQueueDialog", False)
+        or has_queue_dialog_text
         or result.get("explicitQueueRoute", False)
         or (isinstance(found_keywords, (list, tuple)) and found_keywords)
     )
@@ -1906,19 +1943,41 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
                     '\u7121\u6cd5\u8cfc\u7968'
                 ];
 
-                const bodyText = document.body.textContent || '';
+                function isVisible(el) {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        style.opacity !== '0' &&
+                        el.getAttribute('aria-hidden') !== 'true' &&
+                        rect.width > 0 && rect.height > 0;
+                }
+
+                // innerText excludes display:none/hidden queue templates.  Fall
+                // back only when the browser does not expose innerText at all.
+                const bodyText = typeof document.body.innerText === 'string'
+                    ? document.body.innerText
+                    : (document.body.textContent || '');
 
                 const hasQueueKeyword = queueKeywords.some(keyword => bodyText.includes(keyword));
 
                 const overlayScrim = document.querySelector('.v-overlay__scrim');
-                const hasOverlay = overlayScrim && overlayScrim.style.opacity === '1';
+                const hasOverlay = !!(overlayScrim && isVisible(overlayScrim));
 
-                const dialogText = document.querySelector('.v-dialog')?.textContent || '';
-                const hasQueueDialog = dialogText.includes('\u6392\u968a') ||
-                                       dialogText.includes('\u8acb\u7a0d\u5019');
-                const hasFailureDialog = failureKeywords.some(
-                    keyword => dialogText.includes(keyword)
+                const dialogs = Array.from(document.querySelectorAll(
+                    '[role="dialog"], .v-dialog, .v-dialog__content, .v-overlay__content'
+                )).filter(isVisible);
+                const dialogTexts = dialogs.map(
+                    dialog => (dialog.textContent || '').trim()
                 );
+                const hasFailureDialog = dialogTexts.some(text =>
+                    failureKeywords.some(keyword => text.includes(keyword))
+                );
+                const queueDialogText = dialogTexts.find(text =>
+                    text.includes('\u6392\u968a') || text.includes('\u8acb\u7a0d\u5019')
+                ) || '';
+                const hasQueueDialog = !hasFailureDialog && queueDialogText.length > 0;
 
                 const currentUrl = String(window.location.href || '').toLowerCase();
                 const explicitQueueRoute =
@@ -1940,7 +1999,8 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
                     hasQueueDialog: hasQueueDialog,
                     hasFailureDialog: hasFailureDialog,
                     explicitQueueRoute: explicitQueueRoute,
-                    dialogText: hasQueueDialog ? dialogText.trim() : ''
+                    dialogText: hasQueueDialog ? queueDialogText : '',
+                    visibleDialogTexts: dialogTexts
                 };
             })();
         ''')
@@ -1949,6 +2009,8 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
 
         if isinstance(result, dict):
             is_in_queue = _ticketplus_queue_evidence_is_active(result)
+            if result.get("hasFailureDialog", False):
+                debug.log("[QUEUE] Visible failure dialog vetoed queue classification")
             if is_in_queue and force_show_debug:
                 debug.log("[QUEUE] Queue status detected")
                 if result.get('hasOverlay'):
@@ -1974,19 +2036,25 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
 
 def _ticketplus_clear_submission_watch():
     _state["submission_pending"] = False
+    _state["submission_started_at"] = 0.0
     _state["submission_deadline"] = 0.0
     _state["submission_next_probe_at"] = 0.0
     _state["queue_active"] = False
+    _state["queue_started_at"] = 0.0
+    _state["queue_deadline"] = 0.0
 
 
 def _ticketplus_arm_submission_watch():
     now = time.monotonic()
     _state["submission_pending"] = True
-    # This is a liveness deadline, not a ticket-site timeout. A genuine queue
-    # is allowed to extend it while it remains positively identified.
-    _state["submission_deadline"] = now + 30.0
+    _state["submission_started_at"] = now
+    # This soft liveness deadline slides only while positive queue evidence is
+    # observed. The queue hard deadline below never slides.
+    _state["submission_deadline"] = now + CONST_TICKETPLUS_SUBMISSION_SOFT_TIMEOUT
     _state["submission_next_probe_at"] = now
     _state["queue_active"] = False
+    _state["queue_started_at"] = 0.0
+    _state["queue_deadline"] = 0.0
 
 
 def _ticketplus_schedule_failure_retry(config_dict, dialog_text=""):
@@ -2034,11 +2102,40 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
         return False
 
     now = time.monotonic()
+    if _state.get("queue_active", False):
+        queue_deadline = float(_state.get("queue_deadline", 0.0) or 0.0)
+        if queue_deadline > 0.0 and now >= queue_deadline:
+            debug.log(
+                "[QUEUE] TicketPlus queue hard deadline reached; scheduling a "
+                "guarded inventory recovery"
+            )
+            _ticketplus_schedule_failure_retry(
+                config_dict,
+                "queue monitoring hard deadline",
+            )
+            return True
+
+    # Deadline checks intentionally precede the throttle and DOM/CDP outcome
+    # probe. A blocked popup or stalled queue therefore cannot trigger one more
+    # expensive probe after its bounded ownership window has expired.
+    deadline = float(_state.get("submission_deadline", 0.0) or 0.0)
+    if deadline > 0.0 and now >= deadline:
+        debug.log(
+            "[SUBMIT] TicketPlus outcome soft deadline reached; scheduling a "
+            "guarded inventory recovery"
+        )
+        _ticketplus_schedule_failure_retry(
+            config_dict,
+            "submission outcome soft deadline",
+        )
+        return True
+
     next_probe_at = float(_state.get("submission_next_probe_at", 0.0) or 0.0)
     if not force and now < next_probe_at:
         return True
 
     outcome = await _ticketplus_probe_submission_outcome(tab, config_dict, debug)
+    now = time.monotonic()
     status = outcome.get("status", "unknown")
     if status == "confirmed":
         debug.log("[SUBMIT] TicketPlus confirmation route observed")
@@ -2053,17 +2150,56 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
     if status == "failure_blocked":
         # Keep ownership of the submitted attempt and retry only the exact
         # failure dialog on the next bounded probe. Never submit underneath it.
-        _state["submission_next_probe_at"] = now + 0.15
+        deadline = float(_state.get("submission_deadline", 0.0) or 0.0)
+        if deadline > 0.0 and now >= deadline:
+            _ticketplus_schedule_failure_retry(
+                config_dict,
+                "blocked failure dialog soft deadline",
+            )
+            return True
+        _state["submission_next_probe_at"] = min(
+            now + CONST_TICKETPLUS_FAILURE_BLOCKED_PROBE_INTERVAL,
+            deadline,
+        )
         return True
     if status == "queue":
         if not _state.get("queue_active", False):
             debug.log("[QUEUE] TicketPlus queue positively identified")
+            _state["queue_started_at"] = now
+            _state["queue_deadline"] = now + CONST_TICKETPLUS_QUEUE_MONITOR_MAX
+        else:
+            queue_deadline = float(_state.get("queue_deadline", 0.0) or 0.0)
+            if queue_deadline > 0.0 and now >= queue_deadline:
+                _ticketplus_schedule_failure_retry(
+                    config_dict,
+                    "queue monitoring hard deadline",
+                )
+                return True
+            if queue_deadline <= 0.0:
+                # Upgrade state created by older runtimes without weakening the
+                # fixed fuse for state that already has one.
+                queue_started_at = float(
+                    _state.get("queue_started_at", 0.0) or now
+                )
+                _state["queue_started_at"] = queue_started_at
+                _state["queue_deadline"] = (
+                    queue_started_at + CONST_TICKETPLUS_QUEUE_MONITOR_MAX
+                )
         _state["queue_active"] = True
-        _state["submission_deadline"] = now + 30.0
-        _state["submission_next_probe_at"] = now + 1.0
+        queue_deadline = float(_state.get("queue_deadline", 0.0) or 0.0)
+        _state["submission_deadline"] = min(
+            now + CONST_TICKETPLUS_SUBMISSION_SOFT_TIMEOUT,
+            queue_deadline,
+        )
+        _state["submission_next_probe_at"] = min(
+            now + CONST_TICKETPLUS_QUEUE_PROBE_INTERVAL,
+            queue_deadline,
+        )
         return True
 
-    _state["submission_next_probe_at"] = now + 0.20
+    _state["submission_next_probe_at"] = (
+        now + CONST_TICKETPLUS_SUBMISSION_PENDING_PROBE_INTERVAL
+    )
     deadline = float(_state.get("submission_deadline", 0.0) or 0.0)
     if status == "unknown":
         # A transient CDP result must not release submit ownership and create a
@@ -2468,6 +2604,15 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
 
     _ensure_ticketplus_state_defaults()
 
+    # A top-level waiting-room navigation remains a manual/protected boundary.
+    # If this tab already owns a submitted attempt, keep only its bounded,
+    # read-only outcome watcher alive.  Never select tickets, submit, refresh,
+    # or navigate while the queue route is active.
+    if classify_page(url) is PageClass.QUEUE:
+        if _state.get("submission_pending", False):
+            await _ticketplus_handle_submission_watch(tab, config_dict, debug)
+        return _get_status()
+
     home_url = 'https://ticketplus.com.tw/'
     is_user_signin = False
     if home_url == url.lower():
@@ -2523,9 +2668,19 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
         if is_event_page:
             _state["start_time"] = time.monotonic()
 
-            # Resolve a previous submit before Vue readiness or ticket
-            # selection. This prevents a visible rejection dialog from being
-            # treated as a queue overlay and prevents duplicate submissions.
+            # An armed submit owns this real order route. Its outcome resolver
+            # applies confirmation > failure > queue > pending precedence and
+            # must run before the generic popup sanitizer below.
+            if _state.get("submission_pending", False):
+                await _ticketplus_handle_submission_watch(tab, config_dict, debug)
+                return _get_status()
+
+            # A previously rejected attempt owns the route until its existing
+            # mode-aware guarded inventory refresh completes.
+            if await _ticketplus_handle_failure_retry(tab, config_dict, debug):
+                return _get_status()
+
+            # Sanitize a stale failure dialog when no submit attempt is active.
             failure_result = await _ticketplus_order_failure_action(tab, debug)
             failure_status = failure_result.get("status", "unknown")
             if failure_status == "dismissed":
@@ -2534,16 +2689,21 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
                     failure_result.get("dialog_text", ""),
                 )
                 return _get_status()
-            if failure_status in {"blocked", "unknown"}:
+            if failure_status == "blocked":
+                _ticketplus_schedule_failure_retry(
+                    config_dict,
+                    failure_result.get("dialog_text", ""),
+                )
                 debug.log(
-                    "[ORDER FAIL][DEGRADED] Failure dialog could not be safely "
-                    "resolved; skipping order submission this cycle"
+                    "[ORDER FAIL][DEGRADED] Stale failure dialog is blocked; "
+                    "scheduling guarded inventory recovery"
                 )
                 return _get_status()
-
-            if await _ticketplus_handle_submission_watch(tab, config_dict, debug):
-                return _get_status()
-            if await _ticketplus_handle_failure_retry(tab, config_dict, debug):
+            if failure_status == "unknown":
+                debug.log(
+                    "[ORDER FAIL][DEGRADED] Failure dialog state is unavailable; "
+                    "skipping order submission this cycle"
+                )
                 return _get_status()
 
             is_first_visit = not _state.get("order_page_visited", False)

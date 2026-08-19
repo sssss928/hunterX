@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import tarfile
 import zipfile
@@ -151,10 +152,19 @@ def verify_windows_archive(path: Path, version: str) -> dict[str, object]:
     archive, entries = _open_checked_zip(path)
     try:
         required = {
+            "BUILD_INFO.txt",
             "CHANGELOG.md",
+            "CODEX_MASTER_PROMPT_v0.5.1.md",
+            "FINAL_CROSS_AUDIT_v0.5.1.md",
+            "IMPLEMENTATION_DIFF_v0.5.1_FINAL.md",
             "LICENSE",
             "README.md",
             "README_Release.txt",
+            "RELEASE_NOTES_v0.5.1.md",
+            "RELEASE_NOTES_v0.5.1_FINAL.md",
+            "TEST_REPORT_v0.5.1.md",
+            "TEST_REPORT_v0.5.1_FINAL.md",
+            "WINDOWS_PACKAGE_zh-TW.txt",
             "nodriver_tixcraft.exe",
             "settings.exe",
             "www/css/settings.css",
@@ -184,6 +194,23 @@ def verify_windows_archive(path: Path, version: str) -> dict[str, object]:
         for executable_name in ("settings.exe", "nodriver_tixcraft.exe"):
             if archive.read(entries[executable_name])[:2] != b"MZ":
                 raise ValueError(f"Windows executable is not a PE file: {executable_name}")
+        version_pattern = re.compile(
+            rb"(?m)^APP_VERSION\s*=\s*['\"]" + re.escape(version.encode("ascii")) + rb"['\"]\s*$"
+        )
+        for metadata_name in (
+            "_nodriver_internal/app_src/hunter_metadata.py",
+            "_settings_internal/app_src/hunter_metadata.py",
+        ):
+            if version_pattern.search(archive.read(entries[metadata_name])) is None:
+                raise ValueError(
+                    f"Windows archive runtime version mismatch: {metadata_name}"
+                )
+        display_version = f"HunterX ({version})".encode("utf-8")
+        for frontend_name in ("www/settings.html", "www/settings.js"):
+            if display_version not in archive.read(entries[frontend_name]):
+                raise ValueError(
+                    f"Windows archive frontend version mismatch: {frontend_name}"
+                )
         expected_name = f"hunterX_windows_{version}.zip"
         if path.name != expected_name:
             raise ValueError(

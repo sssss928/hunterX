@@ -2341,8 +2341,8 @@ async def _run_main(args, resources):
 
         # Establish task-local, per-tab platform state before any paused,
         # scheduled or recovery callback can dispatch platform helpers.
-        platform_key = platform_key_for_url(url)
         platform_decision = platform_engine.before_dispatch(tab, url, config_dict)
+        platform_key = platform_decision.platform_key
         if (
             platform_decision.adapter is not None
             and not platform_decision.allowed
