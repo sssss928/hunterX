@@ -11,20 +11,29 @@ from verify_release_archive import verify_source_archive, verify_windows_archive
 
 VERSION = "0.4.7"
 REQUIRED_WINDOWS_FILES = {
+    "BUILD_INFO.txt": b"build",
     "CHANGELOG.md": b"changes",
+    "CODEX_MASTER_PROMPT_v0.5.1.md": b"instructions",
+    "FINAL_CROSS_AUDIT_v0.5.1.md": b"final audit",
+    "IMPLEMENTATION_DIFF_v0.5.1_FINAL.md": b"implementation diff",
     "LICENSE": b"license",
     "README.md": b"readme",
     "README_Release.txt": b"release readme",
+    "RELEASE_NOTES_v0.5.1.md": b"release notes",
+    "RELEASE_NOTES_v0.5.1_FINAL.md": b"final release notes",
+    "TEST_REPORT_v0.5.1.md": b"test report",
+    "TEST_REPORT_v0.5.1_FINAL.md": b"final test report",
+    "WINDOWS_PACKAGE_zh-TW.txt": b"windows package",
     "nodriver_tixcraft.exe": b"MZbot",
     "settings.exe": b"MZsettings",
     "www/css/settings.css": b"css",
     "www/favicon.ico": b"ico",
-    "www/settings.html": b"html",
-    "www/settings.js": b"js",
+    "www/settings.html": b"HunterX (0.4.7)",
+    "www/settings.js": b"HunterX (0.4.7)",
     "www/dist/jquery.min.js": b"jquery",
     "assets/icon.png": b"png",
     "_nodriver_internal/base_library.zip": b"base-a",
-    "_nodriver_internal/app_src/hunter_metadata.py": b"APP_VERSION = '0.5.0'",
+    "_nodriver_internal/app_src/hunter_metadata.py": b"APP_VERSION = '0.4.7'",
     "_nodriver_internal/app_src/nodriver_tixcraft.py": b"pass",
     "_nodriver_internal/app_src/platforms/ticketplus.py": b"pass",
     "_nodriver_internal/app_src/www/dist/jquery.min.js": b"jquery-app-a",
@@ -32,7 +41,7 @@ REQUIRED_WINDOWS_FILES = {
     "_nodriver_internal/python311.dll": b"dll-a",
     "_nodriver_internal/www/dist/jquery.min.js": b"jquery-a",
     "_settings_internal/base_library.zip": b"base-b",
-    "_settings_internal/app_src/hunter_metadata.py": b"APP_VERSION = '0.5.0'",
+    "_settings_internal/app_src/hunter_metadata.py": b"APP_VERSION = '0.4.7'",
     "_settings_internal/app_src/settings.py": b"pass",
     "_settings_internal/app_src/www/dist/jquery.min.js": b"jquery-app-b",
     "_settings_internal/certifi/cacert.pem": b"public-ca-b",
@@ -182,6 +191,16 @@ def test_windows_archive_requires_both_runtime_trees(tmp_path: Path) -> None:
     _write_zip(archive_path, files)
 
     with pytest.raises(ValueError, match="missing required"):
+        verify_windows_archive(archive_path, VERSION)
+
+
+def test_windows_archive_rejects_embedded_runtime_version_mismatch(tmp_path: Path) -> None:
+    archive_path = tmp_path / f"hunterX_windows_{VERSION}.zip"
+    files = dict(REQUIRED_WINDOWS_FILES)
+    files["_settings_internal/app_src/hunter_metadata.py"] = b"APP_VERSION = '9.9.9'"
+    _write_zip(archive_path, files)
+
+    with pytest.raises(ValueError, match="runtime version mismatch"):
         verify_windows_archive(archive_path, VERSION)
 
 

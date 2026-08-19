@@ -50,7 +50,7 @@ def _leak_config(interval: float = 3.0) -> dict:
 
 def test_ticketplus_order_selection_allows_scheduled_reload() -> None:
     async def scenario() -> tuple[_ReloadTab, bool]:
-        tab = _ReloadTab("https://ticketplus.com.tw/order/event/session/tickets")
+        tab = _ReloadTab("https://ticketplus.com.tw/order/event/session")
         coordinator = platform_engine.refresh_coordinator_for(tab)
         coordinator.arm_scheduled(
             "ticketplus-sale-boundary",
@@ -71,7 +71,7 @@ def test_ticketplus_order_selection_allows_scheduled_reload() -> None:
 
 def test_ticketplus_order_selection_allows_periodic_reload_once_per_window() -> None:
     async def scenario() -> tuple[_ReloadTab, bool, bool]:
-        tab = _ReloadTab("https://ticketplus.com.tw/order/event/session/tickets")
+        tab = _ReloadTab("https://ticketplus.com.tw/order/event/session")
         first = await guarded_reload(
             tab,
             reason="ticketplus_periodic_test",
@@ -101,8 +101,8 @@ def test_ticketplus_confirm_routes_and_unknown_routes_remain_protected() -> None
         return tab, result
 
     for url in (
-        "https://ticketplus.com.tw/confirm/event/session/tickets",
-        "https://ticketplus.com.tw/confirmseat/event/session/tickets",
+        "https://ticketplus.com.tw/confirm/event/session",
+        "https://ticketplus.com.tw/confirmseat/event/session",
         "https://ticketplus.com.tw/unrecognized-sensitive-route",
     ):
         tab, result = asyncio.run(scenario(url))
@@ -201,7 +201,7 @@ def test_ticketplus_refresh_deadline_is_nonblocking_and_mode_aware(monkeypatch) 
     monkeypatch.setattr(ticketplus, "_ticketplus_refresh_inventory", refresh)
     ticketplus._state.clear()
     ticketplus._ensure_ticketplus_state_defaults()
-    tab = _ReloadTab("https://ticketplus.com.tw/order/event/session/tickets")
+    tab = _ReloadTab("https://ticketplus.com.tw/order/event/session")
     debug = _Debug()
 
     async def request(config: dict) -> bool:
@@ -234,6 +234,7 @@ def test_pending_submission_owns_order_route_and_prevents_duplicate_submit(monke
     ticketplus._ensure_ticketplus_state_defaults()
     ticketplus._ticketplus_arm_submission_watch()
     order_calls: list[int] = []
+    probe_calls: list[int] = []
 
     async def not_paused(_config) -> bool:
         return False
@@ -242,6 +243,7 @@ def test_pending_submission_owns_order_route_and_prevents_duplicate_submit(monke
         return {"status": "absent", "dialog_text": ""}
 
     async def still_pending(_tab, _config, _debug):
+        probe_calls.append(1)
         return {"status": "pending", "dialog_text": ""}
 
     async def order(*_args, **_kwargs) -> None:
@@ -252,7 +254,8 @@ def test_pending_submission_owns_order_route_and_prevents_duplicate_submit(monke
     monkeypatch.setattr(ticketplus, "_ticketplus_probe_submission_outcome", still_pending)
     monkeypatch.setattr(ticketplus, "nodriver_ticketplus_order", order)
 
-    tab = _ReloadTab("https://ticketplus.com.tw/order/event/session/tickets")
+    tab = _ReloadTab("https://ticketplus.com.tw/order/event/session")
+    assert ticketplus._ticketplus_path_segment_count(tab.url) == 6
     config = _onsale_config(2.0)
     for _ in range(2):
         asyncio.run(
@@ -266,6 +269,7 @@ def test_pending_submission_owns_order_route_and_prevents_duplicate_submit(monke
         )
 
     assert order_calls == []
+    assert probe_calls == [1]
     assert ticketplus._state["submission_pending"] is True
 
 
@@ -283,7 +287,7 @@ def test_unknown_submission_outcome_expires_into_guarded_inventory_retry(monkeyp
     clock["now"] = 330.01
     handled = asyncio.run(
         ticketplus._ticketplus_handle_submission_watch(
-            _ReloadTab("https://ticketplus.com.tw/order/event/session/tickets"),
+            _ReloadTab("https://ticketplus.com.tw/order/event/session"),
             _onsale_config(2.0),
             _Debug(),
             force=True,

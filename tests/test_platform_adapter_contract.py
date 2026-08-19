@@ -159,3 +159,58 @@ def test_engine_state_is_separated_by_tab_and_platform():
     assert first.adapter is not None and second.adapter is not None
     assert engine.state_for(first_tab, first.adapter) is not engine.state_for(second_tab, second.adapter)
     assert engine.state_count == 2
+
+
+def test_external_queue_preserves_exact_per_tab_submission_owner():
+    engine = PlatformEngine()
+    owner_tab = _Tab("https://ticketplus.com.tw/order/event/session")
+    order = engine.before_dispatch(owner_tab, owner_tab.target.url, _leak_config())
+    assert order.adapter is not None and order.adapter.key == "ticketplus"
+    owner_state = engine.state_for(owner_tab, order.adapter)
+    owner_state.platform_data.update(
+        {
+            "submission_pending": True,
+            "submission_deadline": 130.0,
+            "submission_next_probe_at": 101.0,
+        }
+    )
+
+    queue_url = "https://tenant.queue-it.net/?queue=waiting"
+    queue = engine.before_dispatch(owner_tab, queue_url, _leak_config())
+    assert queue.allowed is True
+    assert queue.page_class is PageClass.QUEUE
+    assert queue.platform_key == "ticketplus"
+    assert engine.state_for(owner_tab, queue.adapter) is owner_state
+    assert owner_state.platform_data["submission_pending"] is True
+
+    unrelated_tab = _Tab(queue_url)
+    unsupported = engine.before_dispatch(unrelated_tab, queue_url, _leak_config())
+    assert unsupported.allowed is False
+    assert unsupported.adapter is None
+    assert unsupported.platform_key is None
+    assert owner_state.platform_data["submission_pending"] is True
+
+
+def test_external_queue_preserves_guarded_retry_until_provider_return():
+    engine = PlatformEngine()
+    tab = _Tab("https://ticketplus.com.tw/order/event/session")
+    order = engine.before_dispatch(tab, tab.target.url, _leak_config())
+    assert order.adapter is not None
+    state = engine.state_for(tab, order.adapter)
+    state.platform_data["failure_retry_pending"] = True
+
+    queue = engine.before_dispatch(
+        tab,
+        "https://tenant.queue-it.net/?queue=waiting",
+        _leak_config(),
+    )
+    assert queue.platform_key == "ticketplus"
+    assert state.platform_data["failure_retry_pending"] is True
+
+    returned = engine.before_dispatch(
+        tab,
+        "https://ticketplus.com.tw/order/event/session",
+        _leak_config(),
+    )
+    assert returned.platform_key == "ticketplus"
+    assert state.platform_data["failure_retry_pending"] is True

@@ -33,10 +33,11 @@ def test_release_workflow_has_required_triggers_permissions_and_artifact() -> No
     assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in workflow
     assert "needs.build-assets.outputs.release_commit" in workflow
     assert "--verify-manifest" in workflow
-    assert "gh release download v0.4.9" in workflow
-    assert "hunterX_windows_0.4.9.zip" in workflow
-    assert "9482be6a6e8e5de39ddc19e7d95c088b7412f1f6fa6fb2d79ce2fc1e128eb666" in workflow
-    assert '-BaseArchive "dist/base/hunterX_windows_0.4.9.zip"' in workflow
+    assert "gh release download v0.5.0" in workflow
+    assert "hunterX_windows_0.5.0.zip" in workflow
+    assert "400fe2732a1289acab4035ba341511a7695b942eb11ba8d7622842c3d24b9d1b" in workflow
+    assert '-BaseArchive "dist/base/hunterX_windows_0.5.0.zip"' in workflow
+    assert "hunterX_windows_0.4.9.zip" not in workflow
     assert "RELEASE_INPUT_VERSION: ${{ inputs.version }}" in workflow
     assert '--input-version "${{ inputs.version }}"' not in workflow
     assert "0.1.0" not in workflow
@@ -97,7 +98,7 @@ def test_windows_build_script_requires_metadata_version_match() -> None:
     baseline_builder = (REPO_ROOT / "scripts/build_windows_from_base.py").read_text(
         encoding="utf-8"
     )
-    assert "BASELINE_VERSION = \"0.4.9\"" in baseline_builder
+    assert "BASELINE_VERSION = \"0.5.0\"" in baseline_builder
     assert "BASELINE_SHA256" in baseline_builder
     assert "stage_application_source" in baseline_builder
     assert "repack_entrypoints" in baseline_builder

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import pytest
 from build_windows_from_base import (
     BASELINE_ARCHIVE_NAME,
     extract_verified_baseline,
+    promote_staged_package,
+    snapshot_release_source,
     stage_application_source,
 )
 
@@ -53,3 +56,66 @@ def test_extract_verified_baseline_rejects_wrong_filename(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="must be named"):
         extract_verified_baseline(archive_path, tmp_path / "output")
+
+
+def test_snapshot_release_source_uses_exact_committed_bytes(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "release-test@example.invalid"],
+        cwd=project_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Release Test"],
+        cwd=project_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=project_root,
+        check=True,
+    )
+    source = project_root / "release.txt"
+    source.write_bytes(b"committed\r\nbytes\r\n")
+    subprocess.run(["git", "add", "release.txt"], cwd=project_root, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "fixture"],
+        cwd=project_root,
+        check=True,
+    )
+    committed = subprocess.check_output(
+        ["git", "show", "HEAD:release.txt"],
+        cwd=project_root,
+    )
+    source.write_bytes(b"working-tree\nbytes\n")
+
+    snapshot = snapshot_release_source(project_root, tmp_path / "snapshot")
+
+    assert (snapshot / "release.txt").read_bytes() == committed
+    assert (snapshot / "release.txt").read_bytes() != source.read_bytes()
+
+
+def test_promote_staged_package_retries_transient_windows_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "staged"
+    destination = tmp_path / "package"
+    source.mkdir()
+    (source / "settings.exe").write_bytes(b"MZ")
+    original_replace = Path.replace
+    calls: list[int] = []
+
+    def flaky_replace(path: Path, target: Path) -> Path:
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError("transient scanner lock")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    monkeypatch.setattr("build_windows_from_base.time.sleep", lambda _seconds: None)
+    promote_staged_package(source, destination)
+    assert len(calls) == 3
+    assert (destination / "settings.exe").read_bytes() == b"MZ"
