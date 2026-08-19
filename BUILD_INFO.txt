@@ -1,21 +1,28 @@
 Project: HunterX
 Repository: https://github.com/sssss928/hunterX
-Artifact version: v0.5.0
-Base tag: v0.4.9
-Base commit: b362df5d007d4cdb827e41ef98e100e6ffe3e4a6
-Base source ZIP SHA-256: FD4DB20E648698246C56D42024192CB44C29AAA5C942E832BE2811633B692920
-Base Windows ZIP SHA-256: 9482BE6A6E8E5DE39DDC19E7D95C088B7412F1F6FA6FB2D79CE2FC1E128EB666
-Change scope: TicketPlus refresh scheduling, failure-dialog handling, outcome liveness,
-              URL dispatch hardening, tests, and release packaging
+Artifact version: v0.5.1
+Only code base: official HunterX v0.5.0 release source
+Base tag: v0.5.0
+Base commit: a68a8fefd67420afd1925eb6f62e89bfe791ec45
+Base source ZIP SHA-256: 7DBCF41FF6591AFC9E2B43D52ADF4970E69A84E10347AEA2B1B4B81B4564F4C4
+Base Windows ZIP SHA-256: 400FE2732A1289ACAB4035BA341511A7695B942EB11BA8D7622842C3D24B9D1B
+Reference only: bouob/tickets_hunter v2026.08.17 commit 1b053c4a705c41238aa365ff7960d1afe1a7987c
+Reference comparison start: v2026.08.07 commit 5793ee6daba562c42c902a1b84625528e421f849
+Change scope: TicketPlus failure-dialog precedence, bounded submission ownership,
+              non-sliding queue hard fuse, per-tab external waiting-room ownership,
+              mode-aware guarded recovery, tests, release metadata and packaging
+              verification
 Unchanged scope: existing date/area/ticket/quantity selection, allow_less_tickets,
-                 CAPTCHA/manual fallback, queue/challenge boundaries, checkout/payment
-                 handoff, notifications, profiles, multi-instance behavior, and the
-                 original v0.4.9 TixCraft scheduled-refresh safety state machine
-Build date: 2026-08-16
+                 CAPTCHA/manual fallback, challenge and checkout/payment boundaries,
+                 notifications, profiles, multi-instance behavior, TixCraft,
+                 Ticketmaster and KKTIX production implementations
+Build date: 2026-08-19
 Timezone: Asia/Taipei (UTC+08:00)
-Target Windows runtime: CPython 3.11 x64 / PyInstaller dual-executable layout
-requirements lock SHA-256: C2CBCF91CD7B234E064E6DC40B6F5C261233C08C6F7A7728D7E95AFCBE7DCB2F
-requirement.txt SHA-256: 970BE9534684995439FDD970BC4A99193712A4B634B4B6214802C5E0F98CFB48
-Native Windows build command: scripts\build_windows.ps1 -Version 0.5.0
+Target Windows runtime: CPython 3.11 x64 / isolated dual-executable PyInstaller layout
+Windows packaging method: commit-exact v0.5.1 source snapshot overlay on verified official v0.5.0 Windows runtime
+Native Windows build command: scripts\build_windows.ps1 -Version 0.5.1 -BaseArchive dist\base\hunterX_windows_0.5.0.zip
 
-Final archive SHA-256 values are recorded in SHA256SUMS_v0.5.0.txt.
+Final-audited release evidence is in FINAL_CROSS_AUDIT_v0.5.1.md,
+TEST_REPORT_v0.5.1_FINAL.md and IMPLEMENTATION_DIFF_v0.5.1_FINAL.md.
+Final archive SHA-256 values are recorded beside the deliverables in
+SHA256SUMS_v0.5.1_FINAL.txt (outside the source ZIP to avoid a circular hash).

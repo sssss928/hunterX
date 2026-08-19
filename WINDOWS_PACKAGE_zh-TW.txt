@@ -1,4 +1,4 @@
-HunterX 0.5.0 Windows 成品包
+HunterX 0.5.1 Windows 成品包
 ============================
 
 這是可直接執行的 64 位元 Windows 版本，不需要另外安裝 Python，也不需要
@@ -6,7 +6,7 @@ HunterX 0.5.0 Windows 成品包
 
 使用方式：
 
-1. 將 hunterX_windows_0.5.0.zip 完整解壓縮到一般資料夾。
+1. 將 hunterX_windows_0.5.1.zip 完整解壓縮到一般資料夾。
 2. 保留 settings.exe、nodriver_tixcraft.exe、_settings_internal、
    _nodriver_internal、assets 與 www 的相對位置，不要只複製單一 EXE。
 3. 雙擊 settings.exe 開啟設定介面。

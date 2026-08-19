@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.5.1
+
+- Preserve a submitted TicketPlus attempt across a same-tab external Queue-it
+  waiting-room redirect, while leaving an unrelated or ambiguous Queue-it tab
+  unsupported. The waiting room remains read-only and platform-controlled.
+- Cap every queue soft deadline and next-probe deadline at the fixed 600-second
+  hard fuse; deadline checks run before any DOM/CDP probe.
+- Restrict body queue wording to visible `innerText`, scan all visible dialogs,
+  and make any visible failure phrase veto queue evidence.
+- Give an active TicketPlus submit attempt first ownership of the real order
+  route and enforce confirmation > failure > queue > pending precedence.
+- Inspect every visible Vuetify/dialog container for purchase failures and veto
+  queue classification even when overlays, body keywords and queue routes are
+  present together.
+- Add monotonic submission start, queue start and fixed queue deadline state;
+  positive queue observations slide only the 30-second soft deadline while a
+  non-sliding 600-second hard fuse guarantees recovery.
+- Bound blocked failure-dialog ownership, preserve no-duplicate-submit safety,
+  and reuse the mode-aware partial-refresh-first guarded inventory retry.
+- Correct TicketPlus fixtures to the real `/order/<event>/<session>` route and
+  add deterministic negative, throttling, hard-fuse and long-run regressions.
+- Rebase release metadata, verification and Windows overlay packaging on the
+  official HunterX v0.5.0 release assets without replacing HunterX architecture.
+- Synchronize the GitHub release workflow with the verified v0.5.0 Windows
+  baseline filename and SHA-256, and require final cross-audit documents in the
+  packaged Windows artifact.
+- Build the Windows overlay from the same commit-exact Git snapshot as the
+  source ZIP so both packaged `app_src` trees have byte-identical provenance.
+
 ## v0.5.0
 
 - Restore the normal Windows distribution layout with directly launchable

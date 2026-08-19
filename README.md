@@ -9,10 +9,13 @@ Hunter is a maintained fork of [`bouob/tickets_hunter`](https://github.com/bouob
 
 This repository is not the upstream Tickets Hunter project. It is a HunterX fork maintained at [`sssss928/hunterX`](https://github.com/sssss928/hunterX). Upstream credit remains with the original Tickets Hunter maintainers and contributors. HunterX uses its own versioning, release assets, issue tracker, CI, and documentation.
 
-Current fork version: `HunterX (0.5.0)`
+Current fork version: `HunterX (0.5.1)`
 
-See [`RELEASE_NOTES_v0.5.0.md`](RELEASE_NOTES_v0.5.0.md) for the TicketPlus
-refresh/outcome fixes and shared dispatch hardening,
+See [`RELEASE_NOTES_v0.5.1.md`](RELEASE_NOTES_v0.5.1.md) for the bounded
+TicketPlus submission/queue liveness hardening,
+[`FINAL_CROSS_AUDIT_v0.5.1.md`](FINAL_CROSS_AUDIT_v0.5.1.md) for the completed
+four-way candidate audit, and
+[`TEST_REPORT_v0.5.1_FINAL.md`](TEST_REPORT_v0.5.1_FINAL.md) for exact final gates,
 [`guide/v0.4.9-operations.md`](guide/v0.4.9-operations.md) for setup and runtime
 diagnostics, and
 [`docs/04-implementation/platform-capability-matrix-v0.4.9.md`](docs/04-implementation/platform-capability-matrix-v0.4.9.md)
@@ -76,13 +79,13 @@ pip-audit -r requirement.txt
 The release package is built with PyInstaller and contains the Windows executables plus shared assets:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Version 0.5.0
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Version 0.5.1 -BaseArchive dist/base/hunterX_windows_0.5.0.zip
 ```
 
 Expected output:
 
 ```text
-dist/release/hunterX_windows_0.5.0.zip
+dist/release/hunterX_windows_0.5.1.zip
 ```
 
 ## GitHub Releases
@@ -91,12 +94,13 @@ Users can download packaged Windows builds from:
 
 [`https://github.com/sssss928/hunterX/releases`](https://github.com/sssss928/hunterX/releases)
 
-For `v0.5.0`, the expected release artifacts are:
+For `v0.5.1`, the expected release artifacts are:
 
 ```text
-hunterX_windows_0.5.0.zip
-hunterX_source_0.5.0.zip
-SHA256SUMS_v0.5.0.txt
+hunterX_windows_0.5.1.zip
+hunterX_source_0.5.1.zip
+SHA256SUMS_v0.5.1.txt
+TEST_REPORT_v0.5.1.md
 ```
 
 Extract the Windows ZIP on a Windows computer and run `settings.exe` to configure the application.
