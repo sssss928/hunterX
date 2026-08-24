@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 from zendriver import cdp
 
+import runtime_health
 from platforms.common_async import bounded_poll
 
 
@@ -90,7 +91,8 @@ async def nodriver_facebook_login(tab: Any, facebook_account: str, facebook_pass
         await password.send_keys(facebook_password)
         await _send_enter(tab)
         return True
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         LOGGER.exception("Facebook login failed")
         return False
 

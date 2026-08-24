@@ -18,6 +18,7 @@ import webbrowser
 from zendriver import cdp
 
 import util
+import runtime_health
 from platform_contract import PlatformStateProxy
 from platform_registry import platform_key_for_url
 from platforms.common_async import get_auto_reload_interval
@@ -127,6 +128,7 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
             await guarded_reload(tab, reason="legacy_platform_reload")
             return True
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"{log_prefix} Reload failed: {exc}")
             return False
 
@@ -167,7 +169,8 @@ async def nodriver_kktix_check_queue_page(tab, config_dict):
         if isinstance(result, dict):
             is_queue_page = bool(result.get('isQueue', False))
             wait_text = result.get('waitText', '')
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     if is_queue_page:
@@ -206,6 +209,7 @@ async def nodriver_kktix_signin_diagnostic(tab):
             })()
         ''')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         return {"state": "connection_error", "error_type": type(exc).__name__}
 
     if not isinstance(snapshot, dict):
@@ -307,6 +311,7 @@ async def nodriver_kktix_signin(tab, url, config_dict):
                         debug.log(f"[KKTIX SIGNIN] Login completed after {attempt * check_interval:.1f}s, redirected to: {current_url}")
                         break
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     if attempt == max_attempts - 1:
                         debug.log(f"[KKTIX SIGNIN] Error checking URL: {exc}")
 
@@ -338,9 +343,11 @@ async def nodriver_kktix_signin(tab, url, config_dict):
                     else:
                         debug.log(f"[KKTIX SIGNIN] Already on target page: {current_url}")
             except Exception as redirect_error:
+                runtime_health.raise_if_terminal_browser_error(redirect_error)
                 debug.log(f"[KKTIX SIGNIN] Redirect failed: {redirect_error}")
 
         except Exception as e:
+            runtime_health.raise_if_terminal_browser_error(e)
             debug.log(f"[KKTIX SIGNIN] {e}")
             pass
 
@@ -367,7 +374,8 @@ async def nodriver_kktix_redirect_to_signin_if_guest(tab, url, config_dict):
         is_guest = bool(await tab.evaluate(
             "!!document.querySelector('li.not-signed-in:not(.hidden)')"
         ))
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
     if not is_guest:
         return False
@@ -388,6 +396,7 @@ async def nodriver_kktix_redirect_to_signin_if_guest(tab, url, config_dict):
                 reason="kktix_guest_signin",
             )
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[KKTIX] Redirect to sign_in failed: {exc}")
 
     return True
@@ -451,6 +460,7 @@ async def nodriver_kktix_travel_price_list(tab, config_dict, kktix_area_auto_sel
         if not isinstance(ticket_price_list, list):
             ticket_price_list = None
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         ticket_price_list = None
         debug.log(f"[KKTIX] find ticket-price Exception: {exc}")
         pass
@@ -764,6 +774,7 @@ async def nodriver_kktix_assign_ticket_number(tab, config_dict, kktix_area_keywo
                     debug.log(f"Error in nodriver_kktix_assign_ticket_number: {error_msg}")
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"Error in nodriver_kktix_assign_ticket_number: {exc}")
 
     # 票數分配後檢查暫停
@@ -850,7 +861,7 @@ async def nodriver_kktix_reg_captcha(tab, config_dict, fail_list, registrationsN
                                 input.focus();
                                 input.value = "";
 
-                                const answer = "{inferred_answer_string}";
+                                const answer = {json.dumps(inferred_answer_string)};
                                 for (let i = 0; i < answer.length; i++) {{
                                     input.value += answer[i];
                                     input.dispatchEvent(new Event('input', {{ bubbles: true }}));
@@ -894,6 +905,7 @@ async def nodriver_kktix_reg_captcha(tab, config_dict, fail_list, registrationsN
                             debug.log(f"Input filling failed: {error_msg}")
 
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log(f"Captcha retry {retry_count + 1} failed: {exc}")
 
                     # 重試前的等待
@@ -1006,6 +1018,7 @@ async def debug_kktix_page_state(tab, show_debug=True):
         return state
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         error_state = {
             'success': False,
             'error': f'Exception in debug_kktix_page_state: {exc}',
@@ -1045,6 +1058,7 @@ async def nodriver_kktix_date_auto_select(tab, config_dict):
                 debug.log(f"[KKTIX DATE] Found {len(session_list)} sessions after {attempt * check_interval:.1f}s")
                 break
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             if attempt == max_attempts - 1:
                 debug.log(f"[KKTIX DATE] Error querying session list: {exc}")
 
@@ -1057,7 +1071,8 @@ async def nodriver_kktix_date_auto_select(tab, config_dict):
                     if direct_button:
                         debug.log("[KKTIX DATE] Single-session page detected (no event-list, direct button found), skipping date select")
                         return False
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
         if attempt < max_attempts - 1:
@@ -1083,7 +1098,8 @@ async def nodriver_kktix_date_auto_select(tab, config_dict):
                 if date_elem:
                     date_text = await date_elem.get_html()
                     date_text = util.remove_html_tags(date_text).strip()
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
             if not date_text:
@@ -1093,7 +1109,8 @@ async def nodriver_kktix_date_auto_select(tab, config_dict):
                     if date_elem:
                         date_text = await date_elem.get_html()
                         date_text = util.remove_html_tags(date_text).strip()
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
 
             # Check if button exists
@@ -1106,6 +1123,7 @@ async def nodriver_kktix_date_auto_select(tab, config_dict):
                     formated_session_list_text.append(date_text)
                     debug.log(f"[KKTIX DATE] Available session: {date_text}")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[KKTIX DATE] Error processing session: {exc}")
             continue
 
@@ -1210,6 +1228,7 @@ async def nodriver_kktix_date_auto_select(tab, config_dict):
             is_date_clicked = True
             debug.log(f"[KKTIX DATE SELECT] Session selection completed successfully")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[KKTIX DATE SELECT] Click error: {exc}")
 
     return is_date_clicked
@@ -1244,6 +1263,7 @@ async def nodriver_kktix_events_press_next_button(tab, config_dict=None):
             return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[KKTIX] Error clicking events next button: {exc}")
         return False
 
@@ -1331,6 +1351,7 @@ async def nodriver_kktix_check_guest_modal(tab, config_dict, force_check=False):
                     debug.log("[KKTIX GUEST MODAL] Guest modal not present")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[ERROR] Guest modal check failed: {exc}")
 
     return is_modal_handled
@@ -1381,6 +1402,7 @@ async def nodriver_kktix_dismiss_failure_modal(tab, config_dict):
             debug.log("[KKTIX MODAL] Could not find dismiss button, signaling reload")
             return True
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[KKTIX MODAL] Error checking failure modal: {exc}")
     return False
 
@@ -1502,6 +1524,7 @@ async def nodriver_kktix_check_form_state(tab, config_dict):
             f"[KKTIX FORM STATE] Unexpected result {type(result).__name__}"
         )
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[KKTIX FORM STATE] Read failed: {type(exc).__name__}")
     return _kktix_default_form_state()
 
@@ -1543,7 +1566,8 @@ async def nodriver_kktix_wait_member_code_enabled(
         try:
             if util.parse_nodriver_result(await tab.evaluate(script)) is True:
                 return True
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
         await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
     debug.log("[KKTIX QUALIFICATION] Member-code field did not become enabled")
@@ -1646,7 +1670,8 @@ async def nodriver_kktix_handle_qualification_and_next(
             and "/new" not in current_url
         ):
             return False
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         current_url = ""
     pressed = await nodriver_kktix_press_next_button(tab, config_dict)
     if pressed:
@@ -1749,7 +1774,8 @@ async def nodriver_kktix_press_next_button(tab, config_dict=None):
                     try:
                         await tab.send(cdp.page.handle_java_script_dialog(accept=True))
                         debug.log("[KKTIX] Alert dismissed after processing")
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass  # 沒有 alert 就忽略
 
                     try:
@@ -1758,7 +1784,8 @@ async def nodriver_kktix_press_next_button(tab, config_dict=None):
                         if '/registrations/' in current_url and '-' in current_url and '/new' not in current_url:
                             debug.log(f"Processing completed, redirected to order page")
                             return True
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
 
                     # 如果還沒跳轉，可能還在處理，返回成功
@@ -1774,7 +1801,8 @@ async def nodriver_kktix_press_next_button(tab, config_dict=None):
                     try:
                         await tab.send(cdp.page.handle_java_script_dialog(accept=True))
                         debug.log("[KKTIX] Alert dismissed after button click")
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass  # 沒有 alert 就忽略
 
                     try:
@@ -1783,7 +1811,8 @@ async def nodriver_kktix_press_next_button(tab, config_dict=None):
                         if '/registrations/' in current_url and '-' in current_url and '/new' not in current_url:
                             debug.log(f"Button click completed, redirected to order page")
                             return True
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
 
                     # 如果沒有跳轉，等待原有時間並返回成功
@@ -1801,7 +1830,8 @@ async def nodriver_kktix_press_next_button(tab, config_dict=None):
                         if '/registrations/' in current_url and '-' in current_url and '/new' not in current_url:
                             debug.log(f"System processing but already redirected to order page, considered successful")
                             return True
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
 
                     # 如果是處理中狀態，等待較長時間再重試
@@ -1812,6 +1842,7 @@ async def nodriver_kktix_press_next_button(tab, config_dict=None):
                     continue
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"KKTIX 按鈕點擊例外 (重試 {retry_count + 1}/3): {exc}")
 
     # 所有重試都失敗
@@ -1931,6 +1962,7 @@ async def nodriver_kktix_check_ticket_page_status(tab, config_dict=None):
                 debug.log(f"  Ticket stats: total={stats.get('total')}, notYetOpen={stats.get('notYetOpen')}, soldOut={stats.get('soldOut')}, available={stats.get('available')}")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"Check page status failed: {exc}")
 
     return is_need_refresh
@@ -1962,6 +1994,7 @@ async def nodriver_kktix_reg_new_main(tab, config_dict, fail_list, played_sound_
     try:
         registrationsNewApp_div = await tab.query_selector('#registrationsNewApp')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
         #print("find input fail:", exc)
 
@@ -2139,8 +2172,10 @@ async def nodriver_kktix_reg_new_main(tab, config_dict, fail_list, played_sound_
                                     if config_dict["kktix"]["auto_press_next_step_button"]:
                                         await nodriver_kktix_press_next_button(tab, config_dict)
                             except Exception as exc:
+                                runtime_health.raise_if_terminal_browser_error(exc)
                                 debug.log(f"[KKTIX] Button click attempt failed: {exc}")
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log(f"[KKTIX] Filled fields check failed: {exc}")
 
                 if is_need_refresh:
@@ -2230,6 +2265,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 debug.log(f"[KKTIX ALERT] Alert {action} (attempt {attempt + 1})")
                 break
             except Exception as dismiss_exc:
+                runtime_health.raise_if_terminal_browser_error(dismiss_exc)
                 error_msg = str(dismiss_exc)
                 # CDP -32602 means no dialog is showing (already dismissed by another handler or user)
                 if "No dialog is showing" in error_msg or "-32602" in error_msg:
@@ -2266,6 +2302,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
             url = await tab.evaluate('window.location.href')
             is_url_contain_sign_in = False
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"取得跳轉後 URL 失敗: {exc}")
 
     if not is_url_contain_sign_in:
@@ -2289,7 +2326,8 @@ async def nodriver_kktix_main(tab, url, config_dict):
                             config_dict,
                             reason="kktix_homepage_recovery",
                         )
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
 
         if '#/booking' in url:
@@ -2304,6 +2342,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 try:
                     await guarded_reload(tab, reason="legacy_platform_reload")
                 except Exception as reload_exc:
+                    runtime_health.raise_if_terminal_browser_error(reload_exc)
                     debug.log(f"[KKTIX] Alert-triggered reload failed: {reload_exc}")
                 # Reload is a recovery path, not a terminal state.
                 return False
@@ -2320,6 +2359,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 try:
                     await guarded_reload(tab, reason="legacy_platform_reload")
                 except Exception as reload_exc:
+                    runtime_health.raise_if_terminal_browser_error(reload_exc)
                     debug.log(f"[KKTIX] Post-modal reload failed: {reload_exc}")
                 return False
 
@@ -2335,6 +2375,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                             if not "{{'new.i_read_and_agree_to'" in html_body:
                                 is_dom_ready = True
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 #print(exc)
                 pass
 
@@ -2421,6 +2462,7 @@ async def nodriver_kktix_main(tab, url, config_dict):
                             is_ticket_already_selected = False
 
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[KKTIX CHECK ERROR] {exc}")
                     is_ticket_already_selected = False
 
@@ -2608,6 +2650,7 @@ async def nodriver_kktix_booking_main(tab, config_dict):
                 debug.log("[KKTIX BOOKING] Clicked done - seat confirmed")
                 ret = True
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[KKTIX BOOKING] Error: {exc}")
 
     return ret
@@ -2641,6 +2684,7 @@ async def nodriver_kktix_confirm_order_button(tab, config_dict):
             debug.log("未找到 KKTIX 訂單確認按鈕")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"KKTIX 訂單確認按鈕點擊失敗: {exc}")
 
     return ret
@@ -2773,5 +2817,6 @@ async def nodriver_kktix_order_member_code(tab, config_dict):
             return False
 
     except Exception as e:
+        runtime_health.raise_if_terminal_browser_error(e)
         debug.log(f"[KKTIX MEMBER CODE] Error filling member code: {str(e)}")
         return False

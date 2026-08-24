@@ -22,7 +22,7 @@ from platform_contract import PlatformStateProxy, platform_state_for_tab
 from platform_registry import platform_key_for_url
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
-from runtime_health import guarded_get
+from runtime_health import guarded_get, raise_if_terminal_browser_error
 from nodriver_common import (
     asyncio_sleep_with_pause_check,
     check_and_handle_pause,
@@ -181,6 +181,7 @@ async def _register_ibon_alert_handler_impl(tab, config_dict):
                 debug.log(f"[IBON ALERT] Alert dismissed (attempt {attempt + 1})")
                 break
             except Exception as dismiss_exc:
+                raise_if_terminal_browser_error(dismiss_exc)
                 error_msg = str(dismiss_exc)
                 # CDP -32602 means no dialog is showing (already dismissed by local handler)
                 if "No dialog is showing" in error_msg or "-32602" in error_msg:
@@ -234,6 +235,7 @@ async def dismiss_pending_ibon_dialog(tab, config_dict):
         await tab.send(cdp.page.handle_java_script_dialog(accept=True))
         debug.log("[IBON ALERT] Pending dialog dismissed proactively")
     except Exception as exc:
+        raise_if_terminal_browser_error(exc)
         msg = str(exc)
         if "No dialog is showing" in msg or "-32602" in msg:
             return
@@ -293,6 +295,7 @@ async def nodriver_ibon_login(tab, config_dict, driver):
         return {'success': True, 'reason': 'cookie_set'}
 
     except Exception as cookie_error:
+        raise_if_terminal_browser_error(cookie_error)
         debug.log(f"[IBON LOGIN] Failed to set ibon cookie (NoDriver): {cookie_error}")
         if debug.enabled:
             import traceback
@@ -329,7 +332,8 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
     # Initialize CDP DOM state (required for perform_search to work)
     try:
         await tab.send(cdp.dom.get_document(depth=0, pierce=False))
-    except Exception:
+    except Exception as browser_exc:
+        raise_if_terminal_browser_error(browser_exc)
         pass
 
     # Auto-detect: fast polling until buttons found or timeout
@@ -350,7 +354,8 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
             # Clean up search
             try:
                 await tab.send(cdp.dom.discard_search_results(search_id=search_id))
-            except Exception:
+            except Exception as browser_exc:
+                raise_if_terminal_browser_error(browser_exc)
                 pass
 
             if result_count > 0:
@@ -358,7 +363,8 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
                 elapsed = time.monotonic() - start_time
                 debug.log(f"[IBON DATE PIERCE] Found {result_count} button(s) after {elapsed:.2f}s")
                 break
-        except Exception:
+        except Exception as browser_exc:
+            raise_if_terminal_browser_error(browser_exc)
             pass
 
         await tab.sleep(check_interval)
@@ -374,6 +380,7 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
         root_node_id = doc_result.node_id
         debug.log(f"[IBON DATE PIERCE] Got document root: {root_node_id}")
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON DATE PIERCE] Failed to get document: {e}")
         return False
 
@@ -394,7 +401,8 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
             # Cleanup search
             try:
                 await tab.send(cdp.dom.discard_search_results(search_id=search_id))
-            except Exception:
+            except Exception as browser_exc:
+                raise_if_terminal_browser_error(browser_exc)
                 pass
             return False
 
@@ -408,10 +416,12 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
         # Cleanup search
         try:
             await tab.send(cdp.dom.discard_search_results(search_id=search_id))
-        except Exception:
+        except Exception as browser_exc:
+            raise_if_terminal_browser_error(browser_exc)
             pass
 
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON DATE PIERCE] perform_search failed: {e}")
         return False
 
@@ -448,7 +458,8 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
                     current_node_id = None
                 else:
                     current_node_id = button_node.parent_id  # Start from parent, not button itself
-            except Exception:
+            except Exception as browser_exc:
+                raise_if_terminal_browser_error(browser_exc)
                 current_node_id = None
 
             if current_node_id:
@@ -484,7 +495,8 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
                                 outer_html = await tab.send(cdp.dom.get_outer_html(node_id=current_node_id))
                                 date_context = util.remove_html_tags(outer_html)
                                 break
-                            except Exception:
+                            except Exception as browser_exc:
+                                raise_if_terminal_browser_error(browser_exc)
                                 pass
 
                         # Move up to parent
@@ -493,7 +505,8 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
                         else:
                             break
 
-                    except Exception:
+                    except Exception as browser_exc:
+                        raise_if_terminal_browser_error(browser_exc)
                         break
 
             purchase_buttons.append({
@@ -504,6 +517,7 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
             })
 
         except Exception as e:
+            raise_if_terminal_browser_error(e)
             debug.log(f"[IBON DATE PIERCE] Failed to process button: {e}")
             continue
 
@@ -609,6 +623,7 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
         return True
 
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON DATE PIERCE] Click failed: {e}")
         return False
 
@@ -660,7 +675,8 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
     # IMPORTANT: get_document() must be called before perform_search() to initialize CDP DOM state
     try:
         await tab.send(cdp.dom.get_document(depth=0, pierce=False))
-    except Exception:
+    except Exception as browser_exc:
+        raise_if_terminal_browser_error(browser_exc)
         pass
 
     import time
@@ -682,7 +698,8 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
             # Clean up search
             try:
                 await tab.send(cdp.dom.discard_search_results(search_id=search_id))
-            except Exception:
+            except Exception as browser_exc:
+                raise_if_terminal_browser_error(browser_exc)
                 pass
 
             if result_count > 0:
@@ -690,7 +707,8 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
                 elapsed = time.monotonic() - start_time
                 debug.log(f"[IBON DATE] Found {result_count} purchase button(s) after {elapsed:.2f}s")
                 break
-        except Exception:
+        except Exception as browser_exc:
+            raise_if_terminal_browser_error(browser_exc)
             pass
         await tab.sleep(check_interval)
 
@@ -707,6 +725,7 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
             include_dom_rects=True
         ))
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON DATE] Error capturing snapshot: {e}")
         return False
 
@@ -951,6 +970,7 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
             debug.log("[IBON DATE] Click failed")
 
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON DATE] Error clicking button: {e}")
         is_date_assigned = False
 
@@ -1025,7 +1045,8 @@ async def nodriver_ibon_event_area_auto_select(tab, config_dict, area_keyword_it
         await tab.sleep(wait_time)
         # Reduced second wait (1.5s -> 0.6s) - total now 1.2-1.4s instead of 2.3-2.7s
         await tab.sleep(0.6)
-    except Exception:
+    except Exception as browser_exc:
+        raise_if_terminal_browser_error(browser_exc)
         pass
 
     # Phase 1: Extract all area data using DOMSnapshot (to pierce Shadow DOM if present)
@@ -1216,6 +1237,7 @@ async def nodriver_ibon_event_area_auto_select(tab, config_dict, area_keyword_it
                         area_index += 1
 
     except Exception as exc:
+        raise_if_terminal_browser_error(exc)
         if debug.enabled:
             debug.log(f"[NEW EVENT ERROR] Failed to extract area data: {exc}")
             import traceback
@@ -1367,6 +1389,7 @@ async def nodriver_ibon_event_area_auto_select(tab, config_dict, area_keyword_it
             document = await tab.send(cdp.dom.get_document(depth=-1, pierce=True))
             debug.log(f"[NEW EVENT CDP CLICK] Requested document with pierce=True")
         except Exception as doc_exc:
+            raise_if_terminal_browser_error(doc_exc)
             debug.log(f"[NEW EVENT CDP CLICK] Document request failed: {doc_exc}")
             return is_need_refresh, is_price_assign_by_bot
 
@@ -1388,6 +1411,7 @@ async def nodriver_ibon_event_area_auto_select(tab, config_dict, area_keyword_it
                 await tab.send(cdp.dom.scroll_into_view_if_needed(node_id=node_id))
                 debug.log(f"[NEW EVENT CDP CLICK] Scrolled element into view")
             except Exception as e:
+                raise_if_terminal_browser_error(e)
                 debug.log(f"[NEW EVENT CDP CLICK] Scroll warning: {e}")
 
             # Focus element
@@ -1395,6 +1419,7 @@ async def nodriver_ibon_event_area_auto_select(tab, config_dict, area_keyword_it
                 await tab.send(cdp.dom.focus(node_id=node_id))
                 debug.log(f"[NEW EVENT CDP CLICK] Focused element")
             except Exception as e:
+                raise_if_terminal_browser_error(e)
                 debug.log(f"[NEW EVENT CDP CLICK] Focus warning: {e}")
 
             # Get box model
@@ -1421,6 +1446,7 @@ async def nodriver_ibon_event_area_auto_select(tab, config_dict, area_keyword_it
             debug.log(f"[NEW EVENT SUCCESS] Clicked area: {target_area['areaName']}")
 
         except Exception as resolve_exc:
+            raise_if_terminal_browser_error(resolve_exc)
             if debug.enabled:
                 debug.log(f"[NEW EVENT CDP CLICK] Resolve/click failed: {resolve_exc}")
                 import traceback
@@ -1544,13 +1570,15 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
                 return False, False
 
         except Exception as cf_exc:
+            raise_if_terminal_browser_error(cf_exc)
             debug.log(f"[IBON AREA] Cloudflare/page type check error: {cf_exc}")
             pass
 
         # Initialize CDP DOM state (required for perform_search to work)
         try:
             await tab.send(cdp.dom.get_document(depth=0, pierce=False))
-        except Exception:
+        except Exception as browser_exc:
+            raise_if_terminal_browser_error(browser_exc)
             pass
 
         import time
@@ -1587,7 +1615,8 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
                 # Clean up search
                 try:
                     await tab.send(cdp.dom.discard_search_results(search_id=search_id))
-                except Exception:
+                except Exception as browser_exc:
+                    raise_if_terminal_browser_error(browser_exc)
                     pass
 
                 # Check if TR count is stable (same as last check)
@@ -1602,12 +1631,14 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
                     elapsed = time.monotonic() - start_time
                     debug.log(f"[IBON AREA] Found {tr_count} TR elements after {elapsed:.2f}s")
                     break
-            except Exception:
+            except Exception as browser_exc:
+                raise_if_terminal_browser_error(browser_exc)
                 pass
 
             await tab.sleep(check_interval)
 
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON AREA] Error during auto-detect: {e}")
         pass
 
@@ -1801,6 +1832,7 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
         debug.log(f"[AREA EXTRACT] Found {len(areas_data)} total areas")
 
     except Exception as exc:
+        raise_if_terminal_browser_error(exc)
         if debug.enabled:
             debug.log(f"[ERROR] Failed to extract area data: {exc}")
             import traceback
@@ -1954,6 +1986,7 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
             try:
                 document = await tab.send(cdp.dom.get_document(depth=-1, pierce=True))
             except Exception as doc_exc:
+                raise_if_terminal_browser_error(doc_exc)
                 debug.log(f"[CDP CLICK] Document request failed: {doc_exc}")
                 return is_need_refresh, is_price_assign_by_bot
 
@@ -1971,13 +2004,15 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
                 # Scroll into view
                 try:
                     await tab.send(cdp.dom.scroll_into_view_if_needed(node_id=node_id))
-                except Exception:
+                except Exception as browser_exc:
+                    raise_if_terminal_browser_error(browser_exc)
                     pass  # Scroll not always needed
 
                 # Focus element (ignore focus warnings)
                 try:
                     await tab.send(cdp.dom.focus(node_id=node_id))
-                except Exception:
+                except Exception as browser_exc:
+                    raise_if_terminal_browser_error(browser_exc)
                     pass  # Element may not be focusable
 
                 # Get real-time box model and click
@@ -1997,6 +2032,7 @@ async def nodriver_ibon_area_auto_select(tab, config_dict, area_keyword_item="")
                 debug.log(f"[CLICK SUCCESS] Clicked area: {target_area['areaName']} (id: {target_area['id']})")
 
             except Exception as resolve_exc:
+                raise_if_terminal_browser_error(resolve_exc)
                 if debug.enabled:
                     debug.log(f"[CDP CLICK] Resolve/click failed: {resolve_exc}")
                     import traceback
@@ -2329,6 +2365,7 @@ async def nodriver_ibon_ticket_number_auto_select(tab, config_dict):
                 debug.log(f"[TICKET] Failed: {result_parsed.get('error')}")
 
     except Exception as exc:
+        raise_if_terminal_browser_error(exc)
         if debug.enabled:
             debug.log(f"[TICKET ERROR] Exception: {exc}")
             import traceback
@@ -2359,19 +2396,22 @@ async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, co
 
         try:
             form_verifyCode = await tab.query_selector('input[placeholder*="驗證碼"]')
-        except Exception:
+        except Exception as browser_exc:
+            raise_if_terminal_browser_error(browser_exc)
             pass
 
         if not form_verifyCode:
             try:
                 form_verifyCode = await tab.query_selector('input[value="驗證碼"]')
-            except Exception:
+            except Exception as browser_exc:
+                raise_if_terminal_browser_error(browser_exc)
                 pass
 
         if not form_verifyCode:
             try:
                 form_verifyCode = await tab.query_selector('#ctl00_ContentPlaceHolder1_CHK')
-            except Exception:
+            except Exception as browser_exc:
+                raise_if_terminal_browser_error(browser_exc)
                 pass
 
         if not form_verifyCode:
@@ -2397,7 +2437,8 @@ async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, co
                     return false;
                 })();
             ''')
-        except Exception:
+        except Exception as browser_exc:
+            raise_if_terminal_browser_error(browser_exc)
             pass
 
         if not is_visible:
@@ -2410,7 +2451,8 @@ async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, co
             inputed_value = ""
             try:
                 inputed_value = await form_verifyCode.apply('function (element) { return element.value; }') or ""
-            except Exception:
+            except Exception as browser_exc:
+                raise_if_terminal_browser_error(browser_exc)
                 pass
 
             # If already has value, skip (user manually inputed)
@@ -2424,7 +2466,8 @@ async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, co
                 await form_verifyCode.click()
                 is_verifyCode_editing = True
                 debug.log("[CAPTCHA INPUT] Focused for manual input")
-            except Exception:
+            except Exception as browser_exc:
+                raise_if_terminal_browser_error(browser_exc)
                 pass
             return is_verifyCode_editing, is_form_submitted
 
@@ -2476,6 +2519,7 @@ async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, co
                             await tab.send(cdp.page.handle_java_script_dialog(accept=True))
                             debug.log(f"[CAPTCHA INPUT] Alert dismissed")
                         except Exception as dismiss_exc:
+                            raise_if_terminal_browser_error(dismiss_exc)
                             debug.log(f"[CAPTCHA INPUT] Failed to dismiss alert: {dismiss_exc}")
 
                     # Register alert handler
@@ -2568,6 +2612,7 @@ async def nodriver_ibon_keyin_captcha_code(tab, answer="", auto_submit=False, co
                 performance.record_elapsed(perf_trace, performance.SUBMIT_STAGE, submit_started_ns)
 
         except Exception as exc:
+            raise_if_terminal_browser_error(exc)
             debug.log(f"[CAPTCHA INPUT ERROR] {exc}")
 
     except Exception as exc:
@@ -2605,6 +2650,7 @@ async def nodriver_ibon_refresh_captcha(tab, config_dict):
         debug.log(f"[CAPTCHA REFRESH] Result: {ret}")
 
     except Exception as exc:
+        raise_if_terminal_browser_error(exc)
         debug.log(f"[CAPTCHA REFRESH ERROR] {exc}")
 
     return ret
@@ -2624,7 +2670,8 @@ async def nodriver_ibon_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
     try:
         input_box = await tab.query_selector('input[placeholder*="驗證碼"], input[value="驗證碼"], #ctl00_ContentPlaceHolder1_CHK')
         is_input_box_exist = input_box is not None
-    except Exception:
+    except Exception as browser_exc:
+        raise_if_terminal_browser_error(browser_exc)
         pass
 
     if not is_input_box_exist:
@@ -2850,7 +2897,8 @@ async def nodriver_ibon_captcha(tab, config_dict, ocr):
                     try:
                         await tab.send(cdp.page.handle_java_script_dialog(accept=True))
                         debug.log("[IBON CAPTCHA] Dismissed existing alert")
-                    except Exception:
+                    except Exception as browser_exc:
+                        raise_if_terminal_browser_error(browser_exc)
                         pass
 
                     # IMPORTANT: iBon auto-refreshes captcha after alert dismiss
@@ -2910,6 +2958,7 @@ async def nodriver_ibon_purchase_button_press(tab, config_dict):
                         debug.log(f"[IBON PURCHASE] Successfully clicked button with selector: {selector}")
                         break
             except Exception as exc:
+                raise_if_terminal_browser_error(exc)
                 debug.log(f"[IBON PURCHASE] Selector {selector} failed: {exc}")
                 continue
 
@@ -2956,6 +3005,7 @@ async def nodriver_ibon_check_sold_out(tab, config_dict):
             debug.log("[IBON] Event is sold out")
 
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON] Check sold out error: {e}")
 
     return is_sold_out
@@ -2996,7 +3046,8 @@ async def nodriver_ibon_wait_for_select_elements(tab, config_dict, max_wait_time
                     elapsed = time.monotonic() - start_time
                     debug.log(f"[IBON] Page loaded, found {select_count} select element(s) after {elapsed:.2f}s")
                 return select_count
-        except Exception:
+        except Exception as browser_exc:
+            raise_if_terminal_browser_error(browser_exc)
             pass
         await asyncio.sleep(wait_interval)
 
@@ -3122,6 +3173,7 @@ async def nodriver_ibon_check_sold_out_on_ticket_page(tab, config_dict):
                     debug.log(f"[IBON] Tickets available ({select_count} selects, valid={has_valid})")
 
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON SOLD OUT CHECK] Error: {e}")
 
     return is_sold_out
@@ -3183,11 +3235,13 @@ async def nodriver_ibon_navigate_on_sold_out(tab, config_dict):
             navigation_success = True
 
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON] Navigation error: {e}")
         # Fallback to reload if navigation fails
         try:
             await guarded_reload(tab, reason="legacy_platform_reload")
-        except Exception:
+        except Exception as browser_exc:
+            raise_if_terminal_browser_error(browser_exc)
             pass
 
     return navigation_success
@@ -3311,6 +3365,7 @@ async def nodriver_ibon_fill_verify_form(tab, config_dict, answer_list, fail_lis
                         fail_list.append(answer_2)
                         debug.log(f"[IBON VERIFY] Submitted multi-field answers")
                 except Exception as btn_exc:
+                    raise_if_terminal_browser_error(btn_exc)
                     debug.log(f"[IBON VERIFY] Click button error: {btn_exc}")
 
         else:
@@ -3348,6 +3403,7 @@ async def nodriver_ibon_fill_verify_form(tab, config_dict, answer_list, fail_lis
                         fail_list.append(inferred_answer)
                         debug.log(f"[IBON VERIFY] Submitted, attempt #{len(fail_list)}")
                 except Exception as btn_exc:
+                    raise_if_terminal_browser_error(btn_exc)
                     debug.log(f"[IBON VERIFY] Click button error: {btn_exc}")
             else:
                 # No answer to fill, focus the input
@@ -3365,6 +3421,7 @@ async def nodriver_ibon_fill_verify_form(tab, config_dict, answer_list, fail_lis
             await asyncio.sleep(0.3)
 
     except Exception as exc:
+        raise_if_terminal_browser_error(exc)
         debug.log(f"[IBON VERIFY] Error: {exc}")
 
     return is_answer_sent, fail_list
@@ -3386,9 +3443,12 @@ async def nodriver_ibon_card_vaildate(tab, config_dict):
 
     prefix = config_dict.get("contact", {}).get("credit_card_prefix", "").strip()
     if not prefix:
-        guess = config_dict.get("advanced", {}).get("user_guess_string", "").strip()
-        if guess:
-            prefix = guess.split(",")[0].strip().strip('"')
+        answer_list = util.get_answer_list_from_user_guess_string(
+            config_dict,
+            CONST_MAXBOT_ANSWER_ONLINE_FILE,
+        )
+        if answer_list:
+            prefix = answer_list[0]
 
     if not prefix:
         debug.log("[IBON VAILDATE] No credit_card_prefix configured, waiting for manual input")
@@ -3458,6 +3518,7 @@ async def nodriver_ibon_card_vaildate(tab, config_dict):
         return False
 
     except Exception as exc:
+        raise_if_terminal_browser_error(exc)
         debug.log(f"[IBON VAILDATE] Error: {exc}")
         return False
 
@@ -3600,6 +3661,7 @@ async def nodriver_ibon_verification_question(tab, fail_list, config_dict):
                 ''')
 
     except Exception as e:
+        raise_if_terminal_browser_error(e)
         debug.log(f"[IBON] Verification question error: {e}")
 
     return fail_list
@@ -3645,6 +3707,7 @@ async def nodriver_tour_ibon_event_detail(tab, config_dict):
                     debug.log(f"[TOUR IBON] Clicked button: {button_text}")
                     break
             except Exception as e:
+                raise_if_terminal_browser_error(e)
                 debug.log(f"[TOUR IBON] Button click error ({button_text}): {e}")
 
         if not is_button_clicked:
@@ -3729,6 +3792,7 @@ async def nodriver_tour_ibon_options(tab, config_dict):
                 debug.log(f"[TOUR IBON] Selected ticket: {select_result.get('ticketName', 'unknown')}, quantity: {ticket_number}")
 
         except Exception as e:
+            raise_if_terminal_browser_error(e)
             debug.log(f"[TOUR IBON] Quantity selection error: {e}")
 
         # Step 2: Click the ENABLED "加入訂購" button (only enabled after quantity selected)
@@ -3762,6 +3826,7 @@ async def nodriver_tour_ibon_options(tab, config_dict):
             elif result and isinstance(result, dict) and not result.get('success'):
                 debug.log(f"[TOUR IBON] Add button not ready: {result.get('reason')}")
         except Exception as e:
+            raise_if_terminal_browser_error(e)
             debug.log(f"[TOUR IBON] Add to cart error: {e}")
 
         # Step 3: Wait and click "確認付款方式" button
@@ -3784,6 +3849,7 @@ async def nodriver_tour_ibon_options(tab, config_dict):
                 is_all_completed = True
                 debug.log("[TOUR IBON] Clicked: 確認付款方式")
         except Exception as e:
+            raise_if_terminal_browser_error(e)
             debug.log(f"[TOUR IBON] Confirm payment error: {e}")
 
     except Exception as e:
@@ -3868,6 +3934,7 @@ async def nodriver_tour_ibon_checkout(tab, config_dict):
                 if result.get('phone'):
                     debug.log(f"[TOUR IBON] Filled phone: {phone}")
         except Exception as e:
+            raise_if_terminal_browser_error(e)
             debug.log(f"[TOUR IBON] Form fill error: {e}")
 
         # Step 2: Check agreement checkbox (wait for form validation first)
@@ -3896,6 +3963,7 @@ async def nodriver_tour_ibon_checkout(tab, config_dict):
             if result:
                 debug.log(f"[TOUR IBON] Agreement checkbox: {result}")
         except Exception as e:
+            raise_if_terminal_browser_error(e)
             debug.log(f"[TOUR IBON] Checkbox error: {e}")
 
         # Step 3: Click submit button (下一步) - wait for validation to complete
@@ -3918,6 +3986,7 @@ async def nodriver_tour_ibon_checkout(tab, config_dict):
                 is_form_submitted = True
                 debug.log("[TOUR IBON] Clicked: 下一步")
         except Exception as e:
+            raise_if_terminal_browser_error(e)
             debug.log(f"[TOUR IBON] Submit error: {e}")
 
     except Exception as e:
@@ -4005,6 +4074,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                 await asyncio.sleep(random.uniform(1.5, 2.0))
                 await dismiss_pending_ibon_dialog(tab, config_dict)
         except Exception as e:
+            raise_if_terminal_browser_error(e)
             debug.log(f"[IBON LOGIN] Navigation to ibon base failed: {e}")
 
         return False  # Don't quit bot, continue monitoring
@@ -4062,6 +4132,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                         await asyncio.sleep(2)
                         debug.log(f"[IBON] Successfully redirected to: {config_homepage}")
                 except Exception as redirect_exc:
+                    raise_if_terminal_browser_error(redirect_exc)
                     debug.log(f"[IBON] Redirect failed: {redirect_exc}")
 
             return False
@@ -4108,7 +4179,8 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                             await asyncio.sleep(auto_reload_interval)
                             try:
                                 await guarded_reload(tab, reason="legacy_platform_reload")
-                            except Exception:
+                            except Exception as browser_exc:
+                                raise_if_terminal_browser_error(browser_exc)
                                 pass
                         else:
                             debug.log("[IBON DATE] Date selection failed; auto reload disabled")
@@ -4251,6 +4323,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                         else:
                             livemap_debug.log("[IBON LIVEMAP] No areas parsed, falling back to DOM flow")
                 except Exception as exc:
+                    raise_if_terminal_browser_error(exc)
                     livemap_debug.log(f"[IBON LIVEMAP] Fast-path error: {exc}")
                 # === end live.map fast-path ===
 
@@ -4301,6 +4374,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                         try:
                             await guarded_reload(tab, reason="legacy_platform_reload")
                         except Exception as exc:
+                            raise_if_terminal_browser_error(exc)
                             pass
                     else:
                         debug.log("[IBON ORDERS] No available areas found; auto reload disabled")
@@ -4323,6 +4397,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                             if form_select:
                                 is_do_ibon_performance_with_ticket_number = True
                         except Exception as exc:
+                            raise_if_terminal_browser_error(exc)
                             pass
 
                 if is_do_ibon_performance_with_ticket_number:
@@ -4601,6 +4676,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                             await guarded_reload(tab, reason="legacy_platform_reload")
                             debug.log("[NEW EVENT] Page reloaded successfully")
                         except Exception as reload_exc:
+                            raise_if_terminal_browser_error(reload_exc)
                             debug.log(f"[NEW EVENT] Page reload failed: {reload_exc}")
                     else:
                         debug.log("[NEW EVENT] Auto reload disabled")
@@ -4699,6 +4775,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                         await tab.back()
                         await guarded_reload(tab, reason="legacy_platform_reload")
                     except Exception as exc:
+                        raise_if_terminal_browser_error(exc)
                         debug.log(f"[NEW EVENTBUY] Back/reload failed: {exc}")
 
     if not is_match_target_feature:
@@ -4758,6 +4835,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                                 await guarded_reload(tab, reason="legacy_platform_reload")
                                 debug.log("[IBON AREA] Page reloaded successfully")
                             except Exception as reload_exc:
+                                raise_if_terminal_browser_error(reload_exc)
                                 debug.log(f"[IBON AREA] Page reload failed: {reload_exc}")
                         else:
                             debug.log("[IBON AREA] Auto reload disabled")
@@ -4842,6 +4920,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                                 tab.back()
                                 await guarded_reload(tab, reason="legacy_platform_reload")
                             except Exception as exc:
+                                raise_if_terminal_browser_error(exc)
                                 pass
 
     if not is_match_target_feature:
@@ -4870,6 +4949,7 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
                                 if '實名制' in html_body:
                                     is_name_based = True
                     except Exception as exc:
+                        raise_if_terminal_browser_error(exc)
                         #print(exc)
                         pass
 

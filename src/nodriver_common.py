@@ -22,9 +22,11 @@ import settings
 import chrome_downloader
 import ocr_cache
 import performance
+import runtime_health
 from hunter_metadata import APP_DISPLAY_VERSION
 from browser_session import BrowserSessionManager
 from notification_context import make_notification_context
+from task_registry import hunterx_tasks
 
 try:
     import ddddocr
@@ -306,6 +308,7 @@ async def nodriver_press_button(tab, select_query):
                 #print("element not found:", select_query)
                 pass
         except Exception as e:
+            runtime_health.raise_if_terminal_browser_error(e)
             print(f"[BUTTON] click fail for {select_query}: {e}")
             pass
 
@@ -338,6 +341,7 @@ async def nodriver_force_check_checkbox(tab, checkbox_element):
             is_finish_checkbox_click = bool(result)
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
     return is_finish_checkbox_click
@@ -373,6 +377,7 @@ async def nodriver_check_checkbox_enhanced(tab, select_query, config_dict=None):
         debug.log(f"Checkbox result: {is_checkbox_checked}")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"Checkbox error: {exc}")
 
     return is_checkbox_checked
@@ -411,6 +416,7 @@ async def nodriver_check_checkbox(tab, selector, max_retries=2):
             await tab.sleep(0.1)
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             if attempt == max_retries - 1:
                 print(f"[CHECKBOX] Failed to check {selector}: {exc}")
 
@@ -428,6 +434,7 @@ async def nodriver_get_text_by_selector(tab, my_css_selector, attribute='innerHT
             if attribute=="innerText":
                 div_text = util.remove_html_tags(div_text)
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         print("find verify textbox fail")
         pass
 
@@ -440,6 +447,7 @@ async def nodriver_check_modal_dialog_popup(tab):
         if el_div:
             ret = True
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         print(exc)
         pass
     return ret
@@ -534,6 +542,7 @@ def format_cached_target_url_diagnostic(tab) -> str:
 async def nodriver_current_url(tab, config_dict=None, *, prefer_cached=False):
     debug = util.create_debug_logger(config_dict)
     is_quit_bot = False
+    runtime_health.set_tab_failure_kind(tab, runtime_health.BrowserFailureKind.NONE)
     exit_bot_error_strings = [
         "server rejected WebSocket connection: HTTP 500",
         "[Errno 61] Connect call failed ('127.0.0.1',",
@@ -613,12 +622,19 @@ async def nodriver_current_url(tab, config_dict=None, *, prefer_cached=False):
             # js_dumps blocks when JS execution is suspended (alert dialog, navigation, tab throttling)
             # tab.target.url is a CDP-cached value that never requires JS execution
             url = read_target_url()
+            if not url:
+                runtime_health.set_tab_failure_kind(
+                    tab,
+                    runtime_health.BrowserFailureKind.TIMEOUT,
+                )
             debug.log(
                 "[URL DIAG] js_dumps timed out (5s); "
                 f"fallback_available={bool(url)}"
             )
             return url, is_quit_bot
         except Exception as exc:
+            failure_kind = runtime_health.classify_browser_exception(exc)
+            runtime_health.set_tab_failure_kind(tab, failure_kind)
             str_exc = ""
             try:
                 str_exc = str(exc)
@@ -660,6 +676,11 @@ async def nodriver_current_url(tab, config_dict=None, *, prefer_cached=False):
             # or partially serialized result. The cached CDP target URL remains
             # non-blocking and is safer than skipping platform dispatch.
             url = target_url
+            if not url:
+                runtime_health.set_tab_failure_kind(
+                    tab,
+                    runtime_health.BrowserFailureKind.TRANSIENT_URL_MISS,
+                )
         elif target_url and target_url != url:
             # While a cross-document navigation is committing, the previous
             # JavaScript context can still answer after CDP TargetInfo has
@@ -749,7 +770,8 @@ async def detect_cloudflare_challenge(tab, show_debug=False):
                 if "challenges.cloudflare" in url_str:
                     debug.log("[CF DETECT] Cloudflare target found via CDP")
                     return True
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
         # Layer 2: JS DOM detection (fast, catches some cases)
@@ -761,7 +783,8 @@ async def detect_cloudflare_challenge(tab, show_debug=False):
             if cf_dom:
                 debug.log("[CF DETECT] Cloudflare DOM element found")
                 return True
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
         # Layer 3: HTML keyword detection (full-page interstitial fallback)
@@ -787,6 +810,7 @@ async def detect_cloudflare_challenge(tab, show_debug=False):
         return detected
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"Cloudflare detection error: {exc}")
         return False
 
@@ -897,8 +921,10 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
                             else:
                                 debug.log(f"[CLOUDFLARE] Unexpected quad length: {len(quad)}")
                     except Exception as box_exc:
+                        runtime_health.raise_if_terminal_browser_error(box_exc)
                         debug.log(f"[CLOUDFLARE] getBoxModel failed: {box_exc}")
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log(f"[CLOUDFLARE] DOM pierce method failed: {exc}")
 
             # Method 2: Text label positioning (proven on real CF pages)
@@ -958,6 +984,7 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
                             await _cdp_click(tab, click_x, click_y)
                             clicked = True
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[CLOUDFLARE] Text label method failed: {exc}")
 
             # Method 3: Fallback - verify_cf template matching
@@ -994,6 +1021,7 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
                         ]
                         still_active = any(ind in html_lower for ind in active_indicators)
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[CLOUDFLARE] Post-click verification failed: {exc}")
                     still_active = True
                 if not still_active:
@@ -1011,6 +1039,7 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
                 debug.log("[CLOUDFLARE] Max retry reached; manual intervention required")
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[CLOUDFLARE] Error during processing: {exc}")
 
     debug.log("[CLOUDFLARE] Challenge handling failed, max retries reached")
@@ -1062,6 +1091,7 @@ async def evaluate_with_pause_check(tab, javascript_code, config_dict=None):
         result = await tab.evaluate(javascript_code)
         return result
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         # Always print JS execution errors for debugging
         print(f"[JS ERROR] JavaScript execution failed: {exc}")
         traceback.print_exc()
@@ -1074,7 +1104,11 @@ async def with_pause_check(task_func, config_dict, *args, **kwargs):
         return None
 
     # Create task but don't await immediately
-    task = asyncio.create_task(task_func(*args, **kwargs))
+    task = hunterx_tasks.create(
+        task_func(*args, **kwargs),
+        owner="nodriver_common",
+        purpose="pause_aware_operation",
+    )
 
     # Periodically check pause state during task execution
     while not task.done():
@@ -1356,7 +1390,8 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict, perf_tr
                 # Initialize DOM document first (required after page reload)
                 try:
                     await tab.send(cdp.dom.get_document())
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass  # Document may already be initialized
 
                 # Convert backend_node_id to node_id using DOM.pushNodesByBackendIdsToFrontend
@@ -1369,7 +1404,8 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict, perf_tr
                         try:
                             await tab.send(cdp.dom.scroll_into_view_if_needed(node_id=img_node_id))
                             await asyncio.sleep(0.1)
-                        except Exception:
+                        except Exception as exc:
+                            runtime_health.raise_if_terminal_browser_error(exc)
                             pass  # Element may already be visible
 
                         # Get box model for the IMG element
@@ -1419,17 +1455,20 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict, perf_tr
                     else:
                         debug.log("[CAPTCHA] Failed to convert backend_node_id")
                 except Exception as dom_exc:
+                    runtime_health.raise_if_terminal_browser_error(dom_exc)
                     debug.log(f"[CAPTCHA] DOM API error: {dom_exc}")
             else:
                 debug.log("[CAPTCHA] No backend_node_id found for IMG")
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             if debug.enabled:
                 debug.log(f"[CAPTCHA] Screenshot failed: {exc}")
                 import traceback
                 traceback.print_exc()
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         if debug.enabled:
             debug.log(f"[CAPTCHA ERROR] Exception: {exc}")
             import traceback

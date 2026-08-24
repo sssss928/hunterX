@@ -10,6 +10,7 @@ from urllib.parse import quote, unquote
 from zendriver import cdp
 
 import util
+import runtime_health
 from platform_contract import PlatformStateProxy
 from nodriver_common import (
     check_and_handle_pause,
@@ -194,6 +195,7 @@ async def nodriver_fansigo_inject_cookie(tab, config_dict):
         return True
 
     except Exception as e:
+        runtime_health.raise_if_terminal_browser_error(e)
         debug.log(f"[FANSIGO] Cookie injection failed: {e}")
         return False
 
@@ -245,6 +247,7 @@ async def nodriver_fansigo_signin(tab, url, config_dict):
                 debug.log("[FANSIGO] 'Other login method' button not found")
             return True
         except Exception as e:
+            runtime_health.raise_if_terminal_browser_error(e)
             debug.log(f"[FANSIGO] Failed to click other login: {e}")
             return False
 
@@ -296,6 +299,7 @@ async def nodriver_fansigo_signin(tab, url, config_dict):
 
             return True
         except Exception as e:
+            runtime_health.raise_if_terminal_browser_error(e)
             debug.log(f"[FANSIGO] Cognito login failed: {e}")
             return False
 
@@ -322,7 +326,8 @@ async def nodriver_fansigo_get_shows(tab, config_dict) -> list:
         # Wait for Next.js SPA to render content
         try:
             await tab.find("請選擇活動場次進行購買", timeout=5)
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("[FANSIGO] Waiting for event page to render...")
             return shows
 
@@ -385,6 +390,7 @@ async def nodriver_fansigo_get_shows(tab, config_dict) -> list:
         debug.log(f"[FANSIGO] Found {len(shows)} shows")
 
     except Exception as e:
+        runtime_health.raise_if_terminal_browser_error(e)
         debug.log(f"[FANSIGO] Error getting shows: {e}")
 
     return shows
@@ -476,6 +482,7 @@ async def nodriver_fansigo_date_auto_select(tab, url, config_dict) -> bool:
             await nodriver_fansigo_click_show(tab, shows[0], config_dict)
             return True
         except Exception as e:
+            runtime_health.raise_if_terminal_browser_error(e)
             debug.log(f"[FANSIGO] Error clicking show: {e}")
             return False
 
@@ -498,6 +505,7 @@ async def nodriver_fansigo_date_auto_select(tab, url, config_dict) -> bool:
             await nodriver_fansigo_click_show(tab, matched, config_dict)
             return True
         except Exception as e:
+            runtime_health.raise_if_terminal_browser_error(e)
             debug.log(f"[FANSIGO] Error clicking matched show: {e}")
             return False
 
@@ -511,6 +519,7 @@ async def nodriver_fansigo_date_auto_select(tab, url, config_dict) -> bool:
                 await nodriver_fansigo_click_show(tab, target, config_dict)
                 return True
             except Exception as e:
+                runtime_health.raise_if_terminal_browser_error(e)
                 debug.log(f"[FANSIGO] Error clicking show: {e}")
                 return False
         return False
@@ -526,6 +535,7 @@ async def nodriver_fansigo_date_auto_select(tab, url, config_dict) -> bool:
                 await nodriver_fansigo_click_show(tab, target, config_dict)
                 return True
             except Exception as e:
+                runtime_health.raise_if_terminal_browser_error(e)
                 debug.log(f"[FANSIGO] Error clicking fallback show: {e}")
                 return False
         return False
@@ -550,7 +560,8 @@ async def nodriver_fansigo_get_sections(tab, config_dict) -> list:
         # Wait for Next.js SPA to render ticket sections
         try:
             await tab.find("選擇票券種類", timeout=5)
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("[FANSIGO] Waiting for show page to render...")
             return sections
 
@@ -602,6 +613,7 @@ async def nodriver_fansigo_get_sections(tab, config_dict) -> list:
             debug.log(f"[FANSIGO] Found {len(sections)} sections, {len(available)} available")
 
     except Exception as e:
+        runtime_health.raise_if_terminal_browser_error(e)
         debug.log(f"[FANSIGO] Error getting sections: {e}")
 
     return sections
@@ -697,6 +709,7 @@ async def nodriver_fansigo_area_auto_select(tab, url, config_dict) -> int:
             await asyncio.sleep(0.3)
             return section_index
         except Exception as e:
+            runtime_health.raise_if_terminal_browser_error(e)
             debug.log(f"[FANSIGO] Error clicking section: {e}")
             return -1
 
@@ -752,6 +765,7 @@ async def nodriver_fansigo_assign_ticket_number(tab, config_dict, section_index=
         return True
 
     except Exception as e:
+        runtime_health.raise_if_terminal_browser_error(e)
         debug.log(f"[FANSIGO] Error setting ticket quantity: {e}")
         return False
 
@@ -799,6 +813,7 @@ async def nodriver_fansigo_click_checkout(tab, config_dict) -> bool:
         return False
 
     except Exception as e:
+        runtime_health.raise_if_terminal_browser_error(e)
         debug.log(f"[FANSIGO] Error clicking checkout: {e}")
         return False
 

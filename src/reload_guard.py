@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import time
 from typing import Any
 
 from page_classifier import PageClass, classify_page, is_protected_after_ticket
 from runtime_health import (
     DEFAULT_RELOAD_TIMEOUT_SECONDS,
+    ExpectedProgressKind,
+    arm_bound_expected_progress,
+    confirm_bound_expected_progress,
+    fail_bound_expected_progress,
     finish_browser_action,
     runtime_log,
     try_begin_browser_action,
@@ -112,6 +117,7 @@ class ReloadGuard:
             return False
         dispatch_token = None
         dispatch_started_ns = None
+        progress_expectation = None
         try:
             if coordinator is not None:
                 from run_modes import get_effective_reload_interval
@@ -135,6 +141,19 @@ class ReloadGuard:
                     return False
                 dispatch_token = dispatch.token
                 dispatch_started_ns = dispatch.requested_ns
+                progress_now = time.monotonic()
+                progress_expectation = arm_bound_expected_progress(
+                    action_owner="refresh_coordinator",
+                    action_token=dispatch_token,
+                    kind=ExpectedProgressKind.RELOAD,
+                    source_route=url,
+                    minimum_refresh_generation=coordinator.generation + 1,
+                    deadline=(
+                        progress_now + max(0.1, float(timeout_seconds))
+                    ),
+                    reconciliation_owner="refresh_coordinator",
+                    now=progress_now,
+                )
                 runtime_log(
                     "[REFRESH] dispatch",
                     config_dict,
@@ -156,6 +175,15 @@ class ReloadGuard:
             )
             if coordinator is not None:
                 coordinator.complete_dispatch(dispatch_token, True)
+                if progress_expectation is not None:
+                    confirm_bound_expected_progress(
+                        tab_identity=progress_expectation.tab_identity,
+                        attempt_id=progress_expectation.attempt_id,
+                        attempt_generation=progress_expectation.attempt_generation,
+                        action_owner=progress_expectation.action_owner,
+                        action_token=progress_expectation.action_token,
+                        reason="refresh_generation_completed",
+                    )
                 runtime_log(
                     "[REFRESH] completed",
                     config_dict,
@@ -169,10 +197,36 @@ class ReloadGuard:
         except TimeoutError:
             if coordinator is not None:
                 coordinator.complete_dispatch(dispatch_token, False)
+            if progress_expectation is not None:
+                fail_bound_expected_progress(
+                    tab_identity=progress_expectation.tab_identity,
+                    attempt_id=progress_expectation.attempt_id,
+                    attempt_generation=progress_expectation.attempt_generation,
+                    action_owner=progress_expectation.action_owner,
+                    action_token=progress_expectation.action_token,
+                    reason="reload_dispatch_timeout",
+                    protected=(
+                        decision.page_class is PageClass.QUEUE
+                        or is_protected_after_ticket(decision.page_class)
+                    ),
+                )
             return False
         except BaseException:
             if coordinator is not None:
                 coordinator.complete_dispatch(dispatch_token, False)
+            if progress_expectation is not None:
+                fail_bound_expected_progress(
+                    tab_identity=progress_expectation.tab_identity,
+                    attempt_id=progress_expectation.attempt_id,
+                    attempt_generation=progress_expectation.attempt_generation,
+                    action_owner=progress_expectation.action_owner,
+                    action_token=progress_expectation.action_token,
+                    reason="reload_dispatch_error",
+                    protected=(
+                        decision.page_class is PageClass.QUEUE
+                        or is_protected_after_ticket(decision.page_class)
+                    ),
+                )
             raise
         finally:
             finish_browser_action(tab, action_token)

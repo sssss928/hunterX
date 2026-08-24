@@ -7,11 +7,13 @@ import json
 import random
 
 import util
+import runtime_health
 from platform_contract import PlatformStateProxy
 from runtime_health import guarded_get
 from platforms.common_async import get_auto_reload_interval
 from nodriver_common import (
     CONST_FROM_TOP_TO_BOTTOM,
+    CONST_MAXBOT_ANSWER_ONLINE_FILE,
     send_discord_notification,
     send_telegram_notification,
 )
@@ -120,6 +122,7 @@ async def nodriver_fami_login(tab, config_dict):
                 debug.log("[FAMI LOGIN] URL did not change after 10 seconds")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FAMI LOGIN] Error: {str(exc)}")
 
     return is_login_success
@@ -161,6 +164,7 @@ async def nodriver_fami_activity(tab, config_dict):
             debug.log("[FAMI ACTIVITY] Buy button not found or disabled")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FAMI ACTIVITY] Error: {str(exc)}")
 
     return is_button_clicked
@@ -186,12 +190,11 @@ async def nodriver_fami_verify(tab, config_dict, fail_list=None):
         if has_verify_input:
             debug.log("[FAMI VERIFY] Verification input found (#verifyPrefAnswer)")
 
-            answer_string = config_dict["area_auto_select"].get("area_answer", "").strip()
             auto_guess_enable = config_dict["advanced"].get("auto_guess_options", False)
-
-            answer_list = []
-            if answer_string:
-                answer_list = [ans.strip() for ans in answer_string.split(',') if ans.strip()]
+            answer_list = util.get_answer_list_from_user_guess_string(
+                config_dict,
+                CONST_MAXBOT_ANSWER_ONLINE_FILE,
+            )
 
             if auto_guess_enable and len(answer_list) == 0:
                 debug.log("[FAMI VERIFY] Auto guess enabled but no implementation yet")
@@ -204,20 +207,21 @@ async def nodriver_fami_verify(tab, config_dict, fail_list=None):
 
             if inferred_answer:
                 debug.log(f"[FAMI VERIFY] Trying answer: {inferred_answer}")
+                answer_json = json.dumps(inferred_answer, ensure_ascii=False)
 
-                await tab.evaluate(f'''
-                    (function() {{
+                await tab.evaluate(r'''
+                    (function(answer) {
                         var input = document.querySelector('#verifyPrefAnswer');
-                        if (input) {{
-                            input.value = "{inferred_answer}";
-                            input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            var event = new KeyboardEvent('keypress', {{ key: 'Enter', keyCode: 13 }});
+                        if (input) {
+                            input.value = answer;
+                            input.dispatchEvent(new Event('input', { bubbles: true }));
+                            var event = new KeyboardEvent('keypress', { key: 'Enter', keyCode: 13 });
                             input.dispatchEvent(event);
                             var form = input.closest('form');
                             if (form) form.submit();
-                        }}
-                    }})()
-                ''')
+                        }
+                    })(__ANSWER__)
+                '''.replace("__ANSWER__", answer_json))
 
                 await asyncio.sleep(0.5)
 
@@ -238,6 +242,7 @@ async def nodriver_fami_verify(tab, config_dict, fail_list=None):
             is_verify_success = True
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FAMI VERIFY] Error: {str(exc)}")
 
     return is_verify_success, fail_list
@@ -345,6 +350,7 @@ async def nodriver_fami_date_auto_select(tab, config_dict, last_activity_url):
                 else:
                     debug.log("[FAMI DATE] Button not found in target row")
             except Exception as click_exc:
+                runtime_health.raise_if_terminal_browser_error(click_exc)
                 debug.log(f"[FAMI DATE] Click error: {str(click_exc)}")
 
         if len(formated_area_list) == 0:
@@ -391,6 +397,7 @@ async def nodriver_fami_date_auto_select(tab, config_dict, last_activity_url):
                     debug.log("[FAMI DATE] Auto reload disabled or no activity URL; waiting")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FAMI DATE] Error: {str(exc)}")
 
     return is_date_selected
@@ -506,6 +513,7 @@ async def nodriver_fami_area_auto_select(tab, config_dict, area_keyword_item):
                 else:
                     debug.log("[FAMI AREA] Area element not found")
             except Exception as click_exc:
+                runtime_health.raise_if_terminal_browser_error(click_exc)
                 debug.log(f"[FAMI AREA] Click error: {str(click_exc)}")
 
         if len(matched_areas) == 0:
@@ -513,6 +521,7 @@ async def nodriver_fami_area_auto_select(tab, config_dict, area_keyword_item):
             debug.log("[FAMI AREA] No matched areas, need refresh")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FAMI AREA] Error: {str(exc)}")
 
     return is_need_refresh, is_area_selected
@@ -661,6 +670,7 @@ async def nodriver_fami_ticket_select(tab, config_dict):
             debug.log("[FAMI TICKET] Submit button not available or disabled")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FAMI TICKET] Error: {str(exc)}")
 
     return result
@@ -815,6 +825,7 @@ async def nodriver_famiticket_main(tab, url, config_dict):
             _state["fail_list"] = []
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FAMITICKET MAIN] Error: {str(exc)}")
 
     return result

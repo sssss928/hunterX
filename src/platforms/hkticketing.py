@@ -14,6 +14,7 @@ import time
 from zendriver import cdp
 
 import util
+import runtime_health
 from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
@@ -24,6 +25,7 @@ from nodriver_common import (
     send_discord_notification,
     send_telegram_notification,
     CONST_FROM_TOP_TO_BOTTOM,
+    CONST_MAXBOT_ANSWER_ONLINE_FILE,
 )
 
 ENTER_KEY = "\ue007"
@@ -177,6 +179,7 @@ async def nodriver_hkticketing_login(tab, account, password, config_dict=None):
             if el_email:
                 break
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
     if not el_email:
@@ -200,6 +203,7 @@ async def nodriver_hkticketing_login(tab, account, password, config_dict=None):
                 is_email_sent = True
                 debug.log("[HKTICKETING LOGIN] Account already filled")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING LOGIN] Account input error: {exc}")
 
     if not is_email_sent:
@@ -221,6 +225,7 @@ async def nodriver_hkticketing_login(tab, account, password, config_dict=None):
             if el_pass:
                 break
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
     if not el_pass:
@@ -243,6 +248,7 @@ async def nodriver_hkticketing_login(tab, account, password, config_dict=None):
             is_password_sent = True
             debug.log("[HKTICKETING LOGIN] Password already filled")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING LOGIN] Password input error: {exc}")
 
     if not is_password_sent:
@@ -264,6 +270,7 @@ async def nodriver_hkticketing_login(tab, account, password, config_dict=None):
             if el_login_btn:
                 break
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
     if el_login_btn:
@@ -272,6 +279,7 @@ async def nodriver_hkticketing_login(tab, account, password, config_dict=None):
             ret = True
             debug.log("[HKTICKETING LOGIN] Login button clicked")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[HKTICKETING LOGIN] Login button click error: {exc}")
             # Fallback: try pressing Enter on password field
             try:
@@ -279,6 +287,7 @@ async def nodriver_hkticketing_login(tab, account, password, config_dict=None):
                 ret = True
                 debug.log("[HKTICKETING LOGIN] Fallback: pressed Enter key")
             except Exception as exc2:
+                runtime_health.raise_if_terminal_browser_error(exc2)
                 debug.log(f"[HKTICKETING LOGIN] Enter key fallback error: {exc2}")
     else:
         # No login button found, try pressing Enter
@@ -288,6 +297,7 @@ async def nodriver_hkticketing_login(tab, account, password, config_dict=None):
             ret = True
             debug.log("[HKTICKETING LOGIN] Pressed Enter key as fallback")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[HKTICKETING LOGIN] Enter key error: {exc}")
 
     await asyncio.sleep(0.2)
@@ -303,6 +313,7 @@ async def nodriver_hkticketing_accept_cookie(tab):
         if el_close:
             await el_close.click()
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
 async def nodriver_hkticketing_date_buy_button_press(tab, config_dict=None):
@@ -318,13 +329,15 @@ async def nodriver_hkticketing_date_buy_button_press(tab, config_dict=None):
     current_url = ""
     try:
         current_url = await tab.evaluate('window.location.href')
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     el_btn = None
     try:
         el_btn = await tab.query_selector('#buyButton > input')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     if el_btn:
@@ -355,6 +368,7 @@ async def nodriver_hkticketing_date_buy_button_press(tab, config_dict=None):
                 if is_button_clicked:
                     debug.log("[HKTICKETING DATE] Buy button force-clicked via JS")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[HKTICKETING DATE] Buy button click error: {exc}")
 
     # Wait for URL change after clicking (prevent re-clicking)
@@ -371,7 +385,8 @@ async def nodriver_hkticketing_date_buy_button_press(tab, config_dict=None):
                 if new_url != current_url:
                     debug.log(f"[HKTICKETING DATE] URL changed to: {new_url}")
                     break
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 break
         if waited >= max_wait:
             debug.log("[HKTICKETING DATE] URL change timeout")
@@ -416,6 +431,7 @@ async def nodriver_hkticketing_date_assign(tab, config_dict):
             is_single_performance = True
             debug.log("[HKTICKETING DATE] Single performance detected (hidden input)")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("[HKTICKETING DATE] Check element type error:", exc)
 
     # If single performance, treat as date already assigned
@@ -437,6 +453,7 @@ async def nodriver_hkticketing_date_assign(tab, config_dict):
             })();
         ''')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("[HKTICKETING DATE] Check selected date error:", exc)
 
     # If a date is selected, check if it matches the keyword
@@ -484,6 +501,7 @@ async def nodriver_hkticketing_date_assign(tab, config_dict):
         try:
             area_list = await tab.query_selector_all("#p > option")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[HKTICKETING DATE] find #p options date list fail: {exc}")
 
         if area_list:
@@ -501,6 +519,7 @@ async def nodriver_hkticketing_date_assign(tab, config_dict):
                         row_html = await row.get_html()
                         row_text = util.remove_html_tags(row_html)
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log("[HKTICKETING DATE] get row html error:", exc)
                         break
 
@@ -552,6 +571,7 @@ async def nodriver_hkticketing_date_assign(tab, config_dict):
                 is_date_assigned = True
                 debug.log("[HKTICKETING DATE] Date selected successfully")
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log(f"[HKTICKETING DATE] click target_area link fail: {exc}")
 
     return is_date_assigned, is_page_ready, formated_area_list
@@ -574,16 +594,18 @@ async def nodriver_hkticketing_date_password_input(tab, config_dict, fail_list):
         my_css_selector = "#entitlementPassword > div > div > div > div > input[type='password']"
         el_password = await tab.query_selector(my_css_selector)
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     if el_password:
         is_password_appear = True
 
-        user_guess_string = config_dict["advanced"]["user_guess_string"]
-        if len(user_guess_string) > 0:
-            answer_list = user_guess_string.split(",")
+        answer_list = util.get_answer_list_from_user_guess_string(
+            config_dict,
+            CONST_MAXBOT_ANSWER_ONLINE_FILE,
+        )
+        if answer_list:
             for answer_item in answer_list:
-                answer_item = answer_item.strip()
                 if answer_item in fail_list:
                     debug.log("[HKTICKETING PASSWORD] Skip failed password:", answer_item)
                     continue
@@ -601,6 +623,7 @@ async def nodriver_hkticketing_date_password_input(tab, config_dict, fail_list):
                         fail_list.append(answer_item)
                     break
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log("[HKTICKETING PASSWORD] Error:", exc)
 
     return is_password_appear, fail_list
@@ -643,6 +666,7 @@ async def nodriver_hkticketing_date_auto_select(tab, config_dict, fail_list):
                 try:
                     await guarded_reload(tab, reason="legacy_platform_reload")
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
             else:
                 debug.log("[HKTICKETING DATE] Auto reload disabled; waiting")
@@ -688,9 +712,11 @@ async def nodriver_hkticketing_area_auto_select(tab, config_dict, area_keyword_i
                     el = await tab.query_selector(f'ul.seatarea > li:nth-child({i+1}) > a')
                     if el:
                         area_list.append(el)
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING AREA] find area list fail: {exc}")
 
     if not area_list:
@@ -716,6 +742,7 @@ async def nodriver_hkticketing_area_auto_select(tab, config_dict, area_keyword_i
         ''')
         is_area_selected = selected_check
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     if is_area_selected:
@@ -781,6 +808,7 @@ async def nodriver_hkticketing_area_auto_select(tab, config_dict, area_keyword_i
         else:
             debug.log("[HKTICKETING AREA] Invalid JS result, trying fallback")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING AREA] Filter error: {exc}")
 
     debug.log("[HKTICKETING AREA] formated_area_list count:", len(formated_area_list))
@@ -873,7 +901,8 @@ async def nodriver_hkticketing_area_auto_select(tab, config_dict, area_keyword_i
                 try:
                     click_text = await target_area.apply('(el) => el.innerText || el.textContent')
                     debug.log(f"[HKTICKETING AREA] About to click element: {str(click_text)[:60]}")
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
 
             # Random delay before clicking (wait for Angular to stabilize)
@@ -882,6 +911,7 @@ async def nodriver_hkticketing_area_auto_select(tab, config_dict, area_keyword_i
             is_price_assign_by_bot = True
             debug.log("[HKTICKETING AREA] Area selected successfully")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[HKTICKETING AREA] click target_area fail: {exc}")
 
     return is_need_refresh, is_price_assign_by_bot
@@ -930,6 +960,7 @@ async def nodriver_hkticketing_ticket_number_auto_select(tab, config_dict):
             is_ticket_number_assigned = result_obj.get('success', False) if isinstance(result_obj, dict) else result
             debug.log(f"[HKTICKETING TICKET] Set ticket number to {ticket_number}: {result}")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("[HKTICKETING TICKET] Set ticket number fail:", exc)
 
     return is_ticket_number_assigned
@@ -970,6 +1001,7 @@ async def nodriver_hkticketing_ticket_delivery_option(tab, config_dict=None):
         else:
             is_delivery_selected = bool(result)
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING DELIVERY] Error: {exc}")
 
     return is_delivery_selected
@@ -987,7 +1019,8 @@ async def nodriver_hkticketing_next_button_press(tab, config_dict=None):
     current_url = ""
     try:
         current_url = await tab.evaluate('window.location.href')
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     try:
@@ -1000,6 +1033,7 @@ async def nodriver_hkticketing_next_button_press(tab, config_dict=None):
         else:
             debug.log("[HKTICKETING NEXT] Button not found on first attempt")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING NEXT] First attempt error: {exc}")
 
     # Retry if first attempt failed
@@ -1015,6 +1049,7 @@ async def nodriver_hkticketing_next_button_press(tab, config_dict=None):
             else:
                 debug.log("[HKTICKETING NEXT] Retry: Button still not found")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[HKTICKETING NEXT] Retry error: {exc}")
 
     # Wait for URL change after clicking (prevent re-clicking)
@@ -1031,7 +1066,8 @@ async def nodriver_hkticketing_next_button_press(tab, config_dict=None):
                 if new_url != current_url:
                     debug.log(f"[HKTICKETING NEXT] URL changed to: {new_url}")
                     break
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 break
         if waited >= max_wait:
             debug.log("[HKTICKETING NEXT] URL change timeout")
@@ -1051,7 +1087,8 @@ async def nodriver_hkticketing_go_to_payment(tab, config_dict=None):
     current_url = ""
     try:
         current_url = await tab.evaluate('window.location.href')
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     try:
@@ -1062,6 +1099,7 @@ async def nodriver_hkticketing_go_to_payment(tab, config_dict=None):
             is_button_clicked = True
             debug.log("[HKTICKETING PAYMENT] Button clicked successfully")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING PAYMENT] Click error: {exc}")
 
     # Wait for URL change after clicking (prevent re-clicking)
@@ -1078,7 +1116,8 @@ async def nodriver_hkticketing_go_to_payment(tab, config_dict=None):
                 if new_url != current_url:
                     debug.log(f"[HKTICKETING PAYMENT] URL changed to: {new_url}")
                     break
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 break
         if waited >= max_wait:
             debug.log("[HKTICKETING PAYMENT] URL change timeout")
@@ -1104,6 +1143,7 @@ async def nodriver_hkticketing_hide_tickets_blocks(tab):
             })();
         ''')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
 # =============================================================================
@@ -1160,11 +1200,13 @@ async def nodriver_hkticketing_type02_clear_session(tab, config_dict=None):
             await tab.send(cdp_network.clear_browser_cookies())
             debug.log("[HKTICKETING TYPE02] Browser cookies cleared")
         except Exception as cdp_exc:
+            runtime_health.raise_if_terminal_browser_error(cdp_exc)
             debug.log(f"[HKTICKETING TYPE02] CDP cookie clear error: {cdp_exc}")
 
         return True
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02] Clear session error: {exc}")
         return False
 
@@ -1223,6 +1265,7 @@ async def nodriver_hkticketing_type02_check_traffic_overload(tab, config_dict=No
             return True
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02] Traffic check error: {exc}")
 
     return False
@@ -1281,6 +1324,7 @@ async def nodriver_hkticketing_type02_login(tab, config_dict):
                 debug.log(f"[HKTICKETING TYPE02] Account filled using: {selector}")
                 break
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[HKTICKETING TYPE02] Account selector failed: {selector}, {exc}")
             continue
 
@@ -1309,6 +1353,7 @@ async def nodriver_hkticketing_type02_login(tab, config_dict):
                 debug.log(f"[HKTICKETING TYPE02] Password filled using: {selector}")
                 break
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[HKTICKETING TYPE02] Password selector failed: {selector}, {exc}")
             continue
 
@@ -1343,6 +1388,7 @@ async def nodriver_hkticketing_type02_login(tab, config_dict):
                     debug.log(f"[HKTICKETING TYPE02] Login button clicked using: {selector}")
                     break
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[HKTICKETING TYPE02] Login button selector failed: {selector}, {exc}")
             continue
 
@@ -1371,7 +1417,8 @@ async def nodriver_hkticketing_type02_login(tab, config_dict):
             if elapsed > 0 and elapsed % 30 == 0:
                 print(f"[HKTICKETING TYPE02] Waiting for login... ({elapsed}s / {timeout}s)")
 
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass  # Silently ignore connection errors during wait
 
         await asyncio.sleep(check_interval)
@@ -1425,6 +1472,7 @@ async def nodriver_hkticketing_type02_dismiss_modal(tab, config_dict=None):
             return True
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02] Dismiss modal error: {exc}")
 
     return False
@@ -1486,6 +1534,7 @@ async def nodriver_hkticketing_type02_event_page_buy_button(tab, config_dict=Non
             return True
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02] Buy button error: {exc}")
 
     return False
@@ -1555,7 +1604,8 @@ async def nodriver_hkticketing_type02_date_assign(tab, config_dict):
             if date_info and int(date_info) > 0:
                 debug.log(f"[HKTICKETING TYPE02 DATE] Found {date_info} date elements after {wait_attempt + 1} attempts")
                 break
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
         await asyncio.sleep(0.3)
 
@@ -1693,9 +1743,11 @@ async def nodriver_hkticketing_type02_date_assign(tab, config_dict):
                         debug.log("[HKTICKETING TYPE02 DATE] Date clicked successfully")
                         await asyncio.sleep(0.3)
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log(f"[HKTICKETING TYPE02 DATE] Click error: {exc}")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02 DATE] Error: {exc}")
 
     return is_date_assigned
@@ -1832,9 +1884,11 @@ async def nodriver_hkticketing_type02_area_auto_select(tab, config_dict, area_ke
                     is_area_assigned = True
                     debug.log("[HKTICKETING TYPE02 AREA] Area clicked successfully")
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[HKTICKETING TYPE02 AREA] Click error: {exc}")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02 AREA] Error: {exc}")
 
     return is_need_refresh, is_area_assigned
@@ -1930,6 +1984,7 @@ async def nodriver_hkticketing_type02_ticket_number_select(tab, config_dict):
         return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02 TICKET] Error: {exc}")
 
     return False
@@ -1966,6 +2021,7 @@ async def nodriver_hkticketing_type02_next_button_press(tab, config_dict=None):
             debug.log("[HKTICKETING TYPE02] Next button clicked")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02] Next button error: {exc}")
 
     return is_button_clicked
@@ -2068,6 +2124,7 @@ async def nodriver_hkticketing_type02_confirm_order(tab, config_dict):
         if result and isinstance(result, dict) and result.get('success'):
             debug.log(f"[HKTICKETING TYPE02] Delivery method: {result.get('text')} ({result.get('action')})")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02] Delivery method error: {exc}")
 
     await asyncio.sleep(0.3)
@@ -2176,6 +2233,7 @@ async def nodriver_hkticketing_type02_confirm_order(tab, config_dict):
             debug_info = result.get('debug', '') if result and isinstance(result, dict) else ''
             debug.log(f"[HKTICKETING TYPE02] Agree checkbox not found ({debug_info}), continuing...")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02] Agree checkbox error: {exc}")
 
     await asyncio.sleep(0.5)
@@ -2212,6 +2270,7 @@ async def nodriver_hkticketing_type02_confirm_order(tab, config_dict):
             # No popup is normal - it only appears after checkbox click
             pass
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02] Popup agree button error: {exc}")
 
     await asyncio.sleep(0.3)
@@ -2285,7 +2344,8 @@ async def nodriver_hkticketing_type02_confirm_order(tab, config_dict):
                 elif '#/confirmOrder' in str(current_url):
                     # Still on confirm page, might need to retry
                     debug.log("[HKTICKETING TYPE02] Still on confirm page, will retry...")
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
             return True
@@ -2293,6 +2353,7 @@ async def nodriver_hkticketing_type02_confirm_order(tab, config_dict):
             error = result.get('error', 'unknown') if result and isinstance(result, dict) else 'no_result'
             debug.log(f"[HKTICKETING TYPE02] Submit button failed: {error}")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[HKTICKETING TYPE02] Submit button error: {exc}")
 
     return False
@@ -2344,6 +2405,7 @@ async def nodriver_hkticketing_escape_robot_detection(tab, url):
             robot_detection = True
             print("[HKTICKETING] Robot detection iframe detected!")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     return robot_detection
@@ -2380,6 +2442,7 @@ async def nodriver_hkticketing_url_redirect(tab, url, config_dict):
                 if is_redirected:
                     debug.log(f"[HKTICKETING REDIRECT] Redirected to: {entry_url}")
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
             reload_interval = get_auto_reload_interval(config_dict)
@@ -2402,6 +2465,7 @@ async def nodriver_hkticketing_url_redirect(tab, url, config_dict):
                         is_need_refresh = True
                         break
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
         if is_need_refresh:
@@ -2416,6 +2480,7 @@ async def nodriver_hkticketing_url_redirect(tab, url, config_dict):
                 if is_redirected:
                     debug.log(f"[HKTICKETING REDIRECT] Access denied, redirected to: {entry_url}")
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
     return is_redirected
@@ -2453,6 +2518,7 @@ async def nodriver_hkticketing_content_refresh(tab, url, config_dict):
                         is_need_refresh = True
                         break
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
         if is_need_refresh:
@@ -2467,6 +2533,7 @@ async def nodriver_hkticketing_content_refresh(tab, url, config_dict):
                 if is_redirected:
                     debug.log(f"[HKTICKETING CONTENT] Redirected to: {new_url}")
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
             reload_interval = get_auto_reload_interval(config_dict)
@@ -2522,12 +2589,14 @@ async def nodriver_hkticketing_travel_iframe(tab, config_dict):
                                 debug.log(f"[HKTICKETING IFRAME] Error detected in iframe, redirected to: {new_url}")
                             break
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
             if is_redirected:
                 break
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     return is_redirected
@@ -2727,6 +2796,7 @@ async def nodriver_hkticketing_main(tab, url, config_dict):
                                 if navigated:
                                     await asyncio.sleep(1.0)
                 except Exception as redirect_error:
+                    runtime_health.raise_if_terminal_browser_error(redirect_error)
                     debug.log(f"[HKTICKETING LOGIN] Redirect error: {redirect_error}")
 
     # Date selection page (shows/show.aspx?)

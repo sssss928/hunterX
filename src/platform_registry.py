@@ -52,6 +52,7 @@ PLATFORM_SPECS: tuple[PlatformSpec, ...] = (
         "TixCraft / IndieVox / Ticketmaster",
         (
             "tixcraft.com",
+            "teamear.com",
             "indievox.com",
             "ticketmaster.sg",
             "ticketmaster.com",
@@ -118,7 +119,13 @@ PLATFORM_SPECS: tuple[PlatformSpec, ...] = (
     PlatformSpec(
         "hkticketing",
         "HKTicketing / Galaxy Macau / Ticketek",
-        ("hkticketing.com", "galaxymacau.com", "ticketek.com.sg", "ticketek.com"),
+        (
+            "hkticketing.com",
+            "galaxymacau.com",
+            "ticketek.com.sg",
+            "ticketek.com.au",
+            "ticketek.com",
+        ),
         PlatformValidation(_PUBLIC, _SOURCE, _FIXTURE, _SOURCE),
     ),
     PlatformSpec(

@@ -9,11 +9,12 @@ import time
 from urllib.parse import urlsplit
 
 import util
+import runtime_health
 from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
 from runtime_health import guarded_get
-from tab_ownership import register_owned_tab
+from tab_ownership import TabTransition, register_owned_tab
 from nodriver_common import (
     check_and_handle_pause,
     handle_cloudflare_challenge,
@@ -89,6 +90,7 @@ async def nodriver_cityline_auto_retry_access(tab, url, config_dict):
         js = "goEvent();"
         await tab.evaluate(js)
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[CITYLINE] goEvent() failed: {exc}")
         pass
 
@@ -120,6 +122,7 @@ async def nodriver_cityline_login(tab, cityline_account, config_dict):
                 debug.log(f"[CITYLINE LOGIN] Email entered: {cityline_account[:3]}***")
                 debug.log("[CITYLINE LOGIN] OTP will be sent to mailbox - monitoring login button...")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[CITYLINE LOGIN] Failed to input email: {exc}")
             pass
     else:
@@ -176,6 +179,7 @@ async def nodriver_cityline_login(tab, cityline_account, config_dict):
                     _state["turnstile_attempted"] = False
                     await asyncio.sleep(random.uniform(1.0, 2.0))
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[CITYLINE LOGIN] Step 2 error: {exc}")
 
 async def nodriver_cityline_date_auto_select(tab, config_dict):
@@ -201,6 +205,7 @@ async def nodriver_cityline_date_auto_select(tab, config_dict):
         my_css_selector = "button.date-time-position"
         area_list = await tab.query_selector_all(my_css_selector)
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[ERROR] find date list fail: {exc}")
 
     # Stage 2: Format and filter enabled dates
@@ -227,6 +232,7 @@ async def nodriver_cityline_date_auto_select(tab, config_dict):
                 row_html = await row.get_html()
                 row_text = util.remove_html_tags(row_html)
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log(f"[DEBUG] get row html error: {exc}")
                 break
 
@@ -257,7 +263,8 @@ async def nodriver_cityline_date_auto_select(tab, config_dict):
                     try:
                         await asyncio.sleep(reload_interval)
                         await guarded_reload(tab, reason="legacy_platform_reload")
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
                 else:
                     debug.log("[DATE FALLBACK] Auto reload disabled; waiting for manual intervention...")
@@ -271,16 +278,19 @@ async def nodriver_cityline_date_auto_select(tab, config_dict):
         try:
             try:
                 await target_area.scroll_into_view()
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass  # scroll is best-effort
             try:
                 await target_area.click()
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 # Fallback: JS click when position cannot be computed (element in overflow container)
                 await target_area.apply('function(el) { el.click(); }')
             debug.log("[CITYLINE DATE] Date button clicked")
             ret = True
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[CITYLINE DATE] click date button fail: {exc}")
 
     return ret
@@ -357,6 +367,7 @@ async def nodriver_cityline_check_login_modal(tab, config_dict):
                     try:
                         await handle_cloudflare_challenge(tab, config_dict, max_retry=1)
                     except Exception as cf_exc:
+                        runtime_health.raise_if_terminal_browser_error(cf_exc)
                         debug.log(f"[CITYLINE LOGIN MODAL] Turnstile CDP solve failed: {cf_exc}")
 
                     # Final wait after CDP attempt
@@ -395,6 +406,7 @@ async def nodriver_cityline_check_login_modal(tab, config_dict):
                     else:
                         debug.log("[CITYLINE LOGIN MODAL] Login button not found")
                 except Exception as e:
+                    runtime_health.raise_if_terminal_browser_error(e)
                     debug.log(f"[CITYLINE LOGIN MODAL] Failed to click login button: {e}")
             else:
                 debug.log("[CITYLINE LOGIN MODAL] Button not enabled after timeout")
@@ -405,6 +417,7 @@ async def nodriver_cityline_check_login_modal(tab, config_dict):
             debug.log("[CITYLINE LOGIN MODAL] No login modal detected")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[CITYLINE LOGIN MODAL] Login modal check failed: {exc}")
 
     return is_modal_handled
@@ -461,6 +474,7 @@ async def nodriver_cityline_continue_button_press(tab, config_dict):
             debug.log("[CITYLINE CONTINUE] Continue button not found")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[CITYLINE CONTINUE] Continue button press failed: {exc}")
 
     return is_button_clicked
@@ -477,14 +491,16 @@ async def _cityline_area_match_text(row):
         price_el = await row.query_selector('.price-num')
         if price_el:
             price_text = util.remove_html_tags(await price_el.get_html())
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     clean_text = " ".join((name_text + " " + price_text).split())
     if len(clean_text) == 0:
         try:
             clean_text = " ".join(util.remove_html_tags(await row.get_html()).split())
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             clean_text = ""
     return clean_text
 
@@ -494,6 +510,7 @@ async def _cityline_collect_available_areas(tab, config_dict, debug):
     try:
         area_list = await tab.query_selector_all("div.form-check")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[ERROR] find area list fail: {exc}")
         return available_areas
     if not area_list:
@@ -508,7 +525,8 @@ async def _cityline_collect_available_areas(tab, config_dict, debug):
             if soldout_span:
                 soldout_count += 1
                 continue
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
         clean_text = await _cityline_area_match_text(row)
@@ -550,6 +568,7 @@ async def _cityline_click_area_radio(tab, target_row, target_clean, debug):
             debug.log("[CITYLINE AREA] Radio button checked")
             return True
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[CITYLINE AREA] click radio (js) fail: {exc}")
 
     try:
@@ -560,6 +579,7 @@ async def _cityline_click_area_radio(tab, target_row, target_clean, debug):
             debug.log("[CITYLINE AREA] Radio button checked (handle)")
             return True
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[CITYLINE AREA] click radio (handle) fail: {exc}")
 
     debug.log(f"[CITYLINE AREA] radio not found for target: {target_clean}")
@@ -653,6 +673,7 @@ async def nodriver_cityline_ticket_number_auto_select(tab, config_dict):
             if is_ticket_number_assigned:
                 debug.log(f"[CITYLINE TICKET] Ticket number set to {ticket_number}")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[CITYLINE TICKET] Ticket number selection fail: {exc}")
 
     return is_ticket_number_assigned
@@ -686,9 +707,11 @@ async def nodriver_cityline_next_button_press(tab):
                     is_button_clicked = True
                     print(f"[CITYLINE] Next button clicked: {selector}")
                     break
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 continue
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         print(f"[CITYLINE] Next button press fail: {exc}")
 
     return is_button_clicked
@@ -756,6 +779,7 @@ async def nodriver_cityline_check_shopping_basket(tab, config_dict):
             return True
 
     except Exception as e:
+        runtime_health.raise_if_terminal_browser_error(e)
         debug.log(f"[CITYLINE] Checkout check error: {e}")
 
     return False
@@ -814,7 +838,12 @@ async def nodriver_cityline_close_second_tab(tab, url):
                         register_owned_tab(tmp_tab, "cityline_continue_click")
                         await tmp_tab.activate()
                         await asyncio.sleep(0.3)
-                        new_tab = tmp_tab
+                        new_tab = TabTransition(
+                            previous_tab=tab,
+                            tab=tmp_tab,
+                            url=tmp_url,
+                            reason="cityline_continue_popup",
+                        )
                         _state["pending_owned_tab_baseline_ids"] = ()
                         _state["pending_owned_tab_deadline"] = 0.0
                         break
@@ -845,9 +874,11 @@ async def nodriver_cityline_cookie_accept(tab):
                     is_accepted = True
                     print(f"[CITYLINE] Cookie consent accepted: {selector}")
                     break
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 continue
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     return is_accepted
@@ -892,6 +923,7 @@ async def nodriver_cityline_press_buy_button(tab, config_dict):
                 debug.log(f"[CITYLINE] Still waiting for button... ({attempt * check_interval:.1f}s elapsed)")
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[CITYLINE] Error checking button: {exc}")
 
         if attempt < max_attempts - 1:
@@ -929,6 +961,7 @@ async def nodriver_cityline_press_buy_button(tab, config_dict):
             return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[CITYLINE] Error clicking button: {exc}")
         return False
 
@@ -981,6 +1014,7 @@ async def nodriver_cityline_clean_ads(tab):
         if is_ads_removed:
             print("[CITYLINE] Advertisements removed")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     return is_ads_removed
@@ -997,6 +1031,7 @@ async def nodriver_cityline_main(tab, url, config_dict):
                 if len(html_body) > 10240:
                     is_dom_ready = True
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
         if is_dom_ready:
             #await nodriver_cityline_auto_retry_access(tab, url, config_dict)
@@ -1042,6 +1077,7 @@ async def nodriver_cityline_main(tab, url, config_dict):
                         # Update URL after redirect
                         url = await tab.evaluate('window.location.href')
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[CITYLINE ERROR] Redirect failed: {exc}")
 
     # Login page
@@ -1059,7 +1095,13 @@ async def nodriver_cityline_main(tab, url, config_dict):
             _state["otp_wait_last_log"] = 0
 
     # Multi-tab handling (FR-009)
-    tab = await nodriver_cityline_close_second_tab(tab, url)
+    tab_transition = await nodriver_cityline_close_second_tab(tab, url)
+    if isinstance(tab_transition, TabTransition):
+        # The current task is still bound to the previous tab's platform
+        # state. Stop immediately and let the outer lifecycle owner attach and
+        # bind the popup before any purchase action runs there.
+        return tab_transition
+    tab = tab_transition
 
     # Event detail page on shows.cityline.com
     # https://shows.cityline.com/tc/2026/jordanchan.html
@@ -1074,7 +1116,8 @@ async def nodriver_cityline_main(tab, url, config_dict):
                 # Update URL after button click
                 try:
                     url = await tab.evaluate('window.location.href')
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
     else:
         # Reset flag when leaving shows.cityline.com domain

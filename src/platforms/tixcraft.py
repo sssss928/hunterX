@@ -103,14 +103,45 @@ __all__ = [
 # proxy to PlatformEngine-owned per-tab data for the lifetime of each task.
 _default_state = {}
 _state_context = contextvars.ContextVar("tixcraft_runtime_state", default=None)
+_process_fallback_diagnostic_emitted = False
+
+
+def _legacy_process_fallback_state():
+    """Return the no-tab compatibility state and diagnose its first use.
+
+    Production entrypoints always have a concrete tab.  Keeping this fallback
+    is solely for direct legacy helper calls that do not have one; emitting a
+    single process-wide event makes an accidental production use observable
+    without adding noise to a hot loop.
+    """
+
+    global _process_fallback_diagnostic_emitted
+    if not _process_fallback_diagnostic_emitted:
+        _process_fallback_diagnostic_emitted = True
+        runtime_health.runtime_log(
+            "[TIXCRAFT] legacy_process_state_fallback",
+            None,
+            scope="tab_none",
+        )
+    return _default_state
 
 
 class _TixCraftStateProxy(dict):
     def current(self):
         state = _state_context.get()
-        return _default_state if state is None else state
+        return _legacy_process_fallback_state() if state is None else state
 
     def has_active_binding(self):
+        # The refresh bridge historically uses this method as a capability
+        # gate before resolving an explicit tab through ``_state_for_tab``.
+        # Explicit-tab resolution is always available, even outside a handler's
+        # ambient ContextVar binding.  Returning False here would make that
+        # bridge fall back to process-global state for a real production tab.
+        return True
+
+    def has_context_binding(self):
+        """Report whether this task currently has an ambient state binding."""
+
         return _state_context.get() is not None
 
     def bind(self, state):
@@ -204,14 +235,15 @@ async def _guarded_tixcraft_get(
 
 
 def _dispatch_state_for_tab(tab):
+    # A concrete tab is authoritative.  Never let an ambient binding from a
+    # different tab, or a populated legacy process fallback, steal ownership.
+    if tab is not None:
+        return _state_for_tab(tab)
+
     bound = _state_context.get()
     if bound is not None:
         return bound
-    # Preserve compatibility with a pre-v0.4.7 in-process state during a hot
-    # reload. Normal production entrypoints leave the default mapping empty.
-    if _default_state:
-        return _default_state
-    return _state_for_tab(tab)
+    return _legacy_process_fallback_state()
 
 
 def _refresh_coordinator_for_tab(tab):
@@ -320,6 +352,9 @@ class TixCraftPendingNavigation:
     tab_identity: int = 0
     started_at: float = 0.0
     deadline: float = 0.0
+    progress_tab_identity: str = ""
+    progress_attempt_id: str = ""
+    progress_attempt_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +365,34 @@ class TixCraftSubmitInFlight:
     tab_identity: int
     source_url: str
     started_at_monotonic: float
+    central_attempt_id: str
+    central_attempt_generation: int
+    central_submit_token: str
+    progress_tab_identity: str = ""
+    progress_attempt_id: str = ""
+    progress_attempt_generation: int = 0
+    progress_action_token: str = ""
+
+
+_TIXCRAFT_SUBMIT_CONTEXT_UNSPECIFIED = object()
+
+
+def _as_call_time_snapshot_coroutine(callback):
+    """Let zendriver call a synchronous snapshot factory as an async handler.
+
+    Zendriver checks ``asyncio.iscoroutinefunction`` before it invokes an event
+    handler.  A native ``async def`` does not execute until its task is later
+    scheduled, which leaves an attempt-rearm race between event delivery and
+    the first line of the callback.  This marker keeps zendriver's async
+    scheduling contract while allowing ``callback`` to capture the immutable
+    submit owner synchronously when the CDP event is delivered.
+    """
+
+    mark_coroutine = getattr(inspect, "markcoroutinefunction", None)
+    if callable(mark_coroutine):
+        return mark_coroutine(callback)
+    callback._is_coroutine = asyncio.coroutines._is_coroutine
+    return callback
 
 
 _TIXCRAFT_CHECKOUT_SEAT_FALLBACK = "未能讀取座位資料，請立即查看結帳頁"
@@ -1754,15 +1817,12 @@ def _track_tixcraft_attempt_page(page_class, url):
             attempt.phase = TixCraftAttemptPhase.TICKET_FORM_ACTIVE
     elif current == PageClass.ORDER:
         attempt = _begin_tixcraft_purchase_attempt("order_page", url)
-        _clear_tixcraft_submit_in_flight("order_route")
         attempt.phase = TixCraftAttemptPhase.ORDER_PENDING
     elif current == PageClass.CHECKOUT:
-        _clear_tixcraft_submit_in_flight("checkout_route")
         attempt = _get_tixcraft_purchase_attempt()
         if attempt is not None:
             attempt.phase = TixCraftAttemptPhase.CHECKOUT_REACHED
     elif current == PageClass.PAYMENT:
-        _clear_tixcraft_submit_in_flight("payment_route")
         attempt = _get_tixcraft_purchase_attempt()
         if attempt is not None:
             attempt.phase = TixCraftAttemptPhase.PAYMENT_REACHED
@@ -1788,8 +1848,73 @@ def _pending_navigation_expired(pending, now=None):
     return current >= pending.deadline
 
 
-def _clear_pending_area_navigation(reason="", config_dict=None):
+def _tixcraft_pending_progress_owner(pending):
+    if not isinstance(pending, TixCraftPendingNavigation):
+        return ""
+    if pending.kind == "area":
+        return "tixcraft_area_candidate"
+    if pending.kind == "date":
+        return "tixcraft_date_navigation"
+    return ""
+
+
+def _confirm_tixcraft_pending_progress(pending, reason):
+    owner = _tixcraft_pending_progress_owner(pending)
+    if not owner or not pending.progress_tab_identity:
+        return False
+    return runtime_health.confirm_bound_expected_progress(
+        tab_identity=pending.progress_tab_identity,
+        attempt_id=pending.progress_attempt_id,
+        attempt_generation=pending.progress_attempt_generation,
+        action_owner=owner,
+        action_token=pending.token,
+        reason=reason,
+    )
+
+
+def _fail_tixcraft_pending_progress(pending, reason, *, protected=False):
+    owner = _tixcraft_pending_progress_owner(pending)
+    if not owner or not pending.progress_tab_identity:
+        return None
+    return runtime_health.fail_bound_expected_progress(
+        tab_identity=pending.progress_tab_identity,
+        attempt_id=pending.progress_attempt_id,
+        attempt_generation=pending.progress_attempt_generation,
+        action_owner=owner,
+        action_token=pending.token,
+        reason=reason,
+        protected=protected,
+    )
+
+
+def _cancel_tixcraft_pending_progress(pending, reason):
+    owner = _tixcraft_pending_progress_owner(pending)
+    if not owner or not pending.progress_tab_identity:
+        return False
+    return runtime_health.cancel_bound_expected_progress(
+        tab_identity=pending.progress_tab_identity,
+        attempt_id=pending.progress_attempt_id,
+        attempt_generation=pending.progress_attempt_generation,
+        action_owner=owner,
+        action_token=pending.token,
+        reason=reason,
+    )
+
+
+def _clear_pending_area_navigation(reason="", config_dict=None, *, protected=False):
     pending = _state.pop("pending_area_navigation", None)
+    if isinstance(pending, TixCraftPendingNavigation):
+        if reason in {"click_not_navigated", "unexpected_route"}:
+            _fail_tixcraft_pending_progress(
+                pending,
+                f"tixcraft_area_{reason}",
+                protected=protected,
+            )
+        else:
+            _cancel_tixcraft_pending_progress(
+                pending,
+                f"tixcraft_area_{reason or 'cleared'}",
+            )
     if "leak_scheduler" in _state:
         _state["leak_scheduler"].clear_area_click_pending()
     if pending is not None and reason:
@@ -1807,9 +1932,21 @@ def _set_pending_area_navigation(tab, url, area_text, config_dict, now=None):
     current = time.monotonic() if now is None else float(now)
     token = int(_state.get("area_navigation_token", 0) or 0) + 1
     _state["area_navigation_token"] = token
+    source_url = _normalize_tixcraft_area_url(url) or _tixcraft_route_key(url)
+    deadline = current + _get_tixcraft_navigation_confirmation_seconds(config_dict)
+    progress_expectation = runtime_health.arm_bound_expected_progress(
+        action_owner="tixcraft_area_candidate",
+        action_token=token,
+        kind=runtime_health.ExpectedProgressKind.CANDIDATE_CLICK,
+        deadline=deadline,
+        source_route=source_url,
+        acceptable_states={"ticket", "order", "checkout", "payment"},
+        reconciliation_owner="tixcraft_pending_area_navigation",
+        now=current,
+    )
     pending = TixCraftPendingNavigation(
         kind="area",
-        source_url=_normalize_tixcraft_area_url(url) or _tixcraft_route_key(url),
+        source_url=source_url,
         seat_area=_clean_tixcraft_area_name(area_text),
         event_id=_state.get("current_event_id", ""),
         game_id=_state.get("current_game_id", ""),
@@ -1817,7 +1954,18 @@ def _set_pending_area_navigation(tab, url, area_text, config_dict, now=None):
         token=token,
         tab_identity=id(tab),
         started_at=current,
-        deadline=current + _get_tixcraft_navigation_confirmation_seconds(config_dict),
+        deadline=deadline,
+        progress_tab_identity=(
+            progress_expectation.tab_identity if progress_expectation is not None else ""
+        ),
+        progress_attempt_id=(
+            progress_expectation.attempt_id if progress_expectation is not None else ""
+        ),
+        progress_attempt_generation=(
+            progress_expectation.attempt_generation
+            if progress_expectation is not None
+            else 0
+        ),
     )
     _state["pending_area_navigation"] = pending
     _state["selected_area_metadata"] = {
@@ -1837,17 +1985,42 @@ def _set_pending_date_navigation(tab, url, target_url, config_dict, now=None):
     current = time.monotonic() if now is None else float(now)
     token = int(_state.get("date_navigation_token", 0) or 0) + 1
     _state["date_navigation_token"] = token
+    source_url = _tixcraft_route_key(url)
+    normalized_target = _tixcraft_route_key(target_url)
+    deadline = current + _get_tixcraft_navigation_confirmation_seconds(config_dict)
+    progress_expectation = runtime_health.arm_bound_expected_progress(
+        action_owner="tixcraft_date_navigation",
+        action_token=token,
+        kind=runtime_health.ExpectedProgressKind.NAVIGATION,
+        deadline=deadline,
+        source_route=source_url,
+        acceptable_routes=(normalized_target,) if normalized_target else None,
+        acceptable_states={"area", "ticket", "order", "checkout", "payment"},
+        reconciliation_owner="tixcraft_pending_date_navigation",
+        now=current,
+    )
     pending = TixCraftPendingNavigation(
         kind="date",
-        source_url=_tixcraft_route_key(url),
-        target_url=_tixcraft_route_key(target_url),
+        source_url=source_url,
+        target_url=normalized_target,
         event_id=_state.get("current_event_id", ""),
         game_id=_state.get("current_game_id", ""),
         flow_generation=int(_state.get("notification_flow_generation", 0) or 0),
         token=token,
         tab_identity=id(tab),
         started_at=current,
-        deadline=current + _get_tixcraft_navigation_confirmation_seconds(config_dict),
+        deadline=deadline,
+        progress_tab_identity=(
+            progress_expectation.tab_identity if progress_expectation is not None else ""
+        ),
+        progress_attempt_id=(
+            progress_expectation.attempt_id if progress_expectation is not None else ""
+        ),
+        progress_attempt_generation=(
+            progress_expectation.attempt_generation
+            if progress_expectation is not None
+            else 0
+        ),
     )
     _state["pending_date_navigation"] = pending
     return pending
@@ -1884,16 +2057,39 @@ def _reconcile_tixcraft_pending_navigation(tab, url, page_class, config_dict):
     if isinstance(date_pending, TixCraftPendingNavigation):
         if date_pending.tab_identity and date_pending.tab_identity != id(tab):
             _state.pop("pending_date_navigation", None)
+            _cancel_tixcraft_pending_progress(
+                date_pending,
+                "tixcraft_date_tab_changed",
+            )
         elif current_route != _tixcraft_route_key(date_pending.source_url):
             outcome = (
                 "navigation_confirmed"
-                if current_page in _TIXCRAFT_CONFIRMED_PURCHASE_PAGES
+                if current_page in _TIXCRAFT_CONFIRMED_DATE_TARGET_PAGES
                 else "navigation_left_date"
             )
             _state.pop("pending_date_navigation", None)
+            if outcome == "navigation_confirmed":
+                _confirm_tixcraft_pending_progress(
+                    date_pending,
+                    "tixcraft_date_navigation_confirmed",
+                )
+            else:
+                _fail_tixcraft_pending_progress(
+                    date_pending,
+                    "tixcraft_date_navigation_left_expected_flow",
+                    protected=(
+                        current_page is PageClass.QUEUE
+                        or current_page
+                        in {PageClass.ORDER, PageClass.CHECKOUT, PageClass.PAYMENT}
+                    ),
+                )
             _record_action("date_navigation_reconciled", outcome)
         elif _pending_navigation_expired(date_pending, now):
             _state.pop("pending_date_navigation", None)
+            _fail_tixcraft_pending_progress(
+                date_pending,
+                "tixcraft_date_click_not_navigated",
+            )
             _state["date_navigation_retry_due"] = True
             runtime_health.runtime_log(
                 "[DATE] click_not_navigated",
@@ -1929,6 +2125,10 @@ def _reconcile_tixcraft_pending_navigation(tab, url, page_class, config_dict):
             "click_token": area_pending.token,
         }
         _state.pop("pending_area_navigation", None)
+        _confirm_tixcraft_pending_progress(
+            area_pending,
+            "tixcraft_area_navigation_confirmed",
+        )
         if "leak_scheduler" in _state:
             _state["leak_scheduler"].clear_area_click_pending()
         _record_action("area_navigation_confirmed", area_pending.seat_area)
@@ -1946,11 +2146,56 @@ def _reconcile_tixcraft_pending_navigation(tab, url, page_class, config_dict):
             _state["area_navigation_retry_due"] = True
         return False
 
-    _clear_pending_area_navigation("unexpected_route", config_dict)
+    _clear_pending_area_navigation(
+        "unexpected_route",
+        config_dict,
+        protected=(
+            current_page is PageClass.QUEUE
+            or current_page in {PageClass.ORDER, PageClass.CHECKOUT, PageClass.PAYMENT}
+        ),
+    )
     return False
 
 
 def _mark_tixcraft_submit_started(url="", tab=None):
+    central_attempt_id = ""
+    central_attempt_generation = 0
+    central_submit_token = ""
+    if tab is not None:
+        from platform_engine import platform_engine
+
+        central_attempt = platform_engine.current_attempt(tab, "tixcraft")
+        if central_attempt is not None:
+            central_submit_token = str(
+                platform_engine.claim_submit(
+                    tab,
+                    "tixcraft",
+                    owner="tixcraft_submit_dispatch",
+                )
+                or ""
+            )
+            if not central_submit_token:
+                return False
+            central_attempt = platform_engine.current_attempt(tab, "tixcraft")
+            if central_attempt is None:
+                return False
+            central_attempt_id = central_attempt.attempt_id
+            central_attempt_generation = central_attempt.generation
+            if not platform_engine.require_positive_safe_rearm_proof(
+                tab,
+                "tixcraft",
+                attempt_id=central_attempt_id,
+                attempt_generation=central_attempt_generation,
+                token=central_submit_token,
+                owner="tixcraft_interactive_area_probe",
+            ):
+                platform_engine.release_submit(
+                    tab,
+                    "tixcraft",
+                    token=central_submit_token,
+                )
+                return False
+
     current = _get_tixcraft_purchase_attempt()
     completed_attempt = bool(
         current is not None
@@ -1992,6 +2237,31 @@ def _mark_tixcraft_submit_started(url="", tab=None):
     started_at = time.monotonic()
     token = int(_state.get("submit_generation", 0) or 0) + 1
     _state["submit_generation"] = token
+    progress_action_token = central_submit_token or (
+        f"local:{int(_state.get('notification_flow_generation', 0) or 0)}:{token}"
+    )
+    progress_expectation = runtime_health.arm_bound_expected_progress(
+        action_owner="tixcraft_submit_dispatch",
+        action_token=progress_action_token,
+        kind=runtime_health.ExpectedProgressKind.SUBMIT,
+        deadline=started_at + _TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS,
+        attempt_id=central_attempt_id or None,
+        attempt_generation=(
+            central_attempt_generation if central_attempt_id else None
+        ),
+        source_route=_tixcraft_route_key(url),
+        acceptable_states={
+            "queue",
+            "order",
+            "order_pending",
+            "checkout",
+            "payment",
+            "completed",
+        },
+        submit_sensitive=True,
+        reconciliation_owner="tixcraft_submit_ownership",
+        now=started_at,
+    )
     attempt.phase = TixCraftAttemptPhase.SUBMIT_IN_FLIGHT
     _state["submit_in_flight"] = TixCraftSubmitInFlight(
         attempt_id=attempt.attempt_id,
@@ -2000,6 +2270,25 @@ def _mark_tixcraft_submit_started(url="", tab=None):
         tab_identity=id(tab) if tab is not None else 0,
         source_url=_tixcraft_route_key(url),
         started_at_monotonic=started_at,
+        central_attempt_id=central_attempt_id,
+        central_attempt_generation=central_attempt_generation,
+        central_submit_token=central_submit_token,
+        progress_tab_identity=(
+            progress_expectation.tab_identity if progress_expectation is not None else ""
+        ),
+        progress_attempt_id=(
+            progress_expectation.attempt_id if progress_expectation is not None else ""
+        ),
+        progress_attempt_generation=(
+            progress_expectation.attempt_generation
+            if progress_expectation is not None
+            else 0
+        ),
+        progress_action_token=(
+            progress_expectation.action_token
+            if progress_expectation is not None
+            else ""
+        ),
     )
     _state["notification_submit_started_at"] = started_at
     _state["notification_order_probe_next_at"] = 0.0
@@ -2008,6 +2297,7 @@ def _mark_tixcraft_submit_started(url="", tab=None):
         scheduler.submit_pending = True
         scheduler.ticket_form_pending = True
     _record_action("submit_armed", f"{attempt.attempt_id}:{token}")
+    return True
 
 
 def _is_tixcraft_submit_in_flight(tab=None):
@@ -2021,6 +2311,8 @@ def _is_tixcraft_submit_in_flight(tab=None):
         in {
             TixCraftAttemptPhase.SUBMIT_IN_FLIGHT,
             TixCraftAttemptPhase.ORDER_PENDING,
+            TixCraftAttemptPhase.CHECKOUT_REACHED,
+            TixCraftAttemptPhase.PAYMENT_REACHED,
         }
         and context.flow_generation
         == int(_state.get("notification_flow_generation", 0) or 0)
@@ -2030,11 +2322,70 @@ def _is_tixcraft_submit_in_flight(tab=None):
             or not context.tab_identity
             or context.tab_identity == id(tab)
         )
+        and _tixcraft_central_submit_owner_is_valid(context, tab)
     )
 
 
-def _clear_tixcraft_submit_in_flight(reason=""):
+def _tixcraft_central_submit_owner_is_valid(context, tab=None):
+    if not isinstance(context, TixCraftSubmitInFlight):
+        return False
+    if not context.central_attempt_id:
+        return True
+    if tab is None:
+        # Callers which own only platform-local metadata cannot prove the
+        # central owner stale. Exact validation is performed at every browser
+        # reconciliation boundary where the concrete tab is available.
+        return True
+    from platform_engine import platform_engine
+
+    current = platform_engine.current_attempt(tab, "tixcraft")
+    return bool(
+        current is not None
+        and current.attempt_id == context.central_attempt_id
+        and current.generation == context.central_attempt_generation
+        and current.submit_token == context.central_submit_token
+    )
+
+
+def _resolve_tixcraft_submit_progress(
+    context,
+    outcome,
+    reason,
+    *,
+    protected=False,
+):
+    if (
+        not isinstance(context, TixCraftSubmitInFlight)
+        or not context.progress_tab_identity
+        or not context.progress_action_token
+    ):
+        return False
+    arguments = {
+        "tab_identity": context.progress_tab_identity,
+        "attempt_id": context.progress_attempt_id,
+        "attempt_generation": context.progress_attempt_generation,
+        "action_owner": "tixcraft_submit_dispatch",
+        "action_token": context.progress_action_token,
+        "reason": reason,
+    }
+    if outcome == "confirmed":
+        return runtime_health.confirm_bound_expected_progress(**arguments)
+    if outcome == "failed":
+        return runtime_health.fail_bound_expected_progress(
+            **arguments,
+            protected=protected,
+        )
+    return runtime_health.cancel_bound_expected_progress(**arguments)
+
+
+def _clear_tixcraft_submit_in_flight(reason="", progress_outcome="cancelled"):
     context = _state.pop("submit_in_flight", None)
+    if isinstance(context, TixCraftSubmitInFlight):
+        _resolve_tixcraft_submit_progress(
+            context,
+            progress_outcome,
+            f"tixcraft_submit_{reason or 'cleared'}",
+        )
     _state["notification_submit_started_at"] = 0.0
     _state["notification_order_probe_next_at"] = 0.0
     guard = _state.get("submit_guard")
@@ -2051,6 +2402,53 @@ def _clear_tixcraft_submit_in_flight(reason=""):
         )
 
 
+def _release_tixcraft_rejected_central_submit(tab, context, reason):
+    """Release a server-rejected submit only while its exact owner is current."""
+
+    if not isinstance(context, TixCraftSubmitInFlight):
+        return True
+    if not context.central_attempt_id:
+        return True
+    if tab is None:
+        return False
+    from platform_engine import platform_engine
+
+    released = platform_engine.release_rejected_submit_if_owned(
+        tab,
+        "tixcraft",
+        attempt_id=context.central_attempt_id,
+        attempt_generation=context.central_attempt_generation,
+        token=context.central_submit_token,
+        reason=str(reason or "confirmed_rejection"),
+    )
+    return released is not None
+
+
+def _mark_tixcraft_central_submit_unknown(tab, reason):
+    context = _state.get("submit_in_flight")
+    if not isinstance(context, TixCraftSubmitInFlight):
+        return False
+    if not context.central_attempt_id or tab is None:
+        return False
+    from platform_engine import platform_engine
+
+    unknown = platform_engine.mark_submit_outcome_unknown_if_owned(
+        tab,
+        "tixcraft",
+        attempt_id=context.central_attempt_id,
+        token=context.central_submit_token,
+        reason=str(reason or "tixcraft_submit_outcome_unknown"),
+    )
+    if unknown is None:
+        return False
+    _resolve_tixcraft_submit_progress(
+        context,
+        "failed",
+        str(reason or "tixcraft_submit_outcome_unknown"),
+    )
+    return True
+
+
 def _tixcraft_submit_owner_is_invalid(tab=None):
     """Return True only when identity evidence disproves submit ownership."""
 
@@ -2065,6 +2463,8 @@ def _tixcraft_submit_owner_is_invalid(tab=None):
     ):
         return True
     if context.token != int(_state.get("submit_generation", 0) or 0):
+        return True
+    if not _tixcraft_central_submit_owner_is_valid(context, tab):
         return True
     return bool(tab is not None and context.tab_identity and context.tab_identity != id(tab))
 
@@ -2085,6 +2485,16 @@ async def _reconcile_tixcraft_submit_ownership(tab, page_class, url, config_dict
         return False
     current_page = PageClass(page_class)
     if current_page is not PageClass.AREA:
+        if current_page in {
+            PageClass.ORDER,
+            PageClass.CHECKOUT,
+            PageClass.PAYMENT,
+        }:
+            _resolve_tixcraft_submit_progress(
+                context,
+                "confirmed",
+                f"tixcraft_submit_{current_page.value}_observed",
+            )
         return True
     snapshot = await _read_tixcraft_page_health(tab, config_dict)
     if not _is_tixcraft_recovery_health_confirmed(snapshot, PageClass.AREA):
@@ -2092,7 +2502,24 @@ async def _reconcile_tixcraft_submit_ownership(tab, page_class, url, config_dict
     attempt = _get_tixcraft_purchase_attempt()
     if attempt is not None:
         attempt.phase = TixCraftAttemptPhase.RECOVERING_TO_AREA
+    if context.central_attempt_id:
+        from platform_engine import platform_engine
+
+        central_rearmed = platform_engine.confirm_positive_safe_rearm_if_owned(
+            tab,
+            "tixcraft",
+            attempt_id=context.central_attempt_id,
+            attempt_generation=context.central_attempt_generation,
+            token=context.central_submit_token,
+            url=url,
+            page_class=PageClass.AREA,
+        )
+        if central_rearmed is None:
+            return True
+        if attempt is not None:
+            attempt.phase = TixCraftAttemptPhase.CLOSED
     _close_tixcraft_purchase_attempt("confirmed_area_recovery")
+    _ensure_tixcraft_state_defaults()
     _state["last_selected_area"] = ""
     _state["selected_area_candidate"] = ""
     _state["selected_area_metadata"] = {}
@@ -2455,12 +2882,50 @@ def _is_retryable_alert(message):
     return any(keyword in text for keyword in _TIXCRAFT_RETRYABLE_ALERT_KEYWORDS)
 
 
-def _reset_tixcraft_submit_state():
+def _reset_tixcraft_submit_state(
+    *,
+    tab=None,
+    confirmed_rejection_reason="",
+    expected_submit_context=_TIXCRAFT_SUBMIT_CONTEXT_UNSPECIFIED,
+):
+    context = _state.get("submit_in_flight")
+    if (
+        expected_submit_context is not _TIXCRAFT_SUBMIT_CONTEXT_UNSPECIFIED
+        and context is not expected_submit_context
+    ):
+        _record_action(
+            "submit_reset_deferred",
+            f"{getattr(expected_submit_context, 'attempt_id', '')}:stale_callback",
+        )
+        return False
+    if (
+        isinstance(context, TixCraftSubmitInFlight)
+        and context.central_attempt_id
+        and not confirmed_rejection_reason
+    ):
+        _record_action(
+            "submit_reset_deferred",
+            f"{context.attempt_id}:ambiguous_outcome",
+        )
+        return False
+    if confirmed_rejection_reason and not _release_tixcraft_rejected_central_submit(
+        tab,
+        context,
+        confirmed_rejection_reason,
+    ):
+        _record_action(
+            "submit_reset_deferred",
+            f"{getattr(context, 'attempt_id', '')}:owner_mismatch",
+        )
+        return False
     _state["captcha_submit_until"] = 0
     _clear_tixcraft_attempt_scoped_actions()
     _state["captcha_alert_detected"] = False
     _state["manual_intervention_required"] = False
-    _clear_tixcraft_submit_in_flight("reset")
+    _clear_tixcraft_submit_in_flight(
+        str(confirmed_rejection_reason or "reset")
+    )
+    return True
 
 
 def _reset_tixcraft_area_retry_state():
@@ -3477,14 +3942,30 @@ async def _maybe_emit_tixcraft_seat_supplement(tab, config_dict, url):
     return False
 
 
-async def _recover_to_last_valid_area(tab, config_dict, reason):
+async def _recover_to_last_valid_area(
+    tab,
+    config_dict,
+    reason,
+    *,
+    expected_submit_context=_TIXCRAFT_SUBMIT_CONTEXT_UNSPECIFIED,
+):
     debug = util.create_debug_logger(config_dict)
-    if _is_tixcraft_submit_in_flight(tab) and reason not in {
+    if (
+        expected_submit_context is not _TIXCRAFT_SUBMIT_CONTEXT_UNSPECIFIED
+        and _state.get("submit_in_flight") is not expected_submit_context
+    ):
+        _record_action(
+            "submit_reset_deferred",
+            f"{getattr(expected_submit_context, 'attempt_id', '')}:stale_recovery",
+        )
+        return False
+    confirmed_rejection_reasons = {
         "confirmed_rejected_error",
         "confirmed_canceled_order",
         "confirmed_continue_shopping",
         "retryable_alert",
-    }:
+    }
+    if _is_tixcraft_submit_in_flight(tab) and reason not in confirmed_rejection_reasons:
         source_url = _get_cached_tab_url(tab)
         runtime_health.runtime_log(
             "[TIXCRAFT RECOVERY] blocked_submit_in_flight",
@@ -3501,11 +3982,30 @@ async def _recover_to_last_valid_area(tab, config_dict, reason):
     last_area_url = _normalize_tixcraft_area_url(_state.get("last_valid_area_url", ""))
     if not last_area_url:
         debug.log(f"[TIXCRAFT RECOVERY] No last_valid_area_url for {reason}")
-        _reset_tixcraft_submit_state()
+        _reset_tixcraft_submit_state(
+            tab=tab,
+            confirmed_rejection_reason=(
+                reason if reason in confirmed_rejection_reasons else ""
+            ),
+            expected_submit_context=expected_submit_context,
+        )
         _reset_tixcraft_area_retry_state()
         return False
     _set_tixcraft_attempt_phase(TixCraftAttemptPhase.RECOVERING_TO_AREA)
-    _reset_tixcraft_submit_state()
+    if not _reset_tixcraft_submit_state(
+        tab=tab,
+        confirmed_rejection_reason=(
+            reason if reason in confirmed_rejection_reasons else ""
+        ),
+        expected_submit_context=expected_submit_context,
+    ):
+        runtime_health.runtime_log(
+            "[TIXCRAFT RECOVERY] rejected_submit_owner_mismatch",
+            config_dict,
+            reason=reason,
+            target_url=last_area_url,
+        )
+        return False
     _reset_tixcraft_area_retry_state()
     debug.log(f"[TIXCRAFT RECOVERY] {reason}; navigating back to area: {last_area_url}")
     try:
@@ -3652,6 +4152,7 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
                 await runtime_health.wait_for_interactive_ready(tab, config_dict)
             return reload_success
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"{log_prefix} Leak-watch reload failed: {exc}")
             runtime_health.runtime_log(
                 "[LEAK] reload_error",
@@ -3674,6 +4175,7 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
         try:
             return await guarded_reload(tab, reason=state_key, config_dict=config_dict)
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"{log_prefix} Reload failed: {exc}")
             return False
 
@@ -3704,7 +4206,8 @@ async def _is_tixcraft_ticket_count_ready(tab, config_dict):
             }})();
         ''')
         return bool(util.parse_nodriver_result(result))
-    except Exception:
+    except Exception as browser_exc:
+        runtime_health.raise_if_terminal_browser_error(browser_exc)
         return False
 
 
@@ -3750,7 +4253,8 @@ async def nodriver_tixcraft_home_close_window(tab):
         if accept_all_cookies_btn:
             await accept_all_cookies_btn.click()
             _state['cookie_accepted'] = True
-    except Exception:
+    except Exception as browser_exc:
+        runtime_health.raise_if_terminal_browser_error(browser_exc)
         pass
 
 async def nodriver_tixcraft_redirect(tab, url, config_dict=None):
@@ -3775,7 +4279,8 @@ async def nodriver_tixcraft_redirect(tab, url, config_dict=None):
             has_buy_link = False
             try:
                 has_buy_link = await tab.evaluate(js)
-            except Exception:
+            except Exception as browser_exc:
+                runtime_health.raise_if_terminal_browser_error(browser_exc)
                 has_buy_link = False
             if not has_buy_link:
                 if config_dict is not None:
@@ -3798,7 +4303,8 @@ async def nodriver_tixcraft_redirect(tab, url, config_dict=None):
                 # 等待日期列表出現，確保頁面載入完成
                 try:
                     await tab.wait_for('#gameList > table > tbody > tr', timeout=5)
-                except Exception:
+                except Exception as browser_exc:
+                    runtime_health.raise_if_terminal_browser_error(browser_exc)
                     pass  # timeout 沒關係，讓後續邏輯處理
                 ret = True
                 _state["tixcraft_detail_reload_next_at"] = 0
@@ -3864,6 +4370,7 @@ async def nodriver_ticketmaster_parse_zone_info(tab, config_dict):
             return zone_info
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[TICKETMASTER ZONE] String extraction failed: {exc}")
 
     # Try method 2: Direct JavaScript evaluation (fallback)
@@ -3975,6 +4482,7 @@ async def nodriver_ticketmaster_parse_zone_info(tab, config_dict):
                         debug.log(f"[TICKETMASTER ZONE] Diagnostic logging failed: {diag_exc}")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[TICKETMASTER ZONE] JavaScript evaluation failed: {exc}")
 
     return zone_info
@@ -4197,6 +4705,7 @@ async def nodriver_ticketmaster_get_ticketPriceList(tab, config_dict):
         debug.log("[TICKETMASTER TICKET] Timeout waiting for mapContainer")
         return None
     except Exception as e:
+        runtime_health.raise_if_terminal_browser_error(e)
         debug.log(f"[TICKETMASTER TICKET] Error: {e}")
         return None
 
@@ -4233,6 +4742,7 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
                 break
             await asyncio.sleep(0.5)
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             if attempt == 0:
                 debug.log(f"[TICKETMASTER DATE] Waiting for date list to load... ({exc})")
             await asyncio.sleep(0.5)
@@ -4255,7 +4765,8 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
         try:
             row_html = await row.get_html()
             row_text = util.remove_html_tags(row_html)
-        except Exception:
+        except Exception as browser_exc:
+            runtime_health.raise_if_terminal_browser_error(browser_exc)
             break
 
         if not row_text:
@@ -4292,7 +4803,8 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
             row_html = await row.get_html()
             row_text = util.remove_html_tags(row_html)
             formated_area_list_text.append(row_text)
-        except Exception:
+        except Exception as browser_exc:
+            runtime_health.raise_if_terminal_browser_error(browser_exc)
             formated_area_list_text.append("")
 
     # T004-T008: Early return pattern (Feature 003)
@@ -4419,6 +4931,7 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
                     await tab.sleep(0.2)
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[TICKETMASTER DATE] Failed to click link: {exc}")
 
     # Auto reload if no match
@@ -4507,6 +5020,7 @@ async def nodriver_ticketmaster_area_auto_select(tab, config_dict, zone_info):
             debug.log(f"[TICKETMASTER AREA] Selected zone: {target_area}")
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[TICKETMASTER AREA] Failed to execute JavaScript: {exc}")
 
     # Auto refresh if needed (only when keyword is specified but no match)
@@ -4547,6 +5061,7 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
     try:
         select_element = await table_select.query_selector('select')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[TICKETMASTER TICKET] Failed to find select: {exc}")
         return False
 
@@ -4591,7 +5106,8 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
                     return null;
                 }})();
             ''')
-        except Exception:
+        except Exception as browser_exc:
+            runtime_health.raise_if_terminal_browser_error(browser_exc)
             pass
 
     if current_value and current_value != "0" and current_value.isnumeric():
@@ -4609,7 +5125,8 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
                 if auto_mode_button:
                     await auto_mode_button.click()
                     debug.log("[TICKETMASTER TICKET] Clicked #autoMode button")
-            except Exception:
+            except Exception as browser_exc:
+                runtime_health.raise_if_terminal_browser_error(browser_exc)
                 pass
             return True
         debug.log(
@@ -4692,7 +5209,8 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
                 if auto_mode_button:
                     await auto_mode_button.click()
                     debug.log("[TICKETMASTER TICKET] Clicked #autoMode button")
-            except Exception:
+            except Exception as browser_exc:
+                runtime_health.raise_if_terminal_browser_error(browser_exc)
                 pass
             return True
         else:
@@ -4700,6 +5218,7 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
             return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[TICKETMASTER TICKET] Exception setting ticket number: {exc}")
         return False
 
@@ -4732,7 +5251,8 @@ async def nodriver_ticketmaster_captcha(tab, config_dict, ocr, captcha_browser):
         try:
             await tab.send(cdp.page.handle_java_script_dialog(accept=True))
             debug.log("[TICKETMASTER CAPTCHA] Alert auto-dismissed by handler")
-        except Exception:
+        except Exception as browser_exc:
+            runtime_health.raise_if_terminal_browser_error(browser_exc)
             pass
 
     # Register handler for this captcha session
@@ -4901,6 +5421,7 @@ async def nodriver_ticketmaster_captcha(tab, config_dict, ocr, captcha_browser):
                             continue  # Retry OCR
 
                     except Exception as modal_exc:
+                        runtime_health.raise_if_terminal_browser_error(modal_exc)
                         debug.log(f"[TICKETMASTER CAPTCHA] Error checking modal: {modal_exc}")
 
                     # No error modal detected, form submitted successfully
@@ -5059,6 +5580,7 @@ async def nodriver_fill_verify_form(tab, config_dict, inferred_answer_string, fa
                         is_button_clicked = True
                         debug.log(f"[VERIFY FORM] Clicked submit button: {next_step_button_css}")
                 except Exception as btn_exc:
+                    runtime_health.raise_if_terminal_browser_error(btn_exc)
                     debug.log(f"[VERIFY FORM] Failed to click button: {btn_exc}")
 
             if is_button_clicked:
@@ -5083,6 +5605,7 @@ async def nodriver_fill_verify_form(tab, config_dict, inferred_answer_string, fa
                 debug.log("[VERIFY FORM] No answer, focused input field")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[VERIFY FORM] Error: {exc}")
 
     return is_answer_sent, fail_list
@@ -5220,7 +5743,8 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
         # 這裡再等待一次是為了處理直接進入 /activity/game/ 頁面的情況
         try:
             await tab.wait_for('#gameList > table > tbody > tr', timeout=3)
-        except Exception:
+        except Exception as browser_exc:
+            runtime_health.raise_if_terminal_browser_error(browser_exc)
             pass  # timeout 沒關係，繼續嘗試讀取
 
         try:
@@ -5237,7 +5761,8 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                 area_list = await tab.query_selector_all(
                     "#gameList > table > tbody > tr"
                 )
-        except Exception:
+        except Exception as browser_exc:
+            runtime_health.raise_if_terminal_browser_error(browser_exc)
             pass
 
     # Language detection for coming soon
@@ -5268,7 +5793,8 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                     await tab.evaluate("document.documentElement.lang")
                     or "en-US"
                 )
-        except Exception:
+        except Exception as browser_exc:
+            runtime_health.raise_if_terminal_browser_error(browser_exc)
             _state['html_lang'] = 'en-US'
     html_lang = _state['html_lang']
 
@@ -5299,7 +5825,8 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
             else:
                 all_row_htmls_raw = await tab.evaluate(row_cache_script)
             all_row_htmls = _parse_tixcraft_row_htmls(all_row_htmls_raw)
-        except Exception:
+        except Exception as browser_exc:
+            runtime_health.raise_if_terminal_browser_error(browser_exc)
             pass
         for i, row in enumerate(area_list):
             try:
@@ -5316,7 +5843,8 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                     else:
                         row_html = await row.get_html()
                 row_text = util.remove_html_tags(row_html)
-            except Exception:
+            except Exception as browser_exc:
+                runtime_health.raise_if_terminal_browser_error(browser_exc)
                 break
 
             if row_text and not util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
@@ -6055,6 +6583,7 @@ async def _nodriver_tixcraft_area_auto_select_impl(
             leak_scheduler.mark_dom_scan_end(now=time.monotonic())
         raise
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         if leak_dom_guard:
             leak_scheduler.mark_dom_scan_end(now=time.monotonic())
         runtime_health.runtime_log(
@@ -6128,7 +6657,8 @@ async def _nodriver_tixcraft_area_auto_select_impl(
                 area_count=len(area_text_cache),
                 current_url=_tixcraft_route_key(url),
             )
-    except Exception:
+    except Exception as browser_exc:
+        runtime_health.raise_if_terminal_browser_error(browser_exc)
         area_list_cache = None
         area_text_cache = None
     finally:
@@ -6329,7 +6859,8 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
                 area_list = await el.query_selector_all('a')
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as browser_exc:
+            runtime_health.raise_if_terminal_browser_error(browser_exc)
             debug.log(f"[AREA KEYWORD] Failed to query area list")
             return True, None
 
@@ -6368,7 +6899,8 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
                 row_text = util.remove_html_tags(row_html)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as browser_exc:
+                runtime_health.raise_if_terminal_browser_error(browser_exc)
                 debug.log(f"[AREA KEYWORD] [{area_index}] Failed to get row content")
                 break
 
@@ -6458,7 +6990,8 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
                         )
                         continue
                     debug.log(f"[AREA KEYWORD]   Sufficient seats available")
-            except Exception:
+            except Exception as browser_exc:
+                runtime_health.raise_if_terminal_browser_error(browser_exc)
                 pass
 
         matched_blocks.append(row)
@@ -6553,6 +7086,7 @@ async def nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, sel
             is_ticket_number_assigned = result.get('success', False)
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     return is_ticket_number_assigned
@@ -6572,7 +7106,8 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
     # 等待票券選擇器出現（智慧等待，取代固定 0.5 秒延遲）
     try:
         await tab.wait_for('.mobile-select, select[id*="TicketForm_ticketPrice_"]', timeout=2)
-    except Exception:
+    except Exception as browser_exc:
+        runtime_health.raise_if_terminal_browser_error(browser_exc)
         pass  # Continue even if timeout, will try to find selectors below
 
     # 查找票券選擇器
@@ -6580,6 +7115,7 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
     try:
         form_select_list = await tab.query_selector_all('.mobile-select')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("Failed to find .mobile-select")
 
     # 如果沒找到 .mobile-select，嘗試其他選擇器
@@ -6587,6 +7123,7 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
         try:
             form_select_list = await tab.query_selector_all('select[id*="TicketForm_ticketPrice_"]')
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("Failed to find ticket selector")
 
     form_select_count = len(form_select_list)
@@ -6678,6 +7215,7 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
                     ticket_type_name = ticket_type_name.strip()
 
             except Exception as name_exc:
+                runtime_health.raise_if_terminal_browser_error(name_exc)
                 debug.log(f"[TICKET SELECT] Failed to extract ticket type name: {name_exc}")
 
             # 加入 valid_ticket_types
@@ -6691,6 +7229,7 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
             debug.log(f"[TICKET SELECT] Valid ticket type: {select_id} - '{ticket_type_name}'")
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[TICKET SELECT] Error checking select element: {exc}")
 
     debug.log(f"[TICKET SELECT] Valid ticket types: {len(valid_ticket_types)}/{form_select_count}")
@@ -6812,6 +7351,7 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
                     is_ticket_number_assigned = True
                     debug.log(f"Ticket number already set to: {current_value}")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"Failed to check current selected value: {exc}")
 
     # 回傳結果：select_obj 和 select_id 用於後續操作
@@ -6840,11 +7380,12 @@ async def _dispatch_tixcraft_enter_submit(tab, current_url, submit_guard) -> boo
 
     # No await occurs between these writes and keyDown, so competing schedulers
     # cannot observe an unprotected submitted document.
+    if not _mark_tixcraft_submit_started(current_url, tab=tab):
+        return False
     submit_guard.mark_submitted(
         current_url,
         pending_seconds=_TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS,
     )
-    _mark_tixcraft_submit_started(current_url, tab=tab)
     try:
         await tab.send(
             cdp.input_.dispatch_key_event(
@@ -6858,8 +7399,16 @@ async def _dispatch_tixcraft_enter_submit(tab, current_url, submit_guard) -> boo
     except asyncio.CancelledError:
         # Cancellation can race with a browser-side key event. Preserve the
         # protected state and propagate cancellation to the runtime owner.
+        _mark_tixcraft_central_submit_unknown(
+            tab,
+            "tixcraft_keydown_cancelled_outcome_inconclusive",
+        )
         raise
     except Exception as exc:
+        _mark_tixcraft_central_submit_unknown(
+            tab,
+            "tixcraft_keydown_outcome_inconclusive",
+        )
         runtime_health.runtime_log(
             "[TIXCRAFT CAPTCHA] Enter keyDown outcome_inconclusive",
             None,
@@ -6869,6 +7418,7 @@ async def _dispatch_tixcraft_enter_submit(tab, current_url, submit_guard) -> boo
             generation=int(_state.get("notification_flow_generation", 0) or 0),
             token=int(_state.get("submit_generation", 0) or 0),
         )
+        runtime_health.raise_if_terminal_browser_error(exc)
     _record_action("submit_clicked")
     try:
         await tab.send(
@@ -6881,14 +7431,23 @@ async def _dispatch_tixcraft_enter_submit(tab, current_url, submit_guard) -> boo
             )
         )
     except asyncio.CancelledError:
+        _mark_tixcraft_central_submit_unknown(
+            tab,
+            "tixcraft_keyup_cancelled_outcome_inconclusive",
+        )
         raise
     except Exception as exc:
         # keyDown can submit and replace the document before keyUp is sent.
+        _mark_tixcraft_central_submit_unknown(
+            tab,
+            "tixcraft_keyup_transport_inconclusive",
+        )
         runtime_health.runtime_log(
             "[TIXCRAFT CAPTCHA] Enter keyUp best-effort failed",
             None,
             error=str(exc),
         )
+        runtime_health.raise_if_terminal_browser_error(exc)
     return True
 
 
@@ -6904,11 +7463,12 @@ def _arm_tixcraft_manual_submit_pending(tab, current_url, config_dict=None) -> N
     if _is_tixcraft_submit_in_flight(tab):
         return
     _ensure_runtime_helpers()
+    if not _mark_tixcraft_submit_started(current_url, tab=tab):
+        return
     _state["submit_guard"].mark_submitted(
         current_url,
         pending_seconds=_TIXCRAFT_SUBMIT_CONTEXT_MAX_SECONDS,
     )
-    _mark_tixcraft_submit_started(current_url, tab=tab)
     _record_action("manual_submit_armed")
     context = _state.get("submit_in_flight")
     runtime_health.runtime_log(
@@ -7067,6 +7627,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                 })();
             ''')
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
         if is_visible:
@@ -7079,6 +7640,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
             try:
                 inputed_value = await form_verifyCode.apply('function (element) { return element.value; }') or ""
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
             is_text_clicked = False
@@ -7090,6 +7652,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                     is_text_clicked = True
                     is_verifyCode_editing = True
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log("[TIXCRAFT CAPTCHA] Failed to click captcha input, trying JavaScript")
                     try:
                         await tab.evaluate('''
@@ -7097,6 +7660,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                         ''')
                         is_verifyCode_editing = True
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
 
             if answer:
@@ -7241,6 +7805,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                         await nodriver_tixcraft_toast(tab, f"※ 按 Enter 如果答案是: {answer}")
 
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[TIXCRAFT CAPTCHA] Failed to input captcha: {exc}")
 
     return is_verifyCode_editing, is_form_submitted
@@ -7257,6 +7822,7 @@ async def nodriver_tixcraft_toast(tab, message):
             }})();
         ''')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
 async def nodriver_get_yii_captcha_hash(tab):
@@ -7271,7 +7837,8 @@ async def nodriver_get_yii_captcha_hash(tab):
             })()
         ''')
         return int(result) if result else 0
-    except Exception:
+    except Exception as browser_exc:
+        runtime_health.raise_if_terminal_browser_error(browser_exc)
         return 0
 
 
@@ -7296,6 +7863,7 @@ async def nodriver_tixcraft_reload_captcha(tab, domain_name, config_dict=None):
         ''', await_promise=True)
         return bool(result)
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug = util.create_debug_logger(config_dict)
         debug.log(f"[TIXCRAFT OCR] reload_captcha failed: {exc}")
     return False
@@ -7358,6 +7926,7 @@ async def nodriver_tixcraft_get_ocr_answer(
                         img_base64 = base64.b64decode(captcha_payload)
 
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log("[TIXCRAFT OCR] Canvas error:", str(exc))
 
         # OCR 識別
@@ -7561,7 +8130,8 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
                     try:
                         await tab.send(cdp.page.handle_java_script_dialog(accept=True))
                         debug.log("[TIXCRAFT OCR] Dismissed existing alert")
-                    except Exception:
+                    except Exception as browser_exc:
+                        runtime_health.raise_if_terminal_browser_error(browser_exc)
                         pass
 
                     # Wait for potential auto-refresh
@@ -7659,7 +8229,7 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
     # stay visible for manual intervention and the browser remains open.
     bound_state = _state.current()
 
-    async def _handle_global_alert(event):
+    async def _handle_global_alert(event, expected_submit_context):
         # Skip alert handling when bot is paused (let user handle manually)
         if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_FILE)):
             return
@@ -7688,15 +8258,31 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
         is_retryable_alert = _is_retryable_alert(event.message)
 
         if not is_captcha_error and not is_retryable_alert:
+            if _state.get("submit_in_flight") is not expected_submit_context:
+                _record_action(
+                    "submit_reset_deferred",
+                    (
+                        f"{getattr(expected_submit_context, 'attempt_id', '')}:"
+                        "stale_unknown_alert"
+                    ),
+                )
+                return
             _state["manual_intervention_required"] = True
             debug.log("[GLOBAL ALERT] Unknown alert; waiting for manual intervention")
             return
 
         if is_captcha_error:
-            _state["captcha_alert_detected"] = True
             # Wrong answer submitted: clear the submit guard so retry is immediate.
-            _reset_tixcraft_submit_state()
-            debug.log("[GLOBAL ALERT] Captcha error detected, flagging for retry")
+            exact_submit_released = _reset_tixcraft_submit_state(
+                tab=tab,
+                confirmed_rejection_reason="captcha_error",
+                expected_submit_context=expected_submit_context,
+            )
+            if exact_submit_released:
+                _state["captcha_alert_detected"] = True
+                debug.log(
+                    "[GLOBAL ALERT] Captcha error detected, flagging for retry"
+                )
 
         dismiss_success = False
         for attempt in range(3):
@@ -7706,6 +8292,7 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
                 debug.log(f"[GLOBAL ALERT] Alert dismissed (attempt {attempt + 1})")
                 break
             except Exception as dismiss_exc:
+                runtime_health.raise_if_terminal_browser_error(dismiss_exc)
                 error_msg = str(dismiss_exc)
                 # CDP -32602 means no dialog is showing (already dismissed by another handler or user)
                 if "No dialog is showing" in error_msg or "-32602" in error_msg:
@@ -7718,14 +8305,29 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
                     debug.log(f"[GLOBAL ALERT] Failed to dismiss alert: {dismiss_exc}")
 
         if is_retryable_alert and dismiss_success:
-            await _recover_to_last_valid_area(tab, config_dict, "retryable_alert")
+            await _recover_to_last_valid_area(
+                tab,
+                config_dict,
+                "retryable_alert",
+                expected_submit_context=expected_submit_context,
+            )
 
-    async def handle_global_alert(event):
-        token = _state.bind(bound_state)
-        try:
-            return await _handle_global_alert(event)
-        finally:
-            _state.reset_binding(token)
+    def handle_global_alert(event, *_connection):
+        expected_submit_context = bound_state.get("submit_in_flight")
+
+        async def run_attempt_scoped_alert():
+            token = _state.bind(bound_state)
+            try:
+                return await _handle_global_alert(
+                    event,
+                    expected_submit_context,
+                )
+            finally:
+                _state.reset_binding(token)
+
+        return run_attempt_scoped_alert()
+
+    handle_global_alert = _as_call_time_snapshot_coroutine(handle_global_alert)
 
     _ensure_tixcraft_state_defaults()
 
@@ -7737,7 +8339,8 @@ async def _nodriver_tixcraft_main_impl(tab, url, config_dict, ocr, Captcha_Brows
         try:
             try:
                 await tab.send(cdp.page.enable())
-            except Exception:
+            except Exception as browser_exc:
+                runtime_health.raise_if_terminal_browser_error(browser_exc)
                 pass
             tab.add_handler(cdp.page.JavascriptDialogOpening, handle_global_alert)
             _state["alert_handler_registered"] = True

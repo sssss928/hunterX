@@ -12,6 +12,7 @@ import urllib.parse
 from zendriver import cdp
 
 import util
+import runtime_health
 from page_classifier import PageClass, classify_page
 from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
@@ -62,6 +63,13 @@ CONST_TICKETPLUS_FAILURE_BLOCKED_PROBE_INTERVAL = 0.15
 CONST_TICKETPLUS_SUBMISSION_PENDING_PROBE_INTERVAL = 0.20
 CONST_TICKETPLUS_QUEUE_PROBE_INTERVAL = 1.0
 CONST_TICKETPLUS_QUEUE_MONITOR_MAX = 600.0
+CONST_TICKETPLUS_LOGIN_ATTEMPT_REARM_SECONDS = 15.0
+CONST_TICKETPLUS_TARGET_RESTORE_MAX_ATTEMPTS = 3
+CONST_TICKETPLUS_TARGET_RESTORE_RETRY_SECONDS = 1.0
+CONST_TICKETPLUS_STALE_WATCH_DIAGNOSTIC_INTERVAL = 30.0
+CONST_TICKETPLUS_STALE_WATCH_DIAGNOSTIC_CAPACITY = 64
+
+_stale_submission_watch_diagnostics = {}
 
 
 def _ticketplus_state_defaults():
@@ -73,6 +81,9 @@ def _ticketplus_state_defaults():
         "done_time": None,
         "elapsed_time": None,
         "signin_form_filled": False,
+        "authenticated": False,
+        "login_attempt_started_at": 0.0,
+        "login_generation": 0,
         "purchase_completed": False,
         "order_page_visited": False,
         "refresh_deadlines": {},
@@ -85,6 +96,12 @@ def _ticketplus_state_defaults():
         "submission_started_at": 0.0,
         "submission_deadline": 0.0,
         "submission_next_probe_at": 0.0,
+        "submission_attempt_id": "",
+        "submission_attempt_generation": 0,
+        "submission_token": "",
+        "submission_progress_tab_identity": "",
+        "submission_outcome_unknown": False,
+        "last_submit_dispatch_status": "not_dispatched",
         "queue_active": False,
         "queue_started_at": 0.0,
         "queue_deadline": 0.0,
@@ -319,6 +336,7 @@ async def nodriver_ticketplus_fill_user_dictionary_fields(tab, config_dict):
             debug.log(f"[TICKETPLUS VERIFY] Filled {filled_count} custom dictionary field(s)")
         return filled_count
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[TICKETPLUS VERIFY] Custom dictionary autofill failed: {exc}")
         return 0
 
@@ -447,6 +465,7 @@ async def nodriver_ticketplus_detect_layout_style(tab, config_dict=None):
         }
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         return {'style': 0, 'found': False, 'button_enabled': False, 'error': str(exc)}
 
 
@@ -468,6 +487,7 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
             country_code = await el_country.apply('function (element) { return element.value; } ')
             debug.log(f"[TICKETPLUS SIGNIN] country_code: {country_code}")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[TICKETPLUS SIGNIN] country code error: {exc}")
 
     is_account_assigned = False
@@ -480,6 +500,7 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
             await el_account.send_keys(ticketplus_account);
             is_account_assigned = True
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[TICKETPLUS SIGNIN] account input error: {exc}")
 
     if is_account_assigned:
@@ -503,6 +524,7 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
                     # PS: ticketplus country field may not located at your target country.
                     is_submited = True
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[TICKETPLUS SIGNIN] password input error: {exc}")
             pass
 
@@ -519,9 +541,96 @@ async def nodriver_ticketplus_is_signin(tab):
                     is_user_signin = True
         cookies = None
     except Exception as exc:
-        pass
+        runtime_health.raise_if_terminal_browser_error(exc)
 
     return is_user_signin
+
+
+def _ticketplus_update_login_lifecycle(is_user_signin, now=None):
+    current = time.monotonic() if now is None else float(now)
+    was_authenticated = bool(_state.get("authenticated", False))
+    if is_user_signin:
+        _state["authenticated"] = True
+        _state["signin_form_filled"] = False
+        _state["login_attempt_started_at"] = 0.0
+        return
+
+    if was_authenticated:
+        _state["authenticated"] = False
+        _state["signin_form_filled"] = False
+        _state["login_attempt_started_at"] = 0.0
+        _state["login_generation"] = int(_state.get("login_generation", 0) or 0) + 1
+        return
+
+    started_at = float(_state.get("login_attempt_started_at", 0.0) or 0.0)
+    if (
+        _state.get("signin_form_filled", False)
+        and started_at > 0.0
+        and current - started_at >= CONST_TICKETPLUS_LOGIN_ATTEMPT_REARM_SECONDS
+    ):
+        _state["signin_form_filled"] = False
+        _state["login_attempt_started_at"] = 0.0
+        _state["login_generation"] = int(_state.get("login_generation", 0) or 0) + 1
+
+
+async def _ticketplus_restore_navigation_target(tab, config_dict, debug):
+    from navigation_context import canonicalize_target_url
+    from platform_engine import platform_engine
+
+    context = platform_engine.target_context_for(tab, "ticketplus")
+    if context is None:
+        context = platform_engine.capture_navigation_intent(
+            tab,
+            "ticketplus",
+            str(config_dict.get("homepage", "") or ""),
+            config_dict,
+            reason="ticketplus_login_target",
+        )
+    if context is None:
+        return False
+
+    current_url = str(getattr(getattr(tab, "target", None), "url", "") or "")
+    if canonicalize_target_url(current_url) == context.intent.normalized_target_url:
+        if context.restored_at is None:
+            context.record_restore(
+                True,
+                retry_seconds=0.0,
+                now=time.monotonic(),
+            )
+        return True
+
+    now = time.monotonic()
+    if not context.can_restore(
+        max_attempts=CONST_TICKETPLUS_TARGET_RESTORE_MAX_ATTEMPTS,
+        now=now,
+    ):
+        return False
+    success = False
+    error = ""
+    try:
+        success = bool(
+            await guarded_get(
+                tab,
+                context.intent.target_url,
+                config_dict,
+                reason="ticketplus_login_target_restore",
+            )
+        )
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
+        error = type(exc).__name__
+        debug.log(f"[TICKETPLUS LOGIN] target restore error: {error}")
+    context.record_restore(
+        success,
+        retry_seconds=CONST_TICKETPLUS_TARGET_RESTORE_RETRY_SECONDS,
+        error=error or ("" if success else "navigation_failed"),
+        now=now,
+    )
+    if success:
+        debug.log("[TICKETPLUS LOGIN] Restored configured activity target")
+    elif context.restore_attempts >= CONST_TICKETPLUS_TARGET_RESTORE_MAX_ATTEMPTS:
+        debug.log("[TICKETPLUS LOGIN] Target restore retry budget exhausted")
+    return success
 
 
 async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
@@ -530,6 +639,7 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
     is_user_signin = False
     if len(config_dict["accounts"]["ticketplus_account"]) > 0:
         is_user_signin = await nodriver_ticketplus_is_signin(tab)
+        _ticketplus_update_login_lifecycle(is_user_signin)
         if not is_user_signin:
             await asyncio.sleep(0.1)
             if not _state.get("signin_form_filled", False):
@@ -543,6 +653,7 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
                         is_sign_in_btn_pressed = True
                         await asyncio.sleep(0.2)
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[TICKETPLUS AUTOFILL] sign-in button click error: {exc}")
                     pass
 
@@ -552,6 +663,7 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
                         my_css_selector = 'div.px-4.py-3.drawerItem.cursor-pointer'
                         action_btns = await tab.query_selector_all(my_css_selector)
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log(f"[TICKETPLUS AUTOFILL] drawer items query error: {exc}")
                         pass
                     if action_btns:
@@ -560,12 +672,17 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
                             try:
                                 await action_btns[3].click()
                             except Exception as exc:
+                                runtime_health.raise_if_terminal_browser_error(exc)
                                 debug.log(f"[TICKETPLUS AUTOFILL] action button click error: {exc}")
                                 pass
 
                 is_filled_form, is_submited = await nodriver_ticketplus_account_sign_in(tab, config_dict)
                 if is_filled_form:
                     _state["signin_form_filled"] = True
+                    _state["login_attempt_started_at"] = time.monotonic()
+                    _state["login_generation"] = int(
+                        _state.get("login_generation", 0) or 0
+                    ) + 1
 
     return is_user_signin
 
@@ -613,6 +730,7 @@ async def _ticketplus_click_refresh_button(tab, debug):
             debug.log("[REFRESH] TicketPlus partial refresh dispatched")
             return True
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[REFRESH] TicketPlus partial refresh unavailable: {exc}")
     return False
 
@@ -643,6 +761,7 @@ async def _ticketplus_refresh_inventory(tab, config_dict, debug, reason):
             config_dict=config_dict,
         )
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[REFRESH] TicketPlus full reload raised: {exc}")
         return False
 
@@ -733,6 +852,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
             debug.log("empty date item, need retry.")
             await tab.sleep(0.2)
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("find #buyTicket fail:", exc)
 
     find_ticket_text_list = ['>\u7acb\u5373\u8cfc', '\u5c1a\u672a\u958b\u8ce3']
@@ -753,6 +873,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                 row_html = await row.get_html()
                 row_text = util.remove_html_tags(row_html)
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log("Date item processing failed:", exc)
                 break
 
@@ -800,6 +921,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                         row_html = await row.get_html()
                         row_text = util.remove_html_tags(row_html).lower()
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log(f"[TicketPlus DATE] Failed to get row text: {exc}")
                         continue
 
@@ -896,6 +1018,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                         )
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[TicketPlus DATE] Vue data navigation failed: {exc}")
 
     if not is_date_clicked and is_vue_ready and formated_area_list and len(formated_area_list) > 0:
@@ -1048,6 +1171,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                 debug.log(f"Date selection and click failed: {parsed_result.get('error', 'unknown') if isinstance(parsed_result, dict) else str(parsed_result)}")
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("JavaScript date selection click failed:", exc)
 
     if not is_date_clicked:
@@ -1076,6 +1200,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                     "ticketplus_date_inventory_refresh",
                 )
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log(f"[TicketPlus DATE] Auto reload failed: {exc}")
 
     return is_date_clicked
@@ -1149,6 +1274,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     break
 
             except Exception as e:
+                runtime_health.raise_if_terminal_browser_error(e)
                 debug.log(f"[VUE WAIT] Check error: {e}")
 
             await asyncio.sleep(vue_check_interval)
@@ -1403,6 +1529,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
             is_selected = False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         if debug.enabled:
             debug.log(f"Unified selector exception error: {exc}")
             debug.log(f"Exception type: {type(exc).__name__}")
@@ -1446,6 +1573,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     is_selected = True
 
         except Exception as backup_exc:
+            runtime_health.raise_if_terminal_browser_error(backup_exc)
             debug.log(f"Backup check failed: {backup_exc}")
 
     return is_selected
@@ -1457,10 +1585,13 @@ async def nodriver_ticketplus_click_next_button_unified(tab, config_dict):
 
     debug.log("Unified next button clicker started")
 
+    _state["last_submit_dispatch_status"] = "not_dispatched"
+    dispatch_evaluation_started = False
     try:
         if await sleep_with_pause_check(tab, 0.6, config_dict):
             return False
 
+        dispatch_evaluation_started = True
         js_result = await tab.evaluate('''
             (function() {
                 console.log('[NEXT BUTTON] Unified next button clicker started');
@@ -1565,6 +1696,9 @@ async def nodriver_ticketplus_click_next_button_unified(tab, config_dict):
         result = util.parse_nodriver_result(js_result)
         if isinstance(result, dict):
             success = result.get('success', False)
+            _state["last_submit_dispatch_status"] = (
+                "dispatched" if success else "not_dispatched"
+            )
             if debug.enabled:
                 if success:
                     button_text = result.get('buttonText', '')
@@ -1574,6 +1708,20 @@ async def nodriver_ticketplus_click_next_button_unified(tab, config_dict):
             return success
 
     except Exception as exc:
+        if dispatch_evaluation_started:
+            # The evaluate call may have delivered ``button.click()`` before
+            # its response/connection failed. Treat that outcome as ambiguous.
+            _state["last_submit_dispatch_status"] = "unknown"
+            _ticketplus_mark_submit_outcome_unknown(
+                tab,
+                "next button dispatch raised before acknowledgement",
+                debug,
+            )
+        else:
+            # No browser-side click script was dispatched; releasing this
+            # exact token cannot create a duplicate submit.
+            _ticketplus_release_definitely_unsubmitted(tab)
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"Unified next button click error: {exc}")
 
     return False
@@ -1624,10 +1772,12 @@ async def nodriver_ticketplus_ticket_agree(tab, config_dict):
                     debug.log("agreement checkbox already checked")
 
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log("process checkbox fail:", exc)
                 continue
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("find agreement checkbox fail:", exc)
 
     return is_finish_checkbox_click
@@ -1679,6 +1829,7 @@ async def nodriver_ticketplus_accept_realname_card(tab):
             ''')
             is_button_clicked = bool(util.parse_nodriver_result(clicked_raw))
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
     return is_button_clicked
 
@@ -1729,6 +1880,7 @@ async def nodriver_ticketplus_accept_other_activity(tab):
             ''')
             is_button_clicked = bool(util.parse_nodriver_result(clicked_raw))
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
     return is_button_clicked
 
@@ -1825,6 +1977,7 @@ async def _ticketplus_order_failure_action(tab, debug=None):
             raw_result = await tab.evaluate(script)
             result = util.parse_nodriver_result(raw_result)
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             if debug is not None:
                 debug.log(
                     f"[ORDER FAIL][DEGRADED] evaluate failed on attempt "
@@ -2030,21 +2183,194 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
         return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"Queue status check error: {exc}")
         return False
 
 
-def _ticketplus_clear_submission_watch():
+def _ticketplus_progress_fence():
+    return (
+        str(_state.get("submission_progress_tab_identity", "") or ""),
+        str(_state.get("submission_attempt_id", "") or ""),
+        int(_state.get("submission_attempt_generation", 0) or 0),
+        str(_state.get("submission_token", "") or ""),
+    )
+
+
+def _ticketplus_confirm_submission_progress(reason):
+    tab_identity, attempt_id, attempt_generation, submit_token = (
+        _ticketplus_progress_fence()
+    )
+    if not tab_identity or not attempt_id or not submit_token:
+        return False
+    return runtime_health.confirm_bound_expected_progress(
+        tab_identity=tab_identity,
+        attempt_id=attempt_id,
+        attempt_generation=attempt_generation,
+        action_owner="ticketplus_next_button",
+        action_token=submit_token,
+        reason=reason,
+    )
+
+
+def _ticketplus_fail_submission_progress(reason, *, protected=False):
+    tab_identity, attempt_id, attempt_generation, submit_token = (
+        _ticketplus_progress_fence()
+    )
+    if not tab_identity or not attempt_id or not submit_token:
+        return None
+    return runtime_health.fail_bound_expected_progress(
+        tab_identity=tab_identity,
+        attempt_id=attempt_id,
+        attempt_generation=attempt_generation,
+        action_owner="ticketplus_next_button",
+        action_token=submit_token,
+        reason=reason,
+        protected=protected,
+    )
+
+
+def _ticketplus_cancel_submission_progress(reason):
+    tab_identity, attempt_id, attempt_generation, submit_token = (
+        _ticketplus_progress_fence()
+    )
+    if not tab_identity or not attempt_id or not submit_token:
+        return False
+    return runtime_health.cancel_bound_expected_progress(
+        tab_identity=tab_identity,
+        attempt_id=attempt_id,
+        attempt_generation=attempt_generation,
+        action_owner="ticketplus_next_button",
+        action_token=submit_token,
+        reason=reason,
+    )
+
+
+def _ticketplus_clear_submission_watch(
+    progress_outcome="cancelled",
+    progress_reason="submission_watch_cleared",
+):
+    if progress_outcome == "confirmed":
+        _ticketplus_confirm_submission_progress(progress_reason)
+    elif progress_outcome == "cancelled":
+        _ticketplus_cancel_submission_progress(progress_reason)
     _state["submission_pending"] = False
     _state["submission_started_at"] = 0.0
     _state["submission_deadline"] = 0.0
     _state["submission_next_probe_at"] = 0.0
+    _state["submission_attempt_id"] = ""
+    _state["submission_attempt_generation"] = 0
+    _state["submission_token"] = ""
+    _state["submission_progress_tab_identity"] = ""
+    _state["submission_outcome_unknown"] = False
+    _state["last_submit_dispatch_status"] = "not_dispatched"
     _state["queue_active"] = False
     _state["queue_started_at"] = 0.0
     _state["queue_deadline"] = 0.0
 
 
-def _ticketplus_arm_submission_watch():
+def _ticketplus_submission_owner_is_current(tab, attempt_id, submit_token):
+    """Return whether a watcher still owns the exact central submit attempt."""
+
+    expected_attempt_id = str(attempt_id or "")
+    expected_token = str(submit_token or "")
+    if not expected_attempt_id or not expected_token:
+        return False
+    if (
+        str(_state.get("submission_attempt_id", "") or "")
+        != expected_attempt_id
+        or str(_state.get("submission_token", "") or "") != expected_token
+    ):
+        return False
+
+    from platform_engine import platform_engine
+
+    current = platform_engine.current_attempt(tab, "ticketplus")
+    return bool(
+        current is not None
+        and current.attempt_id == expected_attempt_id
+        and current.submit_token == expected_token
+    )
+
+
+def _ticketplus_log_stale_submission_watch(
+    config_dict,
+    *,
+    attempt_id,
+    tab,
+    reason,
+):
+    """Emit a bounded diagnostic without mutating the current attempt mapping."""
+
+    current_attempt_id = ""
+    try:
+        from platform_engine import platform_engine
+
+        current = platform_engine.current_attempt(tab, "ticketplus")
+        current_attempt_id = current.attempt_id if current is not None else ""
+    except Exception:
+        current_attempt_id = ""
+
+    identity = str(attempt_id or "missing")
+    now = time.monotonic()
+    previous = float(_stale_submission_watch_diagnostics.get(identity, 0.0) or 0.0)
+    if now - previous < CONST_TICKETPLUS_STALE_WATCH_DIAGNOSTIC_INTERVAL:
+        return False
+    if len(_stale_submission_watch_diagnostics) >= CONST_TICKETPLUS_STALE_WATCH_DIAGNOSTIC_CAPACITY:
+        oldest = min(
+            _stale_submission_watch_diagnostics,
+            key=_stale_submission_watch_diagnostics.get,
+        )
+        _stale_submission_watch_diagnostics.pop(oldest, None)
+    _stale_submission_watch_diagnostics[identity] = now
+    runtime_health.runtime_log(
+        "[TICKETPLUS] stale_submission_watch_discarded",
+        config_dict,
+        stale_attempt_id=identity,
+        current_attempt_id=current_attempt_id,
+        reason=str(reason or "owner_changed"),
+    )
+    return True
+
+
+def _ticketplus_capture_submission_watch_owner(tab, config_dict, reason):
+    """Capture and validate the owner immediately before work can mutate."""
+
+    attempt_id = str(_state.get("submission_attempt_id", "") or "")
+    submit_token = str(_state.get("submission_token", "") or "")
+    exact_owner_required = bool(_state.has_active_binding())
+    if exact_owner_required and not _ticketplus_submission_owner_is_current(
+        tab,
+        attempt_id,
+        submit_token,
+    ):
+        _ticketplus_log_stale_submission_watch(
+            config_dict,
+            attempt_id=attempt_id,
+            tab=tab,
+            reason=reason,
+        )
+        return None
+    return attempt_id, submit_token, exact_owner_required
+
+
+def _ticketplus_arm_submission_watch(tab=None):
+    attempt_id = ""
+    attempt_generation = 0
+    submit_token = ""
+    if tab is not None:
+        from platform_engine import platform_engine
+
+        submit_token = platform_engine.claim_submit(
+            tab,
+            "ticketplus",
+            owner="ticketplus_next_button",
+        ) or ""
+        if not submit_token:
+            return False
+        attempt = platform_engine.current_attempt(tab, "ticketplus")
+        attempt_id = attempt.attempt_id if attempt is not None else ""
+        attempt_generation = attempt.generation if attempt is not None else 0
     now = time.monotonic()
     _state["submission_pending"] = True
     _state["submission_started_at"] = now
@@ -2052,13 +2378,96 @@ def _ticketplus_arm_submission_watch():
     # observed. The queue hard deadline below never slides.
     _state["submission_deadline"] = now + CONST_TICKETPLUS_SUBMISSION_SOFT_TIMEOUT
     _state["submission_next_probe_at"] = now
+    _state["submission_attempt_id"] = attempt_id
+    _state["submission_attempt_generation"] = attempt_generation
+    _state["submission_token"] = submit_token
+    progress_expectation = runtime_health.arm_bound_expected_progress(
+        action_owner="ticketplus_next_button",
+        action_token=submit_token,
+        kind=runtime_health.ExpectedProgressKind.SUBMIT,
+        deadline=_state["submission_deadline"],
+        attempt_id=attempt_id,
+        attempt_generation=attempt_generation,
+        source_route=_ticketplus_current_url(tab) if tab is not None else "",
+        acceptable_states={"queue", "checkout", "payment", "completed"},
+        submit_sensitive=True,
+        reconciliation_owner="ticketplus_submission_watch",
+        now=now,
+    )
+    _state["submission_progress_tab_identity"] = (
+        progress_expectation.tab_identity if progress_expectation is not None else ""
+    )
+    _state["submission_outcome_unknown"] = False
     _state["queue_active"] = False
     _state["queue_started_at"] = 0.0
     _state["queue_deadline"] = 0.0
+    return True
 
 
-def _ticketplus_schedule_failure_retry(config_dict, dialog_text=""):
-    _ticketplus_clear_submission_watch()
+def _ticketplus_release_definitely_unsubmitted(tab):
+    token = str(_state.get("submission_token", "") or "")
+    released = True
+    if tab is not None and token:
+        from platform_engine import platform_engine
+
+        released = platform_engine.release_submit(
+            tab,
+            "ticketplus",
+            token=token,
+        )
+    if released:
+        _ticketplus_clear_submission_watch(
+            "cancelled",
+            "ticketplus_submit_definitely_not_dispatched",
+        )
+    return released
+
+
+def _ticketplus_mark_submit_outcome_unknown(tab, reason, debug=None):
+    attempt_id = str(_state.get("submission_attempt_id", "") or "")
+    submit_token = str(_state.get("submission_token", "") or "")
+    if not attempt_id or not submit_token:
+        return False
+    from platform_engine import platform_engine
+
+    unknown = platform_engine.mark_submit_outcome_unknown_if_owned(
+        tab,
+        "ticketplus",
+        attempt_id=attempt_id,
+        token=submit_token,
+        reason=str(reason or "ticketplus_submit_outcome_unknown"),
+    )
+    if unknown is None:
+        return False
+    _ticketplus_fail_submission_progress(
+        str(reason or "ticketplus_submit_outcome_unknown")
+    )
+    _state["submission_pending"] = False
+    _state["submission_next_probe_at"] = 0.0
+    _state["queue_active"] = False
+    _state["submission_outcome_unknown"] = True
+    _state["failure_retry_pending"] = False
+    if debug is not None:
+        debug.log(
+            "[SUBMIT][FAIL CLOSED] TicketPlus outcome is unknown; keeping "
+            "the attempt protected until a genuinely safe route is reached"
+        )
+    return True
+
+
+def _ticketplus_schedule_failure_retry(config_dict, dialog_text="", tab=None):
+    if tab is not None and _state.get("submission_attempt_id", ""):
+        from platform_engine import platform_engine
+
+        platform_engine.mark_attempt_failed(
+            tab,
+            "ticketplus",
+            reason=str(dialog_text or "ticketplus_submit_rejected"),
+        )
+    _ticketplus_clear_submission_watch(
+        "cancelled",
+        "ticketplus_submit_rejected",
+    )
     _state["failure_retry_pending"] = True
     _state["failure_retry_text"] = str(dialog_text or "")[:160]
     # Force a fresh interval window from the moment the rejection was closed.
@@ -2105,10 +2514,22 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
     if _state.get("queue_active", False):
         queue_deadline = float(_state.get("queue_deadline", 0.0) or 0.0)
         if queue_deadline > 0.0 and now >= queue_deadline:
+            if _ticketplus_capture_submission_watch_owner(
+                tab,
+                config_dict,
+                "entry_owner_mismatch",
+            ) is None:
+                return True
             debug.log(
                 "[QUEUE] TicketPlus queue hard deadline reached; scheduling a "
                 "guarded inventory recovery"
             )
+            if _ticketplus_mark_submit_outcome_unknown(
+                tab,
+                "queue monitoring hard deadline",
+                debug,
+            ):
+                return True
             _ticketplus_schedule_failure_retry(
                 config_dict,
                 "queue monitoring hard deadline",
@@ -2120,10 +2541,22 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
     # expensive probe after its bounded ownership window has expired.
     deadline = float(_state.get("submission_deadline", 0.0) or 0.0)
     if deadline > 0.0 and now >= deadline:
+        if _ticketplus_capture_submission_watch_owner(
+            tab,
+            config_dict,
+            "entry_owner_mismatch",
+        ) is None:
+            return True
         debug.log(
             "[SUBMIT] TicketPlus outcome soft deadline reached; scheduling a "
             "guarded inventory recovery"
         )
+        if _ticketplus_mark_submit_outcome_unknown(
+            tab,
+            "submission outcome soft deadline",
+            debug,
+        ):
+            return True
         _ticketplus_schedule_failure_retry(
             config_dict,
             "submission outcome soft deadline",
@@ -2134,17 +2567,41 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
     if not force and now < next_probe_at:
         return True
 
+    owner_snapshot = _ticketplus_capture_submission_watch_owner(
+        tab,
+        config_dict,
+        "entry_owner_mismatch",
+    )
+    if owner_snapshot is None:
+        return True
+    watch_attempt_id, watch_token, exact_owner_required = owner_snapshot
     outcome = await _ticketplus_probe_submission_outcome(tab, config_dict, debug)
+    if exact_owner_required and not _ticketplus_submission_owner_is_current(
+        tab,
+        watch_attempt_id,
+        watch_token,
+    ):
+        _ticketplus_log_stale_submission_watch(
+            config_dict,
+            attempt_id=watch_attempt_id,
+            tab=tab,
+            reason="post_probe_owner_changed",
+        )
+        return True
     now = time.monotonic()
     status = outcome.get("status", "unknown")
     if status == "confirmed":
         debug.log("[SUBMIT] TicketPlus confirmation route observed")
-        _ticketplus_clear_submission_watch()
+        _ticketplus_clear_submission_watch(
+            "confirmed",
+            "ticketplus_confirmation_route_observed",
+        )
         return True
     if status == "failure":
         _ticketplus_schedule_failure_retry(
             config_dict,
             outcome.get("dialog_text", ""),
+            tab,
         )
         return True
     if status == "failure_blocked":
@@ -2155,6 +2612,7 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
             _ticketplus_schedule_failure_retry(
                 config_dict,
                 "blocked failure dialog soft deadline",
+                tab,
             )
             return True
         _state["submission_next_probe_at"] = min(
@@ -2163,6 +2621,7 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
         )
         return True
     if status == "queue":
+        _ticketplus_confirm_submission_progress("ticketplus_queue_observed")
         if not _state.get("queue_active", False):
             debug.log("[QUEUE] TicketPlus queue positively identified")
             _state["queue_started_at"] = now
@@ -2173,6 +2632,7 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
                 _ticketplus_schedule_failure_retry(
                     config_dict,
                     "queue monitoring hard deadline",
+                    tab,
                 )
                 return True
             if queue_deadline <= 0.0:
@@ -2210,6 +2670,12 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
             "[SUBMIT] TicketPlus outcome remained unavailable; scheduling a "
             "fresh inventory scan"
         )
+        if _ticketplus_mark_submit_outcome_unknown(
+            tab,
+            "submission outcome unavailable",
+            debug,
+        ):
+            return True
         _ticketplus_schedule_failure_retry(
             config_dict,
             "submission outcome unavailable",
@@ -2219,6 +2685,12 @@ async def _ticketplus_handle_submission_watch(tab, config_dict, debug, force=Fal
         return True
 
     debug.log("[SUBMIT] TicketPlus outcome timed out; scheduling a fresh inventory scan")
+    if _ticketplus_mark_submit_outcome_unknown(
+        tab,
+        "submission outcome timeout",
+        debug,
+    ):
+        return True
     _ticketplus_schedule_failure_retry(config_dict, "submission outcome timeout")
     return True
 
@@ -2255,7 +2727,6 @@ async def _ticketplus_handle_failure_retry(tab, config_dict, debug):
 
 async def nodriver_ticketplus_confirm(tab, config_dict):
     """Confirmation page handler."""
-    await nodriver_ticketplus_fill_user_dictionary_fields(tab, config_dict)
     is_checkbox_checked = await nodriver_ticketplus_ticket_agree(tab, config_dict)
 
     is_confirm_clicked = False
@@ -2306,6 +2777,7 @@ async def nodriver_ticketplus_confirm(tab, config_dict):
                 clicked_result = util.parse_nodriver_result(clicked_raw)
                 is_confirm_clicked = bool(clicked_result)
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
     return is_confirm_clicked
@@ -2399,15 +2871,28 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
             return
         await nodriver_ticketplus_ticket_agree(tab, config_dict)
 
+        if not _ticketplus_arm_submission_watch(tab):
+            debug.log(
+                "[SUBMIT] Existing attempt already owns submission; duplicate click skipped"
+            )
+            return
+
         is_form_submitted = await nodriver_ticketplus_click_next_button_unified(tab, config_dict)
 
         if is_form_submitted:
-            _ticketplus_arm_submission_watch()
             await _ticketplus_handle_submission_watch(
                 tab,
                 config_dict,
                 debug,
                 force=True,
+            )
+        elif _state.get("last_submit_dispatch_status") == "not_dispatched":
+            _ticketplus_release_definitely_unsubmitted(tab)
+        else:
+            _ticketplus_mark_submit_outcome_unknown(
+                tab,
+                "next button dispatch result unavailable",
+                debug,
             )
 
         debug.log(f"Form submission: {'Success' if is_form_submitted else 'Failed'}")
@@ -2486,6 +2971,7 @@ async def nodriver_ticketplus_wait_for_vue_ready(tab, max_wait_ms=800):
         return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         return False
 
 
@@ -2519,6 +3005,7 @@ async def nodriver_ticketplus_check_next_button(tab):
         return result.get('enabled', False) if isinstance(result, dict) else False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         return False
 
 
@@ -2587,6 +3074,7 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
         return False, fail_list, False
 
     except Exception as e:
+        runtime_health.raise_if_terminal_browser_error(e)
         debug.log(f"[DISCOUNT CODE] Error filling discount code: {str(e)}")
         return False, fail_list, False
 
@@ -2624,18 +3112,7 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
         is_user_signin = await nodriver_ticketplus_account_auto_fill(tab, config_dict)
 
     if is_user_signin:
-        config_homepage = config_dict["homepage"].lower().rstrip('/')
-        is_homepage_target = config_homepage in ['https://ticketplus.com.tw', 'ticketplus.com.tw']
-        if not is_homepage_target and url.lower() != config_dict["homepage"].lower():
-            try:
-                await guarded_get(
-                    tab,
-                    config_dict["homepage"],
-                    config_dict,
-                    reason="ticketplus_homepage_recovery",
-                )
-            except Exception as e:
-                pass
+        await _ticketplus_restore_navigation_target(tab, config_dict, debug)
 
     # https://ticketplus.com.tw/activity/XXX
     if '/activity/' in url.lower():
@@ -2744,7 +3221,10 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
 
         if is_event_page:
             _state["is_ticket_assigned"] = True
-            _ticketplus_clear_submission_watch()
+            _ticketplus_clear_submission_watch(
+                "confirmed",
+                "ticketplus_confirmation_route_observed",
+            )
             _state["failure_retry_pending"] = False
             _state["failure_retry_text"] = ""
 
@@ -2767,6 +3247,7 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
                     await nodriver_ticketplus_confirm(tab, config_dict)
                     debug.log("[TICKETPLUS] Confirmation page processing completed")
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[TICKETPLUS] Confirmation page processing error: {exc}")
 
             _state["purchase_completed"] = True

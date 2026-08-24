@@ -17,6 +17,8 @@ import threading
 import time
 import webbrowser
 from datetime import datetime
+from dataclasses import dataclass
+from typing import Any, Callable
 
 def _configure_windows_console_utf8():
     """Configure real Windows consoles without replacing captured streams.
@@ -49,6 +51,11 @@ import urllib.parse
 import util
 import settings
 import runtime_health
+from hunter_metadata import APP_DISPLAY_VERSION
+from runtime_diagnostics import collect_runtime_diagnostics
+from attempt_lifecycle import AttemptState
+from browser_session import BrowserBootstrapResult, BrowserExitState
+from navigation_context import canonicalize_target_url
 from refresh_timing import (
     RUNTIME_NTP_CRITICAL_WINDOW_SECONDS,
     RefreshTriggerController,
@@ -66,11 +73,14 @@ from refresh_timing import (
 from NonBrowser import NonBrowser
 from page_classifier import PageClass, classify_page
 from onsale_preflight import build_onsale_preflight
+from platform_adapters import adapter_for_url
 from platform_registry import platform_key_for_url
 from platform_engine import platform_engine
 from platforms.common_async import is_interval_due
 from reload_guard import guarded_reload
 from trigger_arbiter import TriggerReloadArbiter, TriggerReloadDecision
+from task_registry import hunterx_tasks
+from tab_ownership import TabTransition
 
 try:
     import ddddocr
@@ -151,6 +161,21 @@ def persistent_empty_url_should_stop(
     except (TypeError, ValueError):
         return False
     return started > 0.0 and current >= started and current - started >= threshold
+
+
+def terminal_url_failure_is_recoverable(
+    failure_kind,
+    browser_exit_state,
+    *,
+    quit_requested=False,
+):
+    """Allow recovery only for a confirmed transport loss of an owned browser."""
+
+    return (
+        not quit_requested
+        and failure_kind is runtime_health.BrowserFailureKind.TRANSPORT_CLOSED
+        and browser_exit_state in {BrowserExitState.ALIVE, BrowserExitState.CRASHED}
+    )
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -276,6 +301,7 @@ async def nodriver_goto_homepage(driver, config_dict):
                         ))
                     debug.log(f"[TIXCRAFT] Deleted existing SID and {cookie_name} cookies for domain: {cookie_domain}")
                 except Exception as del_e:
+                    runtime_health.raise_if_terminal_browser_error(del_e)
                     debug.log(f"[TIXCRAFT] Note: Could not delete existing cookies: {del_e}")
 
                 # Step 2: Set new session cookie using CDP
@@ -300,6 +326,7 @@ async def nodriver_goto_homepage(driver, config_dict):
                     debug.log(f"[TIXCRAFT] Verified {cookie_name} cookie: domain={sid_cookies[0].domain}, value length={len(sid_cookies[0].value)}")
 
             except Exception as e:
+                runtime_health.raise_if_terminal_browser_error(e)
                 debug.log(f"[TIXCRAFT] Error setting {cookie_name} cookie: {str(e)}")
                 import traceback
                 traceback.print_exc()
@@ -369,6 +396,7 @@ async def nodriver_goto_homepage(driver, config_dict):
                     await dismiss_pending_ibon_dialog(tab, config_dict)
                     debug.log("[IBON] Page reloaded to apply cookie session")
                 except Exception as reload_exc:
+                    runtime_health.raise_if_terminal_browser_error(reload_exc)
                     debug.log(f"[IBON] Reload after cookie set failed: {reload_exc}")
         else:
             debug.log(f"[IBON] login process failed: {login_result.get('reason', 'unknown')}")
@@ -428,6 +456,7 @@ async def nodriver_goto_homepage(driver, config_dict):
                     debug.log("[FUNONE] Warning: ticket_session cookie not found after setting")
 
             except Exception as e:
+                runtime_health.raise_if_terminal_browser_error(e)
                 debug.log(f"[FUNONE] Error setting cookie: {str(e)}")
 
     return tab
@@ -568,6 +597,7 @@ async def nodrver_block_urls(tab, config_dict):
         # Block unnecessary network requests for performance optimization
         await tab.send(cdp.network.set_blocked_ur_ls(urls=NETWORK_BLOCKED_URLS))
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         print(f"Warning: Failed to enable network blocking: {exc}")
         # Continue without network blocking if it fails
 
@@ -596,6 +626,7 @@ async def _inject_clarity_stub_for_ticketplus(tab):
     try:
         await tab.send(cdp.page.add_script_to_evaluate_on_new_document(source=clarity_stub_js))
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         print(f"[TicketPlus] Warning: Failed to inject Clarity stub: {exc}")
 
 
@@ -2120,6 +2151,958 @@ async def reload_config(config_dict, last_mtime, config_filepath):
 
     return config_dict, last_mtime
 
+
+def _bootstrap_config_with_safe_target(
+    config_dict,
+    *,
+    restore_target_url="",
+    restore_platform_key="",
+):
+    """Return an isolated bootstrap config whose homepage is the safe target."""
+
+    target_url = str(restore_target_url or "").strip()
+    if not target_url:
+        return dict(config_dict)
+
+    normalized_target = canonicalize_target_url(target_url)
+    target_platform = platform_key_for_url(normalized_target)
+    expected_platform = str(restore_platform_key or target_platform or "").strip().casefold()
+    adapter = adapter_for_url(normalized_target)
+    target_page_class = (
+        adapter.classify_page(normalized_target)
+        if adapter is not None
+        else classify_page(normalized_target)
+    )
+    if (
+        not normalized_target
+        or not expected_platform
+        or target_platform != expected_platform
+        or target_page_class
+        not in {PageClass.HOME, PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA}
+    ):
+        raise ValueError("safe restart target is missing, cross-platform, or transaction-protected")
+
+    bootstrap_config = dict(config_dict)
+    # nodriver_goto_homepage is the authoritative platform bootstrap.  Giving
+    # it the preserved safe target lets KKTIX/Cityline build their normal login
+    # return URL and lets TixCraft/iBon replay their existing cookie/OAuth setup,
+    # without a second manager-owned navigation.
+    bootstrap_config["homepage"] = target_url
+    return bootstrap_config
+
+
+def _attach_bootstrap_owner(session_manager, driver, tab=None):
+    try:
+        session_manager.attach(driver, tab)
+    except TypeError:
+        # Compatibility for embedders implementing the v0.5.1 manager
+        # protocol.  Production BrowserSessionManager accepts the tab.
+        session_manager.attach(driver)
+
+
+def _config_with_pending_safe_restore(
+    config_dict,
+    *,
+    target_url="",
+    platform_key="",
+    current_url="",
+):
+    """Keep a restart intent authoritative until its safe target is reached."""
+
+    target_url = str(target_url or "").strip()
+    expected_platform = str(platform_key or "").strip().casefold()
+    if (
+        not target_url
+        or not expected_platform
+        or platform_key_for_url(target_url) != expected_platform
+        or platform_key_for_url(current_url) != expected_platform
+    ):
+        return config_dict
+    dispatch_config = dict(config_dict)
+    dispatch_config["homepage"] = target_url
+    return dispatch_config
+
+
+async def bootstrap_owned_browser(
+    config_dict,
+    args,
+    session_manager,
+    *,
+    restore_target_url="",
+    restore_platform_key="",
+):
+    """Create and fully initialize the one browser owned by this instance.
+
+    Initial startup and SAFE_RESTART both enter here.  The only successful
+    result is a driver/tab pair that has replayed configuration, preferences,
+    technical hooks, platform homepage/login prerequisites, ownership attach,
+    and window setup in that order.
+    """
+
+    bootstrap_config = _bootstrap_config_with_safe_target(
+        config_dict,
+        restore_target_url=restore_target_url,
+        restore_platform_key=restore_platform_key,
+    )
+    conf = get_extension_config(
+        bootstrap_config,
+        args,
+        session_manager=session_manager,
+    )
+    nodriver_overwrite_prefs(conf)
+    driver = await uc.start(conf)
+    if driver is None:
+        return None
+
+    attached = False
+    try:
+        initial_tab = getattr(driver, "main_tab", None)
+        if initial_tab is not None:
+            await nodrver_block_urls(initial_tab, bootstrap_config)
+
+        tab = await nodriver_goto_homepage(driver, bootstrap_config)
+        if tab is None:
+            _attach_bootstrap_owner(session_manager, driver)
+            attached = True
+            return None
+        if initial_tab is None:
+            await nodrver_block_urls(tab, bootstrap_config)
+
+        target_url = str(restore_target_url or "").strip()
+        if target_url:
+            target_platform = str(
+                restore_platform_key or platform_key_for_url(target_url) or ""
+            ).strip().casefold()
+            context = platform_engine.capture_navigation_intent(
+                tab,
+                target_platform,
+                target_url,
+                bootstrap_config,
+                reason="safe_restart_bootstrap_target",
+            )
+            if context is None:
+                _attach_bootstrap_owner(session_manager, driver)
+                attached = True
+                return None
+            current_url = str(
+                getattr(getattr(tab, "target", None), "url", "") or ""
+            ).strip()
+            if canonicalize_target_url(current_url) == canonicalize_target_url(target_url):
+                platform_engine.mark_target_restored(tab, target_platform)
+
+        _attach_bootstrap_owner(session_manager, driver, tab)
+        attached = True
+        if not bootstrap_config["advanced"]["headless"]:
+            await nodriver_resize_window(tab, bootstrap_config)
+        return BrowserBootstrapResult(driver=driver, tab=tab)
+    except BaseException:
+        if not attached:
+            _attach_bootstrap_owner(session_manager, driver)
+        raise
+
+
+@dataclass
+class RuntimeIterationContext:
+    """Mutable state owned by one production outer-loop instance."""
+
+    config_dict: dict
+    driver: Any
+    tab: Any
+    session_manager: Any
+    health_supervisor: runtime_health.RuntimeHealthSupervisor
+    refresh_datetime_state: dict
+    ocr: Any = None
+    captcha_browser: Any = None
+    is_quit_bot: bool = False
+    last_paused_state: bool = False
+    url: str = ""
+    last_url: str = ""
+    cloudflare_checked: bool = False
+    cloudflare_fail_count: int = 0
+    last_empty_url_log: float = 0.0
+    empty_url_since: float = 0.0
+    recovery_generation: int = 0
+    last_platform_key: str | None = None
+    last_page_class: PageClass = PageClass.UNKNOWN
+    last_safe_url: str = ""
+    pending_restart_target_url: str = ""
+    pending_restart_platform_key: str = ""
+    pending_progress_fault: Any = None
+    # Test-only mapping is accepted solely for a loopback browser route.  It
+    # lets the actual-browser soak exercise production platform dispatch while
+    # never adding fake public hosts to the registry or contacting ticket sites.
+    test_local_route_mapper: Callable[[str], str] | None = None
+
+
+@dataclass(frozen=True)
+class IterationResult:
+    action: str
+    reason: str
+    actual_url: str = ""
+    dispatch_url: str = ""
+    platform_key: str = ""
+    page_class: PageClass = PageClass.UNKNOWN
+    new_attempt_started: bool = False
+    recovery_level: runtime_health.RecoveryLevel | None = None
+    expected_progress_outcomes: tuple[str, ...] = ()
+
+    @property
+    def should_break(self) -> bool:
+        return self.action in {"stop", "fail_closed"}
+
+
+def _iteration_tab_identity(tab: Any) -> str:
+    target = getattr(tab, "target", None)
+    target_id = getattr(target, "target_id", None) or getattr(target, "id", None)
+    return f"target:{target_id}" if target_id else f"{type(tab).__name__}:{id(tab)}"
+
+
+def _map_local_iteration_route(context: RuntimeIterationContext, actual_url: str) -> str:
+    mapper = context.test_local_route_mapper
+    if mapper is None:
+        return actual_url
+    try:
+        hostname = (urllib.parse.urlsplit(actual_url).hostname or "").casefold()
+    except ValueError as exc:
+        raise RuntimeError("test route mapper requires a valid loopback URL") from exc
+    if hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("test route mapper is restricted to loopback browser routes")
+    mapped = str(mapper(actual_url) or "").strip()
+    if not mapped or not platform_key_for_url(mapped):
+        raise RuntimeError("test route mapper must return a registered platform route")
+    return mapped
+
+
+async def _recover_readable_stall(
+    context: RuntimeIterationContext,
+    *,
+    dispatch_url: str,
+    platform_key: str,
+    page_class: PageClass,
+    attempt_state: AttemptState,
+):
+    """Perform the sole permitted recovery for a readable stalled action."""
+
+    plan = context.health_supervisor.plan_recovery(page_class, attempt_state)
+    if plan.level is not runtime_health.RecoveryLevel.REACQUIRE:
+        return plan, None
+    if page_class not in {
+        PageClass.HOME,
+        PageClass.ACTIVITY,
+        PageClass.DATE,
+        PageClass.AREA,
+    }:
+        return runtime_health.RecoveryPlan(
+            runtime_health.RecoveryLevel.FAIL_CLOSED,
+            "stalled_action_unsafe_context",
+        ), None
+    context.recovery_generation += 1
+    if not context.health_supervisor.begin_recovery(
+        generation=context.recovery_generation,
+        now=time.monotonic(),
+    ):
+        return plan, None
+    result = await context.session_manager.recover(
+        runtime_health.RecoveryLevel.REACQUIRE,
+        target_url=dispatch_url,
+        platform_key=platform_key,
+        allow_restart=False,
+    )
+    context.health_supervisor.complete_recovery(result.success, now=time.monotonic())
+    if result.success and result.tab is not None:
+        context.driver = result.driver
+        context.tab = result.tab
+        context.session_manager.attach(result.driver, result.tab)
+    return plan, result
+
+
+def _terminal_failure_attempt_state(
+    context: RuntimeIterationContext,
+) -> AttemptState:
+    if not context.last_platform_key:
+        return AttemptState.IDLE
+    current_attempt = platform_engine.current_attempt(
+        context.tab,
+        context.last_platform_key,
+    )
+    return (
+        current_attempt.state
+        if current_attempt is not None
+        else AttemptState.IDLE
+    )
+
+
+def _terminal_failure_restart_is_safe(
+    context: RuntimeIterationContext,
+    *,
+    attempt_state: AttemptState,
+    browser_exit_state: BrowserExitState,
+    failure_kind: runtime_health.BrowserFailureKind,
+) -> bool:
+    return (
+        bool(context.last_safe_url)
+        and context.last_page_class
+        in {PageClass.HOME, PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA}
+        and attempt_state
+        not in {
+            AttemptState.SUBMIT_IN_FLIGHT,
+            AttemptState.ORDER_PENDING,
+            AttemptState.CHECKOUT_REACHED,
+            AttemptState.PAYMENT_REACHED,
+            AttemptState.QUEUE,
+            AttemptState.SUBMIT_OUTCOME_UNKNOWN,
+            AttemptState.COMPLETED,
+        }
+        and browser_exit_state in {BrowserExitState.ALIVE, BrowserExitState.CRASHED}
+        and failure_kind is runtime_health.BrowserFailureKind.TRANSPORT_CLOSED
+    )
+
+
+async def _handle_terminal_iteration_failure(
+    context: RuntimeIterationContext,
+    exc: BaseException,
+) -> IterationResult:
+    """Terminate browser escalation at the authoritative runtime owner.
+
+    Platform helpers still re-raise terminal CDP/WebSocket failures.  This
+    boundary applies the existing RuntimeHealthSupervisor and
+    BrowserSessionManager policy once, with the current attempt/page evidence,
+    instead of allowing the exception to terminate the frozen executable.
+    """
+
+    failure_kind = runtime_health.classify_browser_exception(exc)
+    if failure_kind not in {
+        runtime_health.BrowserFailureKind.TRANSPORT_CLOSED,
+        runtime_health.BrowserFailureKind.TARGET_CLOSED,
+        runtime_health.BrowserFailureKind.EXECUTION_CONTEXT_LOST,
+    }:
+        raise exc
+
+    health = context.health_supervisor
+    if health.snapshot().state is runtime_health.RuntimeHealthState.FAIL_CLOSED:
+        return IterationResult(
+            "fail_closed",
+            "terminal_recovery_attempts_exhausted",
+            recovery_level=runtime_health.RecoveryLevel.FAIL_CLOSED,
+        )
+    now_mono = time.monotonic()
+    health.record_url_failure(failure_kind, now=now_mono)
+    attempt_state = _terminal_failure_attempt_state(context)
+    browser_exit_state = context.session_manager.browser_exit_state()
+    manual_close = (
+        failure_kind is runtime_health.BrowserFailureKind.TARGET_CLOSED
+        or browser_exit_state is BrowserExitState.CLEAN_EXIT
+    )
+    recovery_plan = health.plan_recovery(
+        context.last_page_class,
+        attempt_state,
+        manual_close=manual_close,
+        now=now_mono,
+    )
+    runtime_health.runtime_log(
+        "[BROWSER] terminal_failure_owned",
+        context.config_dict,
+        failure_kind=failure_kind.value,
+        browser_exit_state=browser_exit_state.value,
+        page_class=context.last_page_class.value,
+        attempt_state=attempt_state.value,
+        recovery_level=recovery_plan.level.value,
+        reason=recovery_plan.reason,
+        exception_type=f"{type(exc).__module__}.{type(exc).__name__}",
+    )
+
+    if recovery_plan.level is runtime_health.RecoveryLevel.STOP:
+        return IterationResult(
+            "stop",
+            recovery_plan.reason,
+            recovery_level=recovery_plan.level,
+        )
+    if recovery_plan.level is runtime_health.RecoveryLevel.FAIL_CLOSED:
+        return IterationResult(
+            "fail_closed",
+            recovery_plan.reason,
+            recovery_level=recovery_plan.level,
+        )
+
+    context.recovery_generation += 1
+    if not health.begin_recovery(
+        generation=context.recovery_generation,
+        now=now_mono,
+    ):
+        health_state = health.snapshot().state
+        if health_state is runtime_health.RuntimeHealthState.FAIL_CLOSED:
+            return IterationResult(
+                "fail_closed",
+                "terminal_recovery_attempts_exhausted",
+                recovery_level=runtime_health.RecoveryLevel.FAIL_CLOSED,
+            )
+        return IterationResult(
+            "monitor",
+            "terminal_recovery_deferred",
+            recovery_level=recovery_plan.level,
+        )
+
+    target_url = context.last_url or context.last_safe_url
+    platform_key = context.last_platform_key or ""
+    recovery_result = None
+    recovery_error = None
+    try:
+        recovery_result = await context.session_manager.recover(
+            recovery_plan.level,
+            target_url=target_url,
+            platform_key=platform_key,
+            allow_restart=False,
+        )
+        if (
+            not recovery_result.success
+            and _terminal_failure_restart_is_safe(
+                context,
+                attempt_state=attempt_state,
+                browser_exit_state=browser_exit_state,
+                failure_kind=failure_kind,
+            )
+        ):
+            recovery_result = await context.session_manager.recover(
+                runtime_health.RecoveryLevel.SAFE_RESTART,
+                target_url=context.last_safe_url,
+                platform_key=platform_key,
+                allow_restart=True,
+            )
+    except Exception as candidate_error:
+        if runtime_health.classify_browser_exception(candidate_error) not in {
+            runtime_health.BrowserFailureKind.TRANSPORT_CLOSED,
+            runtime_health.BrowserFailureKind.TARGET_CLOSED,
+            runtime_health.BrowserFailureKind.EXECUTION_CONTEXT_LOST,
+        }:
+            raise
+        recovery_error = candidate_error
+
+    success = bool(recovery_result is not None and recovery_result.success)
+    health.complete_recovery(success, now=time.monotonic())
+    if success and recovery_result is not None and recovery_result.tab is not None:
+        context.driver = recovery_result.driver
+        context.tab = recovery_result.tab
+        context.session_manager.attach(context.driver, context.tab)
+        if recovery_result.restarted:
+            context.pending_restart_target_url = context.last_safe_url
+            context.pending_restart_platform_key = platform_key
+        context.url = ""
+        context.empty_url_since = 0.0
+        return IterationResult(
+            "continue",
+            recovery_result.reason,
+            recovery_level=recovery_result.level,
+        )
+
+    if recovery_error is not None:
+        runtime_health.runtime_log(
+            "[BROWSER] terminal_recovery_failed",
+            context.config_dict,
+            failure_kind=runtime_health.classify_browser_exception(
+                recovery_error
+            ).value,
+            exception_type=(
+                f"{type(recovery_error).__module__}."
+                f"{type(recovery_error).__name__}"
+            ),
+        )
+    if health.snapshot().state is runtime_health.RuntimeHealthState.FAIL_CLOSED:
+        return IterationResult(
+            "fail_closed",
+            "terminal_recovery_attempts_exhausted",
+            recovery_level=runtime_health.RecoveryLevel.FAIL_CLOSED,
+        )
+    return IterationResult(
+        "monitor",
+        (
+            recovery_result.reason
+            if recovery_result is not None
+            else "terminal_recovery_transport_failed"
+        ),
+        recovery_level=recovery_plan.level,
+    )
+
+
+async def run_runtime_iteration(
+    runtime_context: RuntimeIterationContext,
+) -> IterationResult:
+    """Run the authoritative production browser/platform iteration once."""
+
+    context = runtime_context
+    config_dict = context.config_dict
+    health = context.health_supervisor
+    health.record_loop(time.monotonic())
+
+    quit_requested = False
+    if not context.is_quit_bot and await check_and_handle_quit(config_dict):
+        context.is_quit_bot = True
+        quit_requested = True
+
+    if not context.is_quit_bot:
+        prefer_cached_url = _should_prefer_cached_runtime_url(
+            context.tab,
+            config_dict,
+            context.refresh_datetime_state,
+        )
+        context.url, context.is_quit_bot = await nodriver_current_url(
+            context.tab,
+            config_dict,
+            prefer_cached=prefer_cached_url,
+        )
+
+    failure_kind = runtime_health.get_tab_failure_kind(context.tab)
+    browser_exit_state = context.session_manager.browser_exit_state()
+    if context.is_quit_bot and terminal_url_failure_is_recoverable(
+        failure_kind,
+        browser_exit_state,
+        quit_requested=quit_requested,
+    ):
+        context.is_quit_bot = False
+
+    if context.is_quit_bot:
+        util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_INT28_QUIT_FILE))
+        util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_AUTOMATION_STOP_FILE))
+        runtime_health.runtime_log(
+            "[BROWSER] stop",
+            config_dict,
+            reason=("quit_requested" if quit_requested else "manual_or_unknown_close"),
+            failure_kind=failure_kind.value,
+            browser_exit_state=browser_exit_state.value,
+        )
+        return IterationResult("stop", "browser_stop")
+
+    actual_url = str(context.url or "")
+    if not actual_url:
+        now_mono = time.monotonic()
+        if context.empty_url_since <= 0:
+            context.empty_url_since = now_mono
+        if failure_kind is runtime_health.BrowserFailureKind.NONE:
+            failure_kind = runtime_health.BrowserFailureKind.TRANSIENT_URL_MISS
+        health.record_url_failure(failure_kind, now=now_mono)
+        if now_mono - context.last_empty_url_log >= 2.0:
+            context.last_empty_url_log = now_mono
+            util.create_debug_logger(config_dict).log(
+                "[URL DIAG] empty url, skipping dispatch; "
+                f"{format_cached_target_url_diagnostic(context.tab)}"
+            )
+
+        current_attempt = None
+        if context.last_platform_key:
+            current_attempt = platform_engine.current_attempt(
+                context.tab,
+                context.last_platform_key,
+            )
+        attempt_state = current_attempt.state if current_attempt is not None else AttemptState.IDLE
+        recovery_plan = health.plan_recovery(
+            context.last_page_class,
+            attempt_state,
+            manual_close=(
+                failure_kind is runtime_health.BrowserFailureKind.TARGET_CLOSED
+                or browser_exit_state is BrowserExitState.CLEAN_EXIT
+            ),
+            now=now_mono,
+        )
+        persistent_empty = persistent_empty_url_should_stop(context.empty_url_since, now_mono)
+        if recovery_plan.level in {
+            runtime_health.RecoveryLevel.STOP,
+            runtime_health.RecoveryLevel.FAIL_CLOSED,
+        }:
+            runtime_health.runtime_log(
+                "[URL RECOVERY] fail_closed",
+                config_dict,
+                reason=recovery_plan.reason,
+                failure_kind=failure_kind.value,
+                attempt_state=attempt_state.value,
+                page_class=context.last_page_class.value,
+            )
+            return IterationResult(
+                "fail_closed",
+                recovery_plan.reason,
+                recovery_level=recovery_plan.level,
+            )
+
+        if recovery_plan.level is not runtime_health.RecoveryLevel.NORMAL_RETRY:
+            context.recovery_generation += 1
+            if health.begin_recovery(generation=context.recovery_generation, now=now_mono):
+                target_url = context.last_safe_url or context.last_url
+                recovery_result = await context.session_manager.recover(
+                    recovery_plan.level,
+                    target_url=target_url,
+                    platform_key=context.last_platform_key or "",
+                    allow_restart=False,
+                )
+                restart_safe = (
+                    bool(target_url)
+                    and context.last_page_class
+                    in {PageClass.HOME, PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA}
+                    and attempt_state
+                    not in {
+                        AttemptState.SUBMIT_IN_FLIGHT,
+                        AttemptState.ORDER_PENDING,
+                        AttemptState.CHECKOUT_REACHED,
+                        AttemptState.PAYMENT_REACHED,
+                        AttemptState.QUEUE,
+                        AttemptState.SUBMIT_OUTCOME_UNKNOWN,
+                        AttemptState.COMPLETED,
+                    }
+                    and browser_exit_state in {BrowserExitState.ALIVE, BrowserExitState.CRASHED}
+                    and (
+                        failure_kind is runtime_health.BrowserFailureKind.TRANSPORT_CLOSED
+                        or persistent_empty
+                    )
+                )
+                if not recovery_result.success and restart_safe:
+                    recovery_result = await context.session_manager.recover(
+                        runtime_health.RecoveryLevel.SAFE_RESTART,
+                        target_url=target_url,
+                        platform_key=context.last_platform_key or "",
+                        allow_restart=True,
+                    )
+                health.complete_recovery(recovery_result.success, now=time.monotonic())
+                if recovery_result.success and recovery_result.tab is not None:
+                    context.driver = recovery_result.driver
+                    context.tab = recovery_result.tab
+                    context.session_manager.attach(context.driver, context.tab)
+                    if recovery_result.restarted:
+                        context.pending_restart_target_url = target_url
+                        context.pending_restart_platform_key = context.last_platform_key or ""
+                    context.empty_url_since = 0.0
+                    context.url = ""
+                    return IterationResult(
+                        "continue",
+                        recovery_result.reason,
+                        recovery_level=recovery_result.level,
+                    )
+
+        if persistent_empty:
+            runtime_health.runtime_log(
+                "[URL DIAG] safe_stop",
+                config_dict,
+                reason="persistent_empty_url_or_cdp_disconnect",
+                elapsed_s=round(now_mono - context.empty_url_since, 1),
+            )
+            return IterationResult("stop", "persistent_empty_url")
+        return IterationResult(
+            "continue",
+            "empty_url_retry",
+            recovery_level=recovery_plan.level,
+        )
+
+    context.empty_url_since = 0.0
+    health.record_url_success()
+    dispatch_url = _map_local_iteration_route(context, actual_url)
+
+    is_paused = await check_and_handle_pause(config_dict)
+    if is_paused and not context.last_paused_state:
+        instance_suffix = "" if util.get_instance_id() == "default" else f" [{util.get_instance_id()}]"
+        print("BOT Paused." + instance_suffix)
+    context.last_paused_state = is_paused
+
+    if actual_url != context.last_url:
+        print(actual_url)
+        write_last_url_to_file(actual_url)
+        context.cloudflare_checked = False
+        context.cloudflare_fail_count = 0
+    context.last_url = actual_url
+
+    dispatch_config = _config_with_pending_safe_restore(
+        config_dict,
+        target_url=context.pending_restart_target_url,
+        platform_key=context.pending_restart_platform_key,
+        current_url=dispatch_url,
+    )
+    decision = platform_engine.before_dispatch(context.tab, dispatch_url, dispatch_config)
+    if (
+        context.pending_restart_target_url
+        and canonicalize_target_url(dispatch_url)
+        == canonicalize_target_url(context.pending_restart_target_url)
+    ):
+        context.pending_restart_target_url = ""
+        context.pending_restart_platform_key = ""
+    platform_key = decision.platform_key or ""
+    health.record_platform_dispatch()
+    context.last_platform_key = platform_key or None
+    context.last_page_class = decision.page_class
+    if decision.page_class in {PageClass.HOME, PageClass.ACTIVITY, PageClass.DATE, PageClass.AREA}:
+        context.last_safe_url = dispatch_url
+
+    current_attempt = platform_engine.current_attempt(context.tab, platform_key) if platform_key else None
+    attempt_state = current_attempt.state if current_attempt is not None else AttemptState.IDLE
+    tab_identity = _iteration_tab_identity(context.tab)
+    refresh_generation = None
+    if platform_key:
+        refresh_generation = platform_engine.refresh_coordinator_for(context.tab).generation
+    progress_decisions = health.observe_expected_progress(
+        tab_identity=tab_identity,
+        attempt_id=decision.attempt_id or "",
+        attempt_generation=decision.attempt_generation,
+        current_route=dispatch_url,
+        route_generation=decision.route_generation,
+        page_state=attempt_state.value,
+        refresh_generation=refresh_generation,
+        protected=decision.page_class
+        in {PageClass.TICKET, PageClass.ORDER, PageClass.CHECKOUT, PageClass.PAYMENT, PageClass.QUEUE},
+    )
+    outcomes = tuple(item.outcome.value for item in progress_decisions)
+    pending_fault = context.pending_progress_fault
+    if pending_fault is not None:
+        pending_expectation = pending_fault.expectation
+        if (
+            pending_expectation.tab_identity != tab_identity
+            or pending_expectation.attempt_id != (decision.attempt_id or "")
+            or pending_expectation.attempt_generation != decision.attempt_generation
+        ):
+            context.pending_progress_fault = None
+            pending_fault = None
+    new_actionable = next(
+        (
+            item
+            for item in reversed(progress_decisions)
+            if item.requires_fail_closed or item.permits_recovery
+            or item.outcome is runtime_health.ExpectedProgressOutcome.PROTECTED_NO_RECOVERY
+        ),
+        None,
+    )
+    if new_actionable is not None:
+        context.pending_progress_fault = new_actionable
+        pending_fault = new_actionable
+    actionable = pending_fault
+    if actionable is not None:
+        expectation = actionable.expectation
+        if actionable.outcome is runtime_health.ExpectedProgressOutcome.PROTECTED_NO_RECOVERY:
+            return IterationResult(
+                "monitor",
+                actionable.outcome.value,
+                actual_url,
+                dispatch_url,
+                platform_key,
+                decision.page_class,
+                decision.new_attempt_started,
+                None,
+                outcomes,
+            )
+        if actionable.requires_fail_closed:
+            marked_unknown = None
+            if (
+                current_attempt is not None
+                and current_attempt.attempt_id == expectation.attempt_id
+                and current_attempt.generation == expectation.attempt_generation
+                and current_attempt.submit_token == expectation.action_token
+            ):
+                marked_unknown = platform_engine.mark_submit_outcome_unknown_if_owned(
+                    context.tab,
+                    platform_key,
+                    attempt_id=expectation.attempt_id,
+                    token=expectation.action_token,
+                    reason="expected_progress_submit_outcome_unknown",
+                )
+            return IterationResult(
+                "monitor",
+                (
+                    "submit_outcome_unknown"
+                    if marked_unknown is not None
+                    else "submit_owner_fence_mismatch"
+                ),
+                actual_url,
+                dispatch_url,
+                platform_key,
+                decision.page_class,
+                decision.new_attempt_started,
+                runtime_health.RecoveryLevel.FAIL_CLOSED,
+                outcomes,
+            )
+        plan, recovery_result = await _recover_readable_stall(
+            context,
+            dispatch_url=dispatch_url,
+            platform_key=platform_key,
+            page_class=decision.page_class,
+            attempt_state=attempt_state,
+        )
+        if plan.level is not runtime_health.RecoveryLevel.REACQUIRE:
+            return IterationResult(
+                "monitor",
+                plan.reason,
+                actual_url,
+                dispatch_url,
+                platform_key,
+                decision.page_class,
+                decision.new_attempt_started,
+                plan.level,
+                outcomes,
+            )
+        if recovery_result is not None and recovery_result.success:
+            reconciled = health.confirm_expected_progress(
+                tab_identity=expectation.tab_identity,
+                action_owner=expectation.action_owner,
+                action_token=expectation.action_token,
+                attempt_id=expectation.attempt_id,
+                attempt_generation=expectation.attempt_generation,
+                reason="readable_stall_reacquired",
+            )
+            if reconciled:
+                context.pending_progress_fault = None
+        return IterationResult(
+            "continue" if recovery_result is not None and recovery_result.success else "monitor",
+            getattr(recovery_result, "reason", "reacquire_deferred_or_failed"),
+            actual_url,
+            dispatch_url,
+            platform_key,
+            decision.page_class,
+            decision.new_attempt_started,
+            runtime_health.RecoveryLevel.REACQUIRE,
+            outcomes,
+        )
+
+    with health.bind_expected_progress(
+        tab_identity=tab_identity,
+        platform_key=platform_key,
+        attempt_id=decision.attempt_id or "",
+        attempt_generation=decision.attempt_generation,
+    ):
+        if is_paused:
+            if platform_key == "kktix":
+                await nodriver_kktix_paused_main(context.tab, dispatch_url, config_dict)
+            return IterationResult(
+                "continue", "paused", actual_url, dispatch_url, platform_key, decision.page_class
+            )
+
+        if await check_refresh_datetime_gate(
+            context.tab,
+            config_dict,
+            context.refresh_datetime_state,
+            dispatch_url,
+        ):
+            if context.refresh_datetime_state.pop("refresh_recovery_dispatch_required", False):
+                await tixcraft_platform.nodriver_ticketmaster_check_ip_block(
+                    context.tab,
+                    config_dict,
+                    current_url=dispatch_url,
+                )
+                _invalidate_refresh_gate_health_evidence(context.refresh_datetime_state)
+            return IterationResult(
+                "continue", "refresh_gate", actual_url, dispatch_url, platform_key, decision.page_class
+            )
+
+        if is_cityline_login_page(dispatch_url):
+            context.cloudflare_checked = True
+        if not context.cloudflare_checked and context.cloudflare_fail_count < 3:
+            is_cloudflare = await detect_cloudflare_challenge(
+                context.tab,
+                show_debug=config_dict.get("advanced", {}).get("verbose", False),
+            )
+            context.cloudflare_checked = True
+            if is_cloudflare:
+                solved = await handle_cloudflare_challenge(context.tab, config_dict)
+                if solved:
+                    context.cloudflare_checked = False
+                    context.cloudflare_fail_count = 0
+                    return IterationResult(
+                        "continue", "cloudflare_resolved", actual_url, dispatch_url, platform_key, decision.page_class
+                    )
+                context.cloudflare_fail_count += 1
+                context.cloudflare_checked = False
+                return IterationResult(
+                    "continue", "cloudflare_pending", actual_url, dispatch_url, platform_key, decision.page_class
+                )
+
+        if platform_key == "kktix":
+            context.is_quit_bot = bool(
+                await nodriver_kktix_main(context.tab, dispatch_url, config_dict)
+            )
+            if context.is_quit_bot:
+                context.is_quit_bot = False
+        elif platform_key == "tixcraft":
+            context.is_quit_bot = bool(
+                await nodriver_tixcraft_main(
+                    context.tab,
+                    dispatch_url,
+                    config_dict,
+                    context.ocr,
+                    context.captcha_browser,
+                )
+            )
+            if context.is_quit_bot:
+                context.is_quit_bot = False
+        elif platform_key == "famiticket":
+            await nodriver_famiticket_main(context.tab, dispatch_url, config_dict)
+        elif platform_key == "ibon":
+            await nodriver_ibon_main(
+                context.tab,
+                dispatch_url,
+                config_dict,
+                context.ocr,
+                context.captcha_browser,
+            )
+        elif platform_key == "kham":
+            context.tab = await nodriver_kham_main(
+                context.tab,
+                dispatch_url,
+                config_dict,
+                context.ocr,
+            )
+        elif platform_key == "ticketplus" and decision.automation_allowed:
+            status = await nodriver_ticketplus_main(
+                context.tab,
+                dispatch_url,
+                config_dict,
+                context.ocr,
+                context.captcha_browser,
+            )
+            if isinstance(status, dict):
+                if status.get("purchase_completed", False):
+                    platform_engine.mark_attempt_completed(
+                        context.tab,
+                        "ticketplus",
+                        reason="ticketplus_purchase_completed",
+                    )
+                elif status.get("is_ticket_assigned", False) and "/confirm/" in dispatch_url.lower():
+                    platform_engine.mark_attempt_completed(
+                        context.tab,
+                        "ticketplus",
+                        reason="ticketplus_confirmation_page",
+                    )
+        elif platform_key == "cityline":
+            cityline_result = await nodriver_cityline_main(context.tab, dispatch_url, config_dict)
+            if isinstance(cityline_result, TabTransition):
+                context.tab = cityline_result.tab
+                context.session_manager.attach(context.driver, context.tab)
+                platform_engine.before_dispatch(
+                    context.tab,
+                    cityline_result.url,
+                    config_dict,
+                )
+                return IterationResult(
+                    "continue", "tab_transition", actual_url, cityline_result.url, platform_key, decision.page_class
+                )
+            context.tab = cityline_result
+        elif platform_key == "hkticketing":
+            context.tab = await nodriver_hkticketing_main(context.tab, dispatch_url, config_dict)
+        elif platform_key == "funone":
+            context.tab = await nodriver_funone_main(context.tab, dispatch_url, config_dict)
+        elif platform_key == "fansigo":
+            context.tab = await nodriver_fansigo_main(context.tab, dispatch_url, config_dict)
+
+        try:
+            current_hostname = (urllib.parse.urlsplit(dispatch_url).hostname or "").casefold().rstrip(".")
+        except ValueError:
+            current_hostname = ""
+        if platform_key == "fansigo" and current_hostname == FANSIGO_COGNITO_DOMAIN:
+            await nodriver_fansigo_signin(context.tab, dispatch_url, config_dict)
+        if dispatch_url.startswith("https://www.facebook.com/login.php?"):
+            await nodriver_facebook_main(context.tab, config_dict)
+
+    return IterationResult(
+        "dispatched",
+        decision.reason,
+        actual_url,
+        dispatch_url,
+        platform_key,
+        decision.page_class,
+        decision.new_attempt_started,
+        expected_progress_outcomes=outcomes,
+    )
+
+
 async def _run_main(args, resources):
     instance_id = ""
     if args and getattr(args, "instance", None):
@@ -2165,19 +3148,32 @@ async def _run_main(args, resources):
     tab = None
     session_manager = None
     if not config_dict is None:
-        sandbox = False
         session_manager = create_browser_session_manager(config_dict, args)
         resources["session_manager"] = session_manager
-        conf = get_extension_config(config_dict, args, session_manager=session_manager)
-        nodriver_overwrite_prefs(conf)
+        async def _restart_owned_browser(*, target_url, platform_key):
+            return await bootstrap_owned_browser(
+                config_dict,
+                args,
+                session_manager,
+                restore_target_url=target_url,
+                restore_platform_key=platform_key,
+            )
+
+        restart_setter = getattr(session_manager, "set_restart_factory", None)
+        if callable(restart_setter):
+            restart_setter(_restart_owned_browser)
         # PS: nodrirver run twice always cause error:
         # Failed to connect to browser
         # One of the causes could be when you are running as root.
         # In that case you need to pass no_sandbox=True
-        #driver = await uc.start(conf, sandbox=sandbox, headless=config_dict["advanced"]["headless"])
-        driver = await uc.start(conf)
-        session_manager.attach(driver)
-        if not driver is None:
+        bootstrapped = await bootstrap_owned_browser(
+            config_dict,
+            args,
+            session_manager,
+        )
+        if bootstrapped is not None:
+            driver = bootstrapped.driver
+            tab = bootstrapped.tab
             # Output actual CDP port for MCP connection (when mcp_debug is requested)
             mcp_debug_requested = (args and hasattr(args, 'mcp_debug') and args.mcp_debug) or \
                                   config_dict["advanced"].get("mcp_debug_port", 0) > 0
@@ -2197,19 +3193,8 @@ async def _run_main(args, resources):
                     print(f"[MCP DEBUG] Port saved to {port_file}")
                 except Exception as e:
                     print(f"[MCP DEBUG] Warning: Could not save port to file: {e}")
-            initial_tab = driver.main_tab
-            if initial_tab:
-                await nodrver_block_urls(initial_tab, config_dict)
-            tab = await nodriver_goto_homepage(driver, config_dict)
-            if tab is None:
-                print("[ERROR] Homepage navigation failed. Cannot continue.")
-                return
-            if not initial_tab:
-                tab = await nodrver_block_urls(tab, config_dict)
-            if not config_dict["advanced"]["headless"]:
-                await nodriver_resize_window(tab, config_dict)
         else:
-            print("無法使用nodriver，程式無法繼續工作")
+            print("[ERROR] Browser bootstrap failed. Cannot continue.")
             return
     else:
         print("Load config error!")
@@ -2235,14 +3220,22 @@ async def _run_main(args, resources):
         debug = util.create_debug_logger(config_dict)
         debug.log(f"[OCR INIT] Failed to initialize OCR: {exc}")
 
-    maxbot_last_reset_time = time.monotonic()
     heartbeat_interval_sec = 5
     last_heartbeat_time = 0.0
     last_runtime_alive_log = 0.0
-    last_empty_url_log = 0.0
-    empty_url_since = 0.0
-    is_quit_bot = False
-    ticketplus_purchase_done = False  # Guard: stop polling after purchase completed
+    last_resource_diagnostic = 0.0
+    health_supervisor = runtime_health.RuntimeHealthSupervisor()
+    resources["health_supervisor"] = health_supervisor
+    runtime_context = RuntimeIterationContext(
+        config_dict=config_dict,
+        driver=driver,
+        tab=tab,
+        session_manager=session_manager,
+        health_supervisor=health_supervisor,
+        refresh_datetime_state=refresh_datetime_state,
+        ocr=ocr,
+        captcha_browser=Captcha_Browser,
+    )
 
     # Initialize config mtime. Hot reload watches the file this instance was
     # launched with, so named profiles do not get overwritten by settings.json.
@@ -2262,6 +3255,7 @@ async def _run_main(args, resources):
         if is_interval_due(loop_mono, last_config_reload_check, CONFIG_RELOAD_CHECK_INTERVAL_SEC):
             last_config_reload_check = loop_mono
             config_dict, config_mtime = await reload_config(config_dict, config_mtime, config_filepath)
+            runtime_context.config_dict = config_dict
 
         heartbeat_now = time.monotonic()
         if heartbeat_now - last_heartbeat_time >= heartbeat_interval_sec:
@@ -2270,225 +3264,39 @@ async def _run_main(args, resources):
             if heartbeat_now - last_runtime_alive_log >= 30:
                 last_runtime_alive_log = heartbeat_now
                 runtime_health.runtime_log("[LOOP] alive", config_dict)
+            if heartbeat_now - last_resource_diagnostic >= 60:
+                last_resource_diagnostic = heartbeat_now
+                diagnostics = collect_runtime_diagnostics(
+                    session_manager,
+                    health_supervisor,
+                )
+                runtime_health.runtime_log(
+                    "[RESOURCE] sample",
+                    config_dict,
+                    **diagnostics.fields(),
+                )
 
-        # pass if driver not loaded.
-        if driver is None:
+        if runtime_context.driver is None:
             _close_runtime_ntp_coordinator(refresh_datetime_state)
             print("nodriver not accessible!")
             break
 
-        if not is_quit_bot and await check_and_handle_quit(config_dict):
-            is_quit_bot = True
-
-        if not is_quit_bot:
-            prefer_cached_url = _should_prefer_cached_runtime_url(
-                tab,
-                config_dict,
-                refresh_datetime_state,
-            )
-            url, is_quit_bot = await nodriver_current_url(
-                tab,
-                config_dict,
-                prefer_cached=prefer_cached_url,
-            )
-            #print("url:", url)
-
-        if is_quit_bot:
-            util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_INT28_QUIT_FILE))
-            util.force_remove_file(util.get_instance_state_path(CONST_MAXBOT_AUTOMATION_STOP_FILE))
-            break
-
-        if url is None or len(url) == 0:
-            now_mono = time.monotonic()
-            if empty_url_since <= 0:
-                empty_url_since = now_mono
-            if now_mono - last_empty_url_log >= 2.0:
-                last_empty_url_log = now_mono
-                util.create_debug_logger(config_dict).log(
-                    "[URL DIAG] empty url, skipping dispatch; "
-                    f"{format_cached_target_url_diagnostic(tab)}"
-                )
-            if persistent_empty_url_should_stop(empty_url_since, now_mono):
-                runtime_health.runtime_log(
-                    "[URL DIAG] safe_stop",
-                    config_dict,
-                    reason="persistent_empty_url_or_cdp_disconnect",
-                    elapsed_s=round(now_mono - empty_url_since, 1),
-                )
-                print(
-                    "Browser connection produced no URL for 30 seconds. "
-                    "HunterX stopped safely; please restart the browser instance manually."
-                )
-                break
-            continue
-        empty_url_since = 0.0
-
-        is_maxbot_paused = await check_and_handle_pause(config_dict)
-
-        # Detect pause state change and show message immediately
-        if is_maxbot_paused and not last_paused_state:
-            instance_suffix = "" if util.get_instance_id() == "default" else f" [{util.get_instance_id()}]"
-            print("BOT Paused." + instance_suffix)
-        last_paused_state = is_maxbot_paused
-
-        if len(url) > 0 :
-            if url != last_url:
-                print(url)
-                write_last_url_to_file(url)
-                cloudflare_checked = False
-                cloudflare_fail_count = 0
-            last_url = url
-
-        # Establish task-local, per-tab platform state before any paused,
-        # scheduled or recovery callback can dispatch platform helpers.
-        platform_decision = platform_engine.before_dispatch(tab, url, config_dict)
-        platform_key = platform_decision.platform_key
-        if (
-            platform_decision.adapter is not None
-            and not platform_decision.allowed
-        ):
-            runtime_health.runtime_log(
-                "[PLATFORM] capability_gate",
-                config_dict,
-                platform=platform_decision.adapter.key,
-                reason=platform_decision.reason,
-                page_class=platform_decision.page_class.value,
-                current_url=url,
-            )
-
-        if is_maxbot_paused:
-            if platform_key == "kktix":
-                await nodriver_kktix_paused_main(tab, url, config_dict)
-            # sleep more when paused.
-            await asyncio.sleep(0.1)
-            continue
-
-        # Gate: block platform dispatching until refresh_datetime target time
-        if await check_refresh_datetime_gate(tab, config_dict, refresh_datetime_state, url):
-            if refresh_datetime_state.pop(
-                "refresh_recovery_dispatch_required",
-                False,
-            ):
-                await tixcraft_platform.nodriver_ticketmaster_check_ip_block(
-                    tab,
-                    config_dict,
-                    current_url=url,
-                )
-                # Recovery can replace or materially change the document.  Do
-                # not reuse pre-recovery blocked/ready evidence; force the next
-                # ARMED/FROZEN watchdog or TRIGGERED retry to validate again.
-                _invalidate_refresh_gate_health_evidence(refresh_datetime_state)
-            await asyncio.sleep(0.1)
-            continue
-
-        # Cloudflare challenge detection (only on URL change to avoid performance hit)
-        # After 3 consecutive failures on same URL, stop retrying to avoid infinite loop
-        # Skip Cityline Login page: Turnstile there is part of the login form, not a block
-        if is_cityline_login_page(url):
-            cloudflare_checked = True
-        if not cloudflare_checked and cloudflare_fail_count < 3:
-            is_cloudflare = await detect_cloudflare_challenge(tab, show_debug=config_dict.get("advanced", {}).get("verbose", False))
-            cloudflare_checked = True
-            if is_cloudflare:
-                print("[CLOUDFLARE] Challenge page detected, attempting to solve...")
-                cf_result = await handle_cloudflare_challenge(tab, config_dict)
-                if cf_result:
-                    cloudflare_checked = False  # Re-check after successful handling
-                    cloudflare_fail_count = 0
-                    continue
-                else:
-                    cloudflare_fail_count += 1
-                    cloudflare_checked = False  # Allow retry on next loop iteration
-                    if cloudflare_fail_count >= 3:
-                        print("[CLOUDFLARE] Max failures reached, waiting for URL change to retry")
-
-        # for kktix.cc and kktix.com
-        if platform_key == "kktix":
-            is_quit_bot = await nodriver_kktix_main(tab, url, config_dict)
-            if is_quit_bot:
-                # 不自動暫停：讓多開實例可獨立運作
-                # 保留 is_quit_bot = False 以防止程式結束，但不建立暫停檔案
-                is_quit_bot = False
-
-        if platform_key == "tixcraft":
-            try:
-                is_quit_bot = await nodriver_tixcraft_main(
-                    tab,
-                    url,
-                    config_dict,
-                    ocr,
-                    Captcha_Browser,
-                )
-            except Exception as exc:
-                if not runtime_health.is_browser_connection_closed_error(exc):
-                    raise
-                runtime_health.runtime_log(
-                    "[BROWSER] connection_closed",
-                    config_dict,
-                    error_type=type(exc).__name__,
-                )
-                print("[BROWSER] Browser connection closed; stopping this instance cleanly.")
-                is_quit_bot = True
-                continue
-            if is_quit_bot:
-                # 不自動暫停：讓多開實例可獨立運作
-                # 保留 is_quit_bot = False 以防止程式結束，但不建立暫停檔案
-                is_quit_bot = False
-
-        if platform_key == "famiticket":
-            await nodriver_famiticket_main(tab, url, config_dict)
-
-        if platform_key == "ibon":
-            await nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser)
-
-        if platform_key == "kham":
-            tab = await nodriver_kham_main(tab, url, config_dict, ocr)
-
-        # https://ticketplus.com.tw/*
-        if platform_key == "ticketplus" and not ticketplus_purchase_done:
-            tp_status = await nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser)
-
-            if isinstance(tp_status, dict):
-                if tp_status.get("purchase_completed", False):
-                    if not ticketplus_purchase_done:
-                        print("[SUCCESS] TicketPlus purchase completed")
-                        ticketplus_purchase_done = True
-                elif tp_status.get("is_ticket_assigned", False) and '/confirm/' in url.lower():
-                    if not ticketplus_purchase_done:
-                        print("[SUCCESS] TicketPlus on confirmation page, booking successful")
-                        ticketplus_purchase_done = True
-
-        if 'urbtix.hk' in url:
-            #urbtix_main(driver, url, config_dict)
-            pass
-
-        if platform_key == "cityline":
-            tab = await nodriver_cityline_main(tab, url, config_dict)
-
-        if platform_key == "hkticketing":
-            tab = await nodriver_hkticketing_main(tab, url, config_dict)
-
-        # FunOne Tickets
-        if platform_key == "funone":
-            tab = await nodriver_funone_main(tab, url, config_dict)
-
-        # FANSI GO
-        if platform_key == "fansigo":
-            tab = await nodriver_fansigo_main(tab, url, config_dict)
-
-        # FANSI GO Cognito login
         try:
-            current_hostname = (urllib.parse.urlsplit(url).hostname or "").casefold().rstrip(".")
-        except ValueError:
-            current_hostname = ""
-        if platform_key == "fansigo" and current_hostname == FANSIGO_COGNITO_DOMAIN:
-            await nodriver_fansigo_signin(tab, url, config_dict)
-
-        # for facebook
-        facebook_login_url = 'https://www.facebook.com/login.php?'
-        if url[:len(facebook_login_url)]==facebook_login_url:
-            await nodriver_facebook_main(tab, config_dict)
-
+            iteration_result = await run_runtime_iteration(runtime_context)
+        except Exception as iteration_error:
+            iteration_result = await _handle_terminal_iteration_failure(
+                runtime_context,
+                iteration_error,
+            )
+        driver = runtime_context.driver
+        tab = runtime_context.tab
+        if iteration_result.should_break:
+            if iteration_result.action == "fail_closed":
+                print(
+                    "Browser recovery stopped safely because the current "
+                    "purchase state cannot be replayed without duplicate risk."
+                )
+            break
 
 async def _cleanup_main_resources(resources):
     """Release runtime resources without masking an in-flight main error."""
@@ -2506,7 +3314,11 @@ async def _cleanup_main_resources(resources):
 
     session_manager = resources.get("session_manager")
     if session_manager is not None:
-        stop_task = asyncio.create_task(session_manager.stop_browser())
+        stop_task = hunterx_tasks.create(
+            session_manager.stop_browser(),
+            owner="browser_session",
+            purpose="bounded_shutdown",
+        )
         try:
             await asyncio.shield(stop_task)
         except asyncio.CancelledError as exc:
@@ -2566,6 +3378,12 @@ def cli():
     parser.add_argument("--input",
         help="config file path",
         type=str)
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=APP_DISPLAY_VERSION,
+    )
 
     parser.add_argument("--instance",
         help="instance name for multi-instance isolation (default: derived from --input filename)",

@@ -13,6 +13,7 @@ except Exception:
     pass
 
 import util
+import runtime_health
 from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
@@ -126,6 +127,7 @@ async def nodriver_funone_inject_cookie(tab, config_dict):
         return True
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE] Cookie injection failed: {exc}")
         return False
 
@@ -145,6 +147,7 @@ async def nodriver_funone_check_login_status(tab):
         return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         return False
 
 async def nodriver_funone_verify_login(tab, config_dict):
@@ -268,6 +271,7 @@ async def nodriver_funone_close_popup(tab):
         closed_any = result > 0
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     return closed_any
@@ -473,6 +477,7 @@ async def nodriver_funone_date_auto_select(tab, url, config_dict):
         return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE] Date selection error: {exc}")
         return False
 
@@ -688,6 +693,7 @@ async def nodriver_funone_area_auto_select(tab, url, config_dict):
         return clicked
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE] Area selection error: {exc}")
         return False
 
@@ -865,6 +871,7 @@ async def nodriver_funone_check_sold_out(tab, config_dict):
         return (False, 0, [])
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE] Check sold out error: {exc}")
         return (False, 0, [])
 
@@ -921,6 +928,7 @@ async def nodriver_funone_click_refresh_button(tab, config_dict):
             return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE] Click refresh button error: {exc}")
         return False
 
@@ -1152,6 +1160,7 @@ async def nodriver_funone_assign_ticket_number(tab, config_dict):
             return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE] Set quantity error: {exc}")
         return False
 
@@ -1314,6 +1323,7 @@ async def nodriver_funone_captcha_handler(tab, config_dict):
         return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE] Captcha check error: {exc}")
         return False
 
@@ -1344,7 +1354,8 @@ async def nodriver_funone_reload_captcha(tab):
         result = await tab.evaluate(reload_js)
         result = util.parse_nodriver_result(result)
         return bool(result)
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         return False
 
 
@@ -1426,6 +1437,7 @@ async def nodriver_funone_ocr_captcha(tab, config_dict, base64_data):
                 return True
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE OCR] Error: {exc}")
 
     return False
@@ -1516,6 +1528,7 @@ async def nodriver_funone_detect_step(tab):
         return int(step) if step else 0
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         return 0
 
 async def nodriver_funone_ticket_agree(tab):
@@ -1596,6 +1609,7 @@ async def nodriver_funone_ticket_agree(tab):
         return result >= 0
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         return False
 
 async def nodriver_funone_order_submit(tab, config_dict):
@@ -1648,6 +1662,7 @@ async def nodriver_funone_order_submit(tab, config_dict):
             return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE] Order submit error: {exc}")
         return False
 
@@ -1665,7 +1680,8 @@ async def nodriver_funone_auto_reload(tab, config_dict):
         current_url = tab.url
         if '/purchase_waiting_jump/' in current_url or '/purchase_fill_form/' in current_url:
             return False
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     try:
@@ -1780,6 +1796,7 @@ async def nodriver_funone_auto_reload(tab, config_dict):
         return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[FUNONE] Auto reload error: {exc}")
         return False
 
@@ -1799,7 +1816,8 @@ async def nodriver_funone_error_handler(tab, error, config_dict):
         try:
             await guarded_reload(tab, reason="legacy_platform_reload")
             return True
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
     if 'network' in error_str or 'connection' in error_str:
@@ -1808,7 +1826,8 @@ async def nodriver_funone_error_handler(tab, error, config_dict):
         try:
             await guarded_reload(tab, reason="legacy_platform_reload")
             return True
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
     return False
@@ -1893,7 +1912,8 @@ async def nodriver_funone_main(tab, url, config_dict):
                         config_dict,
                         reason="funone_homepage_recovery",
                     )
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
 
     elif page_type == "ACTIVITY_DETAIL":

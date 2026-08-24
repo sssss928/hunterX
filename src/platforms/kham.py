@@ -20,6 +20,7 @@ from zendriver import cdp
 
 import util
 import performance
+import runtime_health
 from platform_contract import PlatformStateProxy
 from platforms.common_async import get_auto_reload_interval
 from reload_guard import guarded_reload
@@ -121,6 +122,7 @@ async def _reload_page_when_due(tab, config_dict, state_key, log_prefix):
             await guarded_reload(tab, reason="legacy_platform_reload")
             return True
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"{log_prefix} Reload failed: {exc}")
             return False
 
@@ -345,6 +347,7 @@ async def nodriver_kham_fill_user_dictionary_fields(tab, config_dict):
             debug.log(f"[KHAM VERIFY] Filled {filled_count} custom dictionary field(s)")
         return filled_count
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[KHAM VERIFY] Custom dictionary autofill failed: {exc}")
         return 0
 
@@ -402,7 +405,8 @@ async def _kham_can_auto_submit_current_page(tab, config_dict):
         page_state = util.parse_nodriver_result(state_raw)
         if isinstance(page_state, dict):
             return bool(page_state.get("hasSubmit") and page_state.get("hasReadyAmount"))
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         return False
 
     return False
@@ -476,6 +480,7 @@ async def _kham_click_submit_button(tab, config_dict=None):
             debug.log(f"[SUBMIT] Submit button clicked via {clicked_result.get('source', '')}")
         return clicked
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         if debug is not None:
             debug.log(f"[SUBMIT] Robust submit button click failed: {exc}")
         return False
@@ -498,6 +503,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
     try:
         el_email = await tab.query_selector('#ACCOUNT')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("Find #ACCOUNT fail:", exc)
 
     # Input account
@@ -512,6 +518,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
                 if inputed_text == account:
                     is_email_sent = True
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("Input account fail:", exc)
 
     # Find password input
@@ -520,6 +527,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
         try:
             el_pass = await tab.query_selector('table.login > tbody > tr > td > input[type="password"]')
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("Find password input fail:", exc)
 
     # Input password
@@ -533,6 +541,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
                     await el_pass.send_keys(password)
                     is_password_sent = True
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("Input password fail:", exc)
 
     # Handle captcha with OCR
@@ -564,6 +573,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
                 if form_verifyCode_base64:
                     img_base64 = base64.b64decode(form_verifyCode_base64.split(',')[1])
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log("[KHAM LOGIN] Canvas exception:", str(exc))
 
             # OCR recognition
@@ -592,6 +602,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
                             is_captcha_sent = True
                             debug.log("[KHAM LOGIN] Captcha filled successfully")
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log("[KHAM LOGIN] Fill captcha fail:", exc)
                 else:
                     debug.log(f"[KHAM LOGIN] Invalid captcha length: {len(ocr_answer)}, expected 4")
@@ -614,6 +625,7 @@ async def nodriver_kham_login(tab, account, password, ocr=None, config_dict=None
                 ret = True
                 debug.log("[KHAM LOGIN] Login button clicked")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("Click login button fail:", exc)
 
     return ret
@@ -659,7 +671,8 @@ async def nodriver_kham_go_buy_redirect(tab, domain_name, config_dict=None):
                     config_dict,
                     reason="kham_purchase_redirect",
                 )
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
         # Fallback to traditional buy button if fast buy not available
@@ -673,6 +686,7 @@ async def nodriver_kham_go_buy_redirect(tab, domain_name, config_dict=None):
             await el_btn.click()
             is_button_clicked = True
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     return is_button_clicked
@@ -732,9 +746,11 @@ async def nodriver_kham_check_realname_dialog(tab, config_dict):
                             if not dialog_visible:
                                 break
                             await tab.sleep(0.1)
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("Check realname dialog exception:", exc)
 
     return is_realname_dialog_found
@@ -750,6 +766,7 @@ async def nodriver_kham_allow_not_adjacent_seat(tab, config_dict):
     try:
         agree_checkbox = await tab.query_selector('table.eventTABLE > tbody > tr > td > input[type="checkbox"]')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("Find kham adjacent_seat checkbox exception:", exc)
 
     is_finish_checkbox_click = await nodriver_force_check_checkbox(tab, agree_checkbox)
@@ -789,6 +806,7 @@ async def nodriver_kham_switch_to_auto_seat(tab):
                     await el_btn.click()
                     is_switch_to_auto_seat = True
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     return is_switch_to_auto_seat
@@ -830,6 +848,7 @@ async def _handle_post_submit_dialog(tab, config_dict):
                     await nodriver_kham_keyin_captcha_code(tab, "")
                     return "error"
         except Exception as e:
+            runtime_health.raise_if_terminal_browser_error(e)
             if i == 9:
                 debug.log(f"[SUBMIT] Dialog detection failed: {e}")
 
@@ -909,6 +928,7 @@ async def nodriver_kham_check_captcha_text_error(tab, config_dict):
                 # Clear captcha input and wait for re-input
                 await nodriver_kham_keyin_captcha_code(tab, "")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("Check captcha error exception:", exc)
 
     return is_reset_password_text
@@ -928,7 +948,8 @@ async def nodriver_kham_product(tab, domain_name, config_dict):
             el_btn = await tab.query_selector('div.ui-dialog-buttonset > button.ui-button')
             if el_btn:
                 await el_btn.click()
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
     return is_date_assign_by_bot
@@ -965,6 +986,7 @@ async def nodriver_kham_date_auto_select(tab, domain_name, config_dict):
     try:
         area_list = await tab.query_selector_all(selector)
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"query_selector_all error: {exc}")
 
     # Format area list with keyword filtering
@@ -978,6 +1000,7 @@ async def nodriver_kham_date_auto_select(tab, domain_name, config_dict):
                 row_text = util.remove_html_tags(row_html)
                 row_text = row_text.strip()
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log(f"get_html error: {exc}")
                 break
 
@@ -1138,7 +1161,8 @@ async def nodriver_kham_date_auto_select(tab, domain_name, config_dict):
                 import re
                 display_row_text = re.sub(r'\s+', ' ', target_row_text).strip()
                 debug.log(f"Target row selected (mode: {auto_select_mode}): {display_row_text[:80]}")
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log(f"Target row selected (mode: {auto_select_mode})")
         else:
             debug.log(f"No target row selected from {len(matched_blocks) if matched_blocks else 0} matched blocks")
@@ -1153,7 +1177,8 @@ async def nodriver_kham_date_auto_select(tab, domain_name, config_dict):
             if '尚未開賣' in target_row_html:
                 is_coming_soon = True
                 debug.log("[TICKET.COM] Coming soon button detected, skip clicking")
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             pass
 
         if not is_coming_soon:
@@ -1169,6 +1194,7 @@ async def nodriver_kham_date_auto_select(tab, domain_name, config_dict):
                     is_date_assign_by_bot = True
                     debug.log("Date buy button clicked successfully")
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log(f"Click button error: {exc}")
 
     # Auto reload if: no target found OR target is coming soon button
@@ -1217,7 +1243,8 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
             form_verifyCode = await tab.query_selector(selector)
             if form_verifyCode:
                 break
-        except Exception:
+        except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             continue
 
     is_start_to_input_answer = False
@@ -1240,7 +1267,8 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
                 if inputed_value == "驗證碼":
                     try:
                         await form_verifyCode.apply('function(el) { el.value = ""; }')
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
                 else:
                     if len(inputed_value) > 0:
@@ -1249,6 +1277,7 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
                     else:
                         is_start_to_input_answer = True
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 print("Check verify code value fail:", exc)
         else:
             # Clear input
@@ -1260,7 +1289,8 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
                         el.dispatchEvent(new Event("change", { bubbles: true }));
                     }
                 ''')
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
     if is_start_to_input_answer:
@@ -1297,6 +1327,7 @@ async def nodriver_kham_keyin_captcha_code(tab, answer="", auto_submit=False, pe
             '''.replace("__ANSWER__", answer_json))
             is_verifyCode_editing = True
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             print("Send keys OCR answer fail:", answer, exc)
         finally:
             performance.record_elapsed(perf_trace, performance.FILL_STAGE, fill_started_ns)
@@ -1368,6 +1399,7 @@ async def nodriver_kham_area_auto_select(tab, domain_name, config_dict, area_key
             if selects and len(selects) > 0:
                 price_select = selects[0]
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"Error finding PRICE select: {exc}")
 
     # Handle dropdown mode using CDP
@@ -1400,6 +1432,7 @@ async def nodriver_kham_area_auto_select(tab, domain_name, config_dict, area_key
                             'element': opt_elem
                         })
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"Error processing option {i}: {exc}")
 
             # Feature 003: Filter by keyword with early return pattern
@@ -1513,6 +1546,7 @@ async def nodriver_kham_area_auto_select(tab, domain_name, config_dict, area_key
                                         click_success = True
                                         break
                             except Exception as exc:
+                                runtime_health.raise_if_terminal_browser_error(exc)
                                 debug.log(f"  Error checking menu item: {exc}")
 
                         if click_success:
@@ -1543,14 +1577,17 @@ async def nodriver_kham_area_auto_select(tab, domain_name, config_dict, area_key
                                 ''')
                                 select_result = True
                         except Exception as fallback_exc:
+                            runtime_health.raise_if_terminal_browser_error(fallback_exc)
                             debug.log(f"Direct select value setting error: {fallback_exc}")
 
                         is_price_assign_by_bot = select_result
 
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"Bootstrap Select interaction error: {exc}")
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"Dropdown processing error: {exc}")
 
     else:
@@ -1571,6 +1608,7 @@ async def nodriver_kham_area_auto_select(tab, domain_name, config_dict, area_key
         try:
             area_list = await tab.query_selector_all(selector)
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"query_selector_all error: {exc}")
 
         # Format area list with filtering
@@ -1584,6 +1622,7 @@ async def nodriver_kham_area_auto_select(tab, domain_name, config_dict, area_key
                     row_text = util.remove_html_tags(row_html)
                     row_text = row_text.strip()
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"get_html error: {exc}")
                     break
 
@@ -1711,6 +1750,7 @@ async def nodriver_kham_area_auto_select(tab, domain_name, config_dict, area_key
                 is_price_assign_by_bot = True
                 debug.log("Area row clicked successfully")
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log(f"Click area row error: {exc}")
         else:
             is_need_refresh = True
@@ -1785,7 +1825,8 @@ async def nodriver_kham_auto_ocr(tab, config_dict, ocr, away_from_keyboard_enabl
                             }})();
                         ''')
                         await tab.sleep(0.3)
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
     else:
         debug.log(f"[KHAM OCR] OCR answer is None, previous_answer: {previous_answer}")
@@ -1983,7 +2024,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                         if (popup) popup.remove();
                     })();
                 ''')
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
             # For UDN login page: execute login first, then redirect after login completes
@@ -2022,6 +2064,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                         if isinstance(login_state, dict):
                             is_logged_in = login_state.get('isLoggedIn', False)
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log(f"[UDN LOGIN] Login state check error: {exc}")
 
                     if is_logged_in:
@@ -2048,6 +2091,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                                 }})()
                             ''')
                         except Exception as exc:
+                            runtime_health.raise_if_terminal_browser_error(exc)
                             debug.log(f"[UDN LOGIN] Fill account error: {exc}")
 
                         # Fill password
@@ -2063,6 +2107,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                                 }})()
                             ''')
                         except Exception as exc:
+                            runtime_health.raise_if_terminal_browser_error(exc)
                             debug.log(f"[UDN LOGIN] Fill password error: {exc}")
 
                         # Click reCAPTCHA checkbox
@@ -2075,6 +2120,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                                     recaptcha_clicked = True
                                     debug.log("[UDN LOGIN] reCAPTCHA clicked via include_frames")
                             except Exception as e1:
+                                runtime_health.raise_if_terminal_browser_error(e1)
                                 debug.log(f"[UDN LOGIN] include_frames method failed: {e1}")
 
                             if not recaptcha_clicked:
@@ -2097,6 +2143,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                                         recaptcha_clicked = True
                                         debug.log(f"[UDN LOGIN] reCAPTCHA clicked via mouse_click at ({x}, {y})")
                                 except Exception as e2:
+                                    runtime_health.raise_if_terminal_browser_error(e2)
                                     debug.log(f"[UDN LOGIN] mouse_click method failed: {e2}")
                         except Exception as exc:
                             debug.log(f"[UDN LOGIN] reCAPTCHA click error: {exc}")
@@ -2134,6 +2181,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     if navigated:
                         return tab
                 except Exception as e:
+                    runtime_health.raise_if_terminal_browser_error(e)
                     debug.log(f"[KHAM LOGIN] Redirect failed: {e}")
             break
 
@@ -2240,7 +2288,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                                 }}
                             }})();
                         ''')
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
 
                     # Click add to cart
@@ -2254,7 +2303,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                             el_btn = await tab.query_selector('#addcart button.red')
                             if el_btn:
                                 await el_btn.click()
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
 
     # Date selection page (UTK0201_00.aspx?product_id=)
@@ -2297,6 +2347,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                         # User is logged in if "登入/註冊" item is hidden
                         is_logged_in = login_state.get('loginItemHidden', False)
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[UDN LOGIN] Login state check error: {exc}")
 
                 if not is_logged_in:
@@ -2319,6 +2370,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                             }})()
                         ''')
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log(f"[UDN LOGIN] Fill account error: {exc}")
 
                     # Fill password
@@ -2334,6 +2386,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                             }})()
                         ''')
                     except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         debug.log(f"[UDN LOGIN] Fill password error: {exc}")
 
                     # Click reCAPTCHA checkbox
@@ -2348,6 +2401,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                                 recaptcha_clicked = True
                                 debug.log("[UDN LOGIN] reCAPTCHA clicked via include_frames")
                         except Exception as e1:
+                            runtime_health.raise_if_terminal_browser_error(e1)
                             debug.log(f"[UDN LOGIN] include_frames method failed: {e1}")
 
                         # Method 2: Fallback to CDP mouse event
@@ -2372,6 +2426,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                                     recaptcha_clicked = True
                                     debug.log(f"[UDN LOGIN] reCAPTCHA clicked via mouse_click at ({x}, {y})")
                             except Exception as e2:
+                                runtime_health.raise_if_terminal_browser_error(e2)
                                 debug.log(f"[UDN LOGIN] mouse_click method failed: {e2}")
 
                         if not recaptcha_clicked:
@@ -2405,7 +2460,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     # Layout format 2 - use date selection
                     if config_dict["date_auto_select"]["enable"]:
                         await nodriver_kham_product(tab, domain_name, config_dict)
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
         # UDN UTK0204 area selection page (Feature 010: UDN area auto select)
@@ -2795,6 +2851,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                         debug.log("[UDN QUICK BUY] No available ticket area found")
 
             except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 debug.log(f"[UDN QUICK BUY] Error: {exc}")
 
     else:
@@ -2827,7 +2884,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     el_btn = await tab.query_selector('div.ui-dialog-buttonset > button.ui-button')
                     if el_btn:
                         await el_btn.click()
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
 
             if config_dict["area_auto_select"]["enable"]:
@@ -2854,7 +2912,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                                 soldoutRows.forEach(row => row.remove());
                             })();
                         ''')
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
 
                 # Area selection and captcha
@@ -2878,7 +2937,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                             }}
                         }})();
                     ''')
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
 
                 # Check adjacent seat checkbox
@@ -2972,6 +3032,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     ''')
                     debug.log(f"Ticket number set to: {set_result}")
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"Set ticket number error: {exc}")
 
                 await nodriver_kham_fill_user_dictionary_fields(tab, config_dict)
@@ -3017,7 +3078,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     if captcha_value and len(captcha_value) == 4 and captcha_value != "驗證碼":
                         is_captcha_sent = True
                         debug.log(f"[CAPTCHA] Already filled: {captcha_value}")
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
 
             # Check adjacent seat checkbox
@@ -3035,7 +3097,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     el_btn = await tab.query_selector('div.ui-dialog-buttonset > button.ui-button')
                     if el_btn:
                         await el_btn.click()
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     pass
 
             # Handle captcha only if not already sent
@@ -3059,6 +3122,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     ''')
                     debug.log(f"Ticket number set to: {config_dict['ticket_number']}")
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"Set ticket number error: {exc}")
             elif "orders.ibon.com.tw" in url:
                 # ibon - uses SELECT dropdown for ticket number
@@ -3087,6 +3151,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                     ''')
                     debug.log(f"[IBON TICKET] Ticket number set to: {config_dict['ticket_number']}")
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[IBON TICKET] Set ticket number error: {exc}")
             else:
                 # Kham - find the correct ticket type input using pure JavaScript
@@ -3189,6 +3254,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                         debug.log(f"[TICKET] Ticket selection JavaScript executed")
 
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"Set ticket number error: {exc}")
 
             # Submit if captcha sent and ticket number assigned
@@ -3219,6 +3285,7 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                                     need_login = True
                                     debug.log("[LOGIN REQUIRED] Login fields detected - triggering idle mechanism")
                     except Exception as e:
+                        runtime_health.raise_if_terminal_browser_error(e)
                         debug.log(f"Login detection error: {e}")
 
                 # If login required, skip submit and let the next loop retry.
@@ -3244,7 +3311,8 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
                 el_btn = await tab.query_selector('div.ui-dialog-buttonset > button.ui-button')
                 if el_btn:
                     await el_btn.click()
-            except Exception:
+            except Exception as exc:
+                runtime_health.raise_if_terminal_browser_error(exc)
                 pass
 
             if config_dict["ocr_captcha"]["enable"]:
@@ -3332,6 +3400,7 @@ async def nodriver_ticket_login(tab, account, password, config_dict):
     try:
         el_email = await tab.query_selector('#ctl00_ContentPlaceHolder1_M_ACCOUNT')
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log("Find account input fail:", exc)
 
     # Input account
@@ -3346,6 +3415,7 @@ async def nodriver_ticket_login(tab, account, password, config_dict):
                 if inputed_text == account:
                     is_email_sent = True
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("Input account fail:", exc)
 
     # Find password input - Use ID selector
@@ -3354,6 +3424,7 @@ async def nodriver_ticket_login(tab, account, password, config_dict):
         try:
             el_pass = await tab.query_selector('#ctl00_ContentPlaceHolder1_M_PASSWORD')
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("Find password input fail:", exc)
 
     # Input password
@@ -3368,6 +3439,7 @@ async def nodriver_ticket_login(tab, account, password, config_dict):
                     is_password_sent = True
                 await tab.sleep(0.1)
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("Input password fail:", exc)
 
     # Click login button - Use ID selector
@@ -3379,6 +3451,7 @@ async def nodriver_ticket_login(tab, account, password, config_dict):
                 ret = True
                 debug.log("[TICKET LOGIN] Login button clicked")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log("Click login button fail:", exc)
 
     return ret
@@ -3420,6 +3493,7 @@ async def nodriver_kham_seat_type_auto_select(tab, config_dict, area_keyword_ite
                 include_dom_rects=True
             ))
         except Exception as snapshot_exc:
+            runtime_health.raise_if_terminal_browser_error(snapshot_exc)
             debug.log(f"[KHAM SEAT TYPE] ERROR capturing snapshot: {snapshot_exc}")
             # Fallback: try simple JavaScript method
             debug.log("[KHAM SEAT TYPE] Falling back to JavaScript method...")
@@ -3634,6 +3708,7 @@ async def nodriver_kham_seat_type_auto_select(tab, config_dict, area_keyword_ite
                                 await tab.send(cdp.dom.scroll_into_view_if_needed(node_id=node_id))
                                 debug.log(f"[KHAM SEAT TYPE] Scrolled button into view")
                             except Exception as scroll_exc:
+                                runtime_health.raise_if_terminal_browser_error(scroll_exc)
                                 debug.log(f"[KHAM SEAT TYPE] Scroll into view exception (non-critical): {scroll_exc}")
 
                             # Step 6.3: Get box model for precise click coordinates
@@ -3657,11 +3732,13 @@ async def nodriver_kham_seat_type_auto_select(tab, config_dict, area_keyword_ite
                                     debug.log("[KHAM SEAT TYPE] Falling back to JavaScript click...")
 
                             except Exception as box_exc:
+                                runtime_health.raise_if_terminal_browser_error(box_exc)
                                 debug.log(f"[KHAM SEAT TYPE] Box model exception: {box_exc}")
                         else:
                             debug.log(f"[KHAM SEAT TYPE] Failed to convert backend_node_id: push_result={push_result}")
 
                     except Exception as cdp_exc:
+                        runtime_health.raise_if_terminal_browser_error(cdp_exc)
                         debug.log(f"[KHAM SEAT TYPE] CDP operation error: {cdp_exc}")
                 else:
                     debug.log(f"[KHAM SEAT TYPE] backend_node_id is None, using JavaScript fallback")
@@ -3693,6 +3770,7 @@ async def nodriver_kham_seat_type_auto_select(tab, config_dict, area_keyword_ite
                         else:
                             debug.log(f"[KHAM SEAT TYPE] JavaScript fallback click failed")
                     except Exception as js_exc:
+                        runtime_health.raise_if_terminal_browser_error(js_exc)
                         debug.log(f"[KHAM SEAT TYPE] JavaScript fallback exception: {js_exc}")
 
             except Exception as click_exc:
@@ -4114,6 +4192,7 @@ async def nodriver_kham_seat_auto_select(tab, config_dict):
                     debug.log(f"[SUCCESS] Selected seat: {title}")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[ERROR] KHAM seat selection error: {exc}")
         import traceback
         if debug.enabled:
@@ -4146,6 +4225,7 @@ async def nodriver_kham_seat_main(tab, config_dict, ocr, domain_name):
 
         debug.log(f"[KHAM SEAT] Already selected seats: {already_selected_count}")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[KHAM SEAT] Error checking selected seats: {exc}")
 
     # If already selected enough seats, skip seat selection and go to submit
@@ -4179,6 +4259,7 @@ async def nodriver_kham_seat_main(tab, config_dict, ocr, domain_name):
                 )
                 debug.log(f"[KHAM SEAT] is_captcha_sent: {is_captcha_sent}")
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[ERROR] KHAM captcha processing error: {exc}")
 
     # Step 4: Submit order with improved dialog handling and URL tracking
@@ -4300,6 +4381,7 @@ async def nodriver_kham_seat_main(tab, config_dict, ocr, domain_name):
                             debug.log(f"[KHAM SUBMIT] Still searching for dialog... (attempt {i+1}/16)")
 
                     except Exception as e:
+                        runtime_health.raise_if_terminal_browser_error(e)
                         debug.log(f"[KHAM SUBMIT] Dialog check #{i+1} exception: {e}")
 
                 if not dialog_closed:
@@ -4333,6 +4415,7 @@ async def nodriver_kham_seat_main(tab, config_dict, ocr, domain_name):
                     play_sound_while_ordering(config_dict)
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[ERROR] KHAM submit exception: {exc}")
             # Fallback: use JavaScript to force submit
             try:
@@ -4342,6 +4425,7 @@ async def nodriver_kham_seat_main(tab, config_dict, ocr, domain_name):
                     play_sound_while_ordering(config_dict)
                 debug.log("[KHAM SUBMIT] Submitted via fallback method")
             except Exception as exc2:
+                runtime_health.raise_if_terminal_browser_error(exc2)
                 debug.log(f"[ERROR] KHAM fallback submit error: {exc2}")
 
     debug.log(f"[KHAM SEAT MAIN] Type:{is_seat_type_assigned} "
@@ -4467,6 +4551,7 @@ async def nodriver_udn_seat_auto_select(tab, config_dict):
                 debug.log(f"[UDN SEAT] Selection failed: {reason}")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         if debug.enabled:
             debug.log(f"[ERROR] UDN seat selection error: {exc}")
             import traceback
@@ -4599,6 +4684,7 @@ async def nodriver_udn_seat_select_ticket_type(tab, config_dict):
                 if dialog_result:
                     debug.log(f"[UDN TICKET] Dialog dismissed: {dialog_result.get('dismissed')}")
             except Exception as dialog_exc:
+                runtime_health.raise_if_terminal_browser_error(dialog_exc)
                 debug.log(f"[UDN TICKET] Dialog dismiss error (may be normal): {dialog_exc}")
 
         else:
@@ -4607,6 +4693,7 @@ async def nodriver_udn_seat_select_ticket_type(tab, config_dict):
                 debug.log(f"[UDN TICKET] Failed: {reason}")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         if debug.enabled:
             debug.log(f"[ERROR] UDN ticket type selection error: {exc}")
             import traceback
@@ -4662,6 +4749,7 @@ async def nodriver_udn_seat_main(tab, config_dict):
             return False
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[UDN SEAT MAIN] Error checking seat map: {exc}")
         return False
 
@@ -4925,6 +5013,7 @@ async def nodriver_ticket_seat_type_auto_select(tab, config_dict, area_keyword_i
                             debug.log(f"[TICKET SEAT TYPE] Warning: table_found={table_found}, seat_count={seat_count}")
 
                     except Exception as wait_exc:
+                        runtime_health.raise_if_terminal_browser_error(wait_exc)
                         if i == 19:
                             debug.log(f"[TICKET SEAT TYPE] querySelector error: {wait_exc}")
 
@@ -4936,12 +5025,14 @@ async def nodriver_ticket_seat_type_auto_select(tab, config_dict, area_keyword_i
                 debug.log("[TICKET SEAT TYPE] Click failed")
 
         except Exception as click_exc:
+            runtime_health.raise_if_terminal_browser_error(click_exc)
             if debug.enabled:
                 debug.log(f"[ERROR] CDP click error: {click_exc}")
                 import traceback
                 traceback.print_exc()
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[ERROR] Ticket seat type selection error: {exc}")
         import traceback
         if debug.enabled:
@@ -5787,6 +5878,7 @@ async def nodriver_ticket_seat_main(tab, config_dict, ocr, domain_name):
 
         debug.log(f"[TICKET SEAT] Already selected seats: {already_selected_count}")
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[TICKET SEAT] Error checking selected seats: {exc}")
 
     # If already selected enough seats, skip seat selection and go to submit
@@ -5822,6 +5914,7 @@ async def nodriver_ticket_seat_main(tab, config_dict, ocr, domain_name):
                     tab, config_dict, ocr, model_name
                 )
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[ERROR] Captcha processing error: {exc}")
 
     # Step 4: Submit order
@@ -5886,6 +5979,7 @@ async def nodriver_ticket_seat_main(tab, config_dict, ocr, domain_name):
                             debug.log("[TICKET SUBMIT] Dialog closed successfully")
                             break
                     except Exception as e:
+                        runtime_health.raise_if_terminal_browser_error(e)
                         if i == 9:
                             debug.log(f"[TICKET SUBMIT] Dialog close attempt failed: {e}")
                         pass
@@ -5898,6 +5992,7 @@ async def nodriver_ticket_seat_main(tab, config_dict, ocr, domain_name):
                     play_sound_while_ordering(config_dict)
 
         except Exception as exc:
+            runtime_health.raise_if_terminal_browser_error(exc)
             debug.log(f"[ERROR] Submit exception: {exc}")
             # Fallback: use JavaScript to force submit (same as Chrome)
             try:
@@ -5907,6 +6002,7 @@ async def nodriver_ticket_seat_main(tab, config_dict, ocr, domain_name):
                     play_sound_while_ordering(config_dict)
                 debug.log("[TICKET SUBMIT] Submitted via fallback method")
             except Exception as exc2:
+                runtime_health.raise_if_terminal_browser_error(exc2)
                 debug.log(f"[ERROR] Fallback submit error: {exc2}")
 
     # Step 5: Check for seat taken dialog and retry if needed
@@ -5927,6 +6023,7 @@ async def nodriver_ticket_seat_main(tab, config_dict, ocr, domain_name):
                             tab, config_dict, ocr, model_name
                         )
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[ERROR] Retry captcha error: {exc}")
 
             # Retry submit
@@ -5965,6 +6062,7 @@ async def nodriver_ticket_seat_main(tab, config_dict, ocr, domain_name):
                                     debug.log("[TICKET SUBMIT RETRY] Dialog closed successfully")
                                     break
                             except Exception as e:
+                                runtime_health.raise_if_terminal_browser_error(e)
                                 if i == 9:
                                     debug.log(f"[TICKET SUBMIT RETRY] Dialog close attempt failed: {e}")
                                 pass
@@ -5977,6 +6075,7 @@ async def nodriver_ticket_seat_main(tab, config_dict, ocr, domain_name):
                             play_sound_while_ordering(config_dict)
 
                 except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     debug.log(f"[ERROR] Retry submit error: {exc}")
 
     debug.log(f"[TICKET SEAT MAIN] Type:{is_seat_type_assigned} "
@@ -6030,6 +6129,7 @@ async def nodriver_ticket_check_seat_taken_dialog(tab, config_dict):
             debug.log("[TICKET DIALOG] Seat taken dialog detected and closed, will retry seat selection")
 
     except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         debug.log(f"[ERROR] Dialog check error: {exc}")
 
     return is_dialog_found
@@ -6070,6 +6170,7 @@ async def nodriver_ticket_close_dialog_with_retry(tab, config_dict, max_attempts
                 await tab.sleep(0.2)
                 break
         except Exception as e:
+            runtime_health.raise_if_terminal_browser_error(e)
             if attempt == max_attempts - 1:
                 debug.log(f"[TICKET DIALOG] Close failed after {max_attempts} attempts: {e}")
 
@@ -6143,20 +6244,23 @@ async def nodriver_ticket_switch_to_auto_seat(tab):
                 try:
                     await btn.click()
                     is_switch_to_auto_seat = True
-                except Exception:
+                except Exception as exc:
+                    runtime_health.raise_if_terminal_browser_error(exc)
                     # Fallback: use JavaScript to force click
                     try:
                         await tab.evaluate('''
                             (function(elem) { elem.click(); })(arguments[0])
                         ''', btn)
                         is_switch_to_auto_seat = True
-                    except Exception:
+                    except Exception as exc:
+                        runtime_health.raise_if_terminal_browser_error(exc)
                         pass
             else:
                 # Already selected
                 is_switch_to_auto_seat = True
 
-    except Exception:
+    except Exception as exc:
+        runtime_health.raise_if_terminal_browser_error(exc)
         pass
 
     return is_switch_to_auto_seat

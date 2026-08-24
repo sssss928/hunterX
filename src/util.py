@@ -343,6 +343,149 @@ def format_config_keyword_for_json(user_input):
 
     return user_input
 
+
+_USER_DICTIONARY_DISPLAY_DELIMITER = re.compile(r"[;\uff1b\r\n]+")
+
+
+def _parse_simple_user_dictionary_json(text):
+    """Fast path for the canonical scalar-only JSON storage representation."""
+
+    try:
+        if text.startswith("[") and text.endswith("]"):
+            decoded = json.loads(text)
+        else:
+            decoded = json.loads("[" + text + "]")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(decoded, list):
+        return None
+
+    answers = []
+    seen = set()
+    for item in decoded:
+        if item is None:
+            continue
+        if isinstance(item, (list, tuple, dict)):
+            return None
+        if isinstance(item, bool):
+            answer = str(item).lower()
+        elif isinstance(item, (str, int, float)):
+            answer = str(item).strip()
+        else:
+            return None
+        # Delimited content needs the full compatibility parser after JSON
+        # unescaping (for example, a stored ``"first\nsecond"`` value).
+        if _USER_DICTIONARY_DISPLAY_DELIMITER.search(answer):
+            return None
+        if answer and answer not in seen:
+            seen.add(answer)
+            answers.append(answer)
+    return answers
+
+
+def parse_user_dictionary_answers(value):
+    """Decode the user answer dictionary without exposing its storage format.
+
+    The settings UI historically stores answers as a JSON *fragment* such as
+    ``"A","B"``. Profiles and hand-edited settings also exist in array,
+    semicolon, full-width-semicolon and one-answer-per-line forms. All runtime
+    consumers must see the same clean, ordered list regardless of that origin.
+    Commas are intentionally preserved because they are valid answer content.
+    """
+
+    if isinstance(value, str):
+        simple_answers = _parse_simple_user_dictionary_json(value.strip())
+        if simple_answers is not None:
+            return simple_answers
+
+    answers = []
+    seen = set()
+
+    def append_answer(candidate):
+        text = str(candidate).strip()
+        if text and text not in seen:
+            seen.add(text)
+            answers.append(text)
+
+    def decode_json_sequence(text):
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                decoded = None
+            if isinstance(decoded, list):
+                return decoded
+
+        try:
+            decoded = json.loads("[" + text + "]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return decoded if isinstance(decoded, list) else None
+
+    def consume(candidate, *, allow_json=True):
+        if candidate is None:
+            return
+        if isinstance(candidate, (list, tuple)):
+            for item in candidate:
+                consume(item, allow_json=True)
+            return
+        if isinstance(candidate, bool):
+            append_answer(str(candidate).lower())
+            return
+        if isinstance(candidate, (int, float)):
+            append_answer(candidate)
+            return
+        if not isinstance(candidate, str):
+            return
+
+        text = candidate.strip()
+        if not text:
+            return
+
+        if allow_json:
+            decoded = decode_json_sequence(text)
+            if decoded is not None:
+                for item in decoded:
+                    consume(item, allow_json=False)
+                return
+
+        # A literal newline in a legacy quoted fragment is invalid JSON. Strip
+        # only the one matching storage wrapper before splitting; quotes inside
+        # a real answer remain untouched.
+        split_text = text
+        if (
+            len(split_text) >= 2
+            and split_text[0] in {'"', "'"}
+            and split_text[-1] == split_text[0]
+            and _USER_DICTIONARY_DISPLAY_DELIMITER.search(split_text[1:-1])
+        ):
+            split_text = split_text[1:-1]
+
+        if _USER_DICTIONARY_DISPLAY_DELIMITER.search(split_text):
+            for item in _USER_DICTIONARY_DISPLAY_DELIMITER.split(split_text):
+                consume(item, allow_json=True)
+            return
+
+        if (
+            len(split_text) >= 2
+            and split_text[0] in {'"', "'"}
+            and split_text[-1] == split_text[0]
+        ):
+            split_text = split_text[1:-1]
+        append_answer(split_text)
+
+    consume(value)
+    return answers
+
+
+def serialize_user_dictionary_answers(value):
+    """Return the canonical, lossless JSON-fragment representation."""
+
+    return ",".join(
+        json.dumps(answer, ensure_ascii=False)
+        for answer in parse_user_dictionary_answers(value)
+    )
+
 def is_text_match_keyword(keyword_string, text, config_dict=None):
     """
     Check if text matches any keyword in keyword_string.
@@ -488,7 +631,7 @@ def save_url_to_file(remote_url, CONST_MAXBOT_ANSWER_ONLINE_FILE, force_write = 
         is_write_to_file = True
 
     if is_write_to_file:
-        html_text = format_config_keyword_for_json(html_text)
+        html_text = serialize_user_dictionary_answers(html_text)
         target_path = get_instance_state_path(CONST_MAXBOT_ANSWER_ONLINE_FILE)
         write_string_to_file(target_path, html_text)
     return is_write_to_file
@@ -1695,36 +1838,27 @@ def guess_tixcraft_question(driver, question_text, config_dict=None):
     return answer_list
 
 def get_answer_list_from_user_guess_string(config_dict, CONST_MAXBOT_ANSWER_ONLINE_FILE):
-    local_array = []
+    advanced = config_dict.get("advanced", {}) if isinstance(config_dict, dict) else {}
+    local_array = parse_user_dictionary_answers(
+        advanced.get("user_guess_string", "") if isinstance(advanced, dict) else ""
+    )
+
     online_array = []
-
-    user_guess_string = config_dict["advanced"]["user_guess_string"]
-    if len(user_guess_string) > 0:
-        # Direct JSON parsing (same logic as date_keyword in KKTIX date selection)
-        # No need to call format_config_keyword_for_json() when reading from JSON
-        # The value is already in JSON format: "測試","測試2"
-        try:
-            local_array = json.loads("["+ user_guess_string +"]")
-        except Exception as exc:
-            local_array = []
-
-    user_guess_string = ""
     answer_file_path = get_instance_state_path(CONST_MAXBOT_ANSWER_ONLINE_FILE)
-    if os.path.exists(answer_file_path):
+    if os.path.isfile(answer_file_path):
         try:
-            with open(answer_file_path, "r") as text_file:
-                user_guess_string = text_file.readline()
-        except Exception as e:
-            pass
-
-    if len(user_guess_string) > 0:
-        # Direct JSON parsing (same logic as date_keyword in KKTIX date selection)
-        try:
-            online_array = json.loads("["+ user_guess_string +"]")
-        except Exception as exc:
+            with open(answer_file_path, "r", encoding="utf-8-sig") as text_file:
+                online_array = parse_user_dictionary_answers(text_file.read())
+        except (OSError, UnicodeError):
             online_array = []
 
-    return local_array + online_array
+    combined = []
+    seen = set()
+    for answer in local_array + online_array:
+        if answer not in seen:
+            seen.add(answer)
+            combined.append(answer)
+    return combined
 
 def extract_answer_by_question_pattern(answer_list, question_text):
     """

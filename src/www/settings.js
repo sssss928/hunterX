@@ -329,7 +329,7 @@ function applyOrRestore(selector, property, englishValue) {
 function renderReadmePane() {
     const englishHtml = `
 <div class="alert alert-info" role="alert">
-        <p class="mb-0"><strong>Version</strong>: HunterX (0.5.1) | <strong>Technical support</strong>: Codex AI-assisted development</p>
+        <p class="mb-0"><strong>Version</strong>: HunterX (0.5.2) | <strong>Technical support</strong>: Codex AI-assisted development</p>
 </div>
 
 <div class="accordion mb-3" id="devStatusAccordion">
@@ -1124,6 +1124,74 @@ function format_config_keyword_for_json(user_input) {
     }
 }
 
+function normalize_user_dictionary_items(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return [];
+
+    let decoded = null;
+    if (text.startsWith('[') && text.endsWith(']')) {
+        try {
+            const direct = JSON.parse(text);
+            if (Array.isArray(direct)) decoded = direct;
+        } catch (error) {
+            decoded = null;
+        }
+    }
+    if (decoded === null) {
+        try {
+            decoded = JSON.parse(`[${text}]`);
+        } catch (error) {
+            decoded = [text];
+        }
+    }
+
+    const answers = [];
+    const seen = new Set();
+    const append = (rawValue) => {
+        if (rawValue === null || rawValue === undefined) return;
+        if (Array.isArray(rawValue)) {
+            rawValue.forEach(append);
+            return;
+        }
+        if (typeof rawValue === 'object') return;
+
+        let segment = String(rawValue).trim();
+        if (!segment) return;
+        if (segment.length >= 2 &&
+            (segment[0] === '"' || segment[0] === "'") &&
+            segment[segment.length - 1] === segment[0] &&
+            /[;\uFF1B\r\n]/.test(segment.slice(1, -1))) {
+            segment = segment.slice(1, -1);
+        }
+
+        segment.split(/[;\uFF1B\r\n]+/).forEach((part) => {
+            let item = part.trim();
+            if (item.length >= 2 &&
+                (item[0] === '"' || item[0] === "'") &&
+                item[item.length - 1] === item[0]) {
+                item = item.slice(1, -1).trim();
+            }
+            if (item && !seen.has(item)) {
+                seen.add(item);
+                answers.push(item);
+            }
+        });
+    };
+
+    decoded.forEach(append);
+    return answers;
+}
+
+function format_user_dictionary_for_json(user_input) {
+    return normalize_user_dictionary_items(user_input)
+        .map(item => JSON.stringify(item))
+        .join(',');
+}
+
+function format_user_dictionary_for_display(stored_value) {
+    return normalize_user_dictionary_items(stored_value).join(';');
+}
+
 // Toggle Cityline login hint visibility based on account input
 function updateCitylineHintVisibility() {
     const citylineHint = document.querySelector('#cityline-login-hint');
@@ -1542,7 +1610,7 @@ function load_settins_to_form(settings)
         }
 
         // dictionary
-        user_guess_string.value = format_keyword_for_display(settings.advanced.user_guess_string);
+        user_guess_string.value = format_user_dictionary_for_display(settings.advanced.user_guess_string);
         auto_guess_options.checked = settings.advanced.auto_guess_options;
 
         // contact info
@@ -1899,7 +1967,7 @@ function save_changes_to_dict(silent_flag, profileSnapshot)
             }
 
             // dictionary
-            settings.advanced.user_guess_string = format_config_keyword_for_json(user_guess_string.value);
+            settings.advanced.user_guess_string = format_user_dictionary_for_json(user_guess_string.value);
 
             settings.advanced.auto_guess_options = auto_guess_options.checked;
 

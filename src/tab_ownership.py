@@ -7,12 +7,23 @@ specific tab observed as a result of a bot click before it can be closed.
 from __future__ import annotations
 
 import weakref
+from dataclasses import dataclass
 from typing import Any
 
 
 OWNED_TAB_FALLBACK_CAPACITY = 128
 _owned_tabs: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
 _fallback_owned_tabs: dict[int, tuple[Any, str]] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class TabTransition:
+    """A bot-created tab that the outer lifecycle owner must adopt atomically."""
+
+    previous_tab: Any
+    tab: Any
+    url: str
+    reason: str
 
 
 def register_owned_tab(tab: Any, reason: str) -> None:

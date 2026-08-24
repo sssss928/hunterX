@@ -16,6 +16,8 @@ from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from task_registry import hunterx_tasks
+
 
 NTP_UNIX_EPOCH_DELTA_SECONDS = 2_208_988_800
 NTP_PACKET_SIZE = 48
@@ -1201,12 +1203,15 @@ class RuntimeNtpCalibrationCoordinator:
         self._last_attempt_monotonic_ns = now_ns
         self._task_generation = self.generation
         self._task_identity = identity
-        self.task = asyncio.create_task(
+        self.task = hunterx_tasks.create(
             self._calibrate(
                 spec,
                 self._task_generation,
                 identity,
             ),
+            owner="runtime_ntp",
+            purpose="background_calibration",
+            generation=self.generation,
             name=f"runtime-ntp-calibration-{self.generation}",
         )
         self.status = "running"

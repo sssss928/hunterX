@@ -15,7 +15,9 @@ import inspect
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from attempt_lifecycle import AttemptState, PurchaseAttempt
 from leak_watch import LeakWatchScheduler
+from navigation_context import TargetContext
 from page_classifier import PageClass
 from reload_guard import ReloadGuard
 
@@ -157,6 +159,7 @@ class RouteRule:
 
 @dataclass
 class PlatformRuntimeState:
+    _schema_version: int = field(default=2, init=False, repr=False)
     leak_scheduler: LeakWatchScheduler = field(default_factory=LeakWatchScheduler)
     reload_guard: ReloadGuard = field(default_factory=ReloadGuard)
     current_page: PageClass = PageClass.UNKNOWN
@@ -165,6 +168,14 @@ class PlatformRuntimeState:
     recovery_count: int = 0
     platform_data: dict[str, Any] = field(default_factory=dict)
     config_snapshot: dict[str, Any] | None = None
+    attempt: PurchaseAttempt | None = None
+    attempt_generation: int = 0
+    last_transition_at: float = 0.0
+    target_context: TargetContext | None = None
+    route_generation: int = 0
+    target_identity: str = ""
+    normalized_route: str = ""
+    dom_signature: str = ""
 
     def backfill(self) -> None:
         """Repair state restored by hot reload without replacing live owners."""
@@ -188,12 +199,29 @@ class PlatformRuntimeState:
             dict,
         ):
             self.config_snapshot = None
+        if self.attempt is not None and not isinstance(self.attempt, PurchaseAttempt):
+            self.attempt = None
+        self.attempt_generation = max(0, int(self.attempt_generation or 0))
+        self.last_transition_at = max(0.0, float(self.last_transition_at or 0.0))
+        if self.target_context is not None and not isinstance(
+            self.target_context,
+            TargetContext,
+        ):
+            self.target_context = None
+        self.route_generation = max(0, int(self.route_generation or 0))
+        self.target_identity = str(self.target_identity or "")
+        self.normalized_route = str(self.normalized_route or "")
+        self.dom_signature = str(self.dom_signature or "")[:256]
+        self._schema_version = 2
 
     def reset_attempt(self) -> None:
+        if self.attempt is not None and self.attempt.state is not AttemptState.CLOSED:
+            self.attempt = self.attempt.with_state(AttemptState.CLOSED)
         self.leak_scheduler.reset_for_recovery()
         self.current_page = PageClass.UNKNOWN
         self.previous_url = ""
         self.platform_data.clear()
+        self.attempt = None
         self.recovery_count += 1
 
 

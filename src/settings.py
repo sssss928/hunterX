@@ -35,6 +35,7 @@ import requests
 import util
 from hunter_metadata import APP_DISPLAY_VERSION, APP_NAME, RELEASE_URL
 from notification_context import make_notification_context
+from task_registry import hunterx_tasks
 from refresh_timing import (
     DEFAULT_REFRESH_CALIBRATION,
     DEFAULT_TIME_CALIBRATION,
@@ -560,6 +561,19 @@ def get_instance_status(profile_name):
     }
 
 
+def normalize_user_dictionary_config(config_dict):
+    """Canonicalize the shared answer dictionary at every configuration boundary."""
+
+    if not isinstance(config_dict, dict):
+        return config_dict
+    advanced = config_dict.get("advanced")
+    if isinstance(advanced, dict):
+        advanced["user_guess_string"] = util.serialize_user_dictionary_answers(
+            advanced.get("user_guess_string", "")
+        )
+    return config_dict
+
+
 def migrate_config(config_dict):
     """Migrate old config structure to new structure."""
     if config_dict is None:
@@ -651,7 +665,7 @@ def migrate_config(config_dict):
             default["advanced"]["leak_refresh_interval_seconds"],
         )
 
-    return config_dict
+    return normalize_user_dictionary_config(config_dict)
 
 def load_json(profile_name=""):
     config_filepath = get_profile_filepath(profile_name)
@@ -1795,6 +1809,7 @@ class SaveJsonHandler(LocalControlHandler):
             os.makedirs(os.path.dirname(config_filepath), exist_ok=True)
             _, existing_config = load_json(profile_name)
             config_dict = restore_masked_config_secrets(_body, existing_config)
+            config_dict = normalize_user_dictionary_config(config_dict)
 
             if config_dict["kktix"]["max_dwell_time"] > 0:
                 if config_dict["kktix"]["max_dwell_time"] < 15:
@@ -2420,18 +2435,7 @@ class OcrHandler(LocalControlHandler):
 
 class QueryHandler(LocalControlHandler):
     def format_config_keyword_for_json(self, user_input):
-        if len(user_input) > 0:
-            # Remove any existing quotes first
-            user_input = user_input.replace('"', '').replace("'", '')
-
-            # Add quotes to each keyword
-            # Use semicolon as the ONLY delimiter (Issue #23)
-            if util.CONST_KEYWORD_DELIMITER in user_input:
-                items = user_input.split(util.CONST_KEYWORD_DELIMITER)
-                user_input = ','.join([f'"{item.strip()}"' for item in items if item.strip()])
-            else:
-                user_input = f'"{user_input.strip()}"'
-        return user_input
+        return util.serialize_user_dictionary_answers(user_input)
 
     def compose_as_json(self, user_input):
         user_input = self.format_config_keyword_for_json(user_input)
@@ -2542,8 +2546,10 @@ async def main_server(startup_event=None, startup_result=None):
         max_body_size=CONST_CONTROL_MAX_BODY_BYTES,
         max_buffer_size=CONST_CONTROL_MAX_BUFFER_BYTES,
     )
-    app.ocr_initialization_task = asyncio.create_task(
-        _initialize_ocr_application(app)
+    app.ocr_initialization_task = hunterx_tasks.create(
+        _initialize_ocr_application(app),
+        owner="settings_server",
+        purpose="ocr_initialization",
     )
     # Let the event loop schedule asynchronous initialization before reporting
     # readiness. OCR itself remains optional and never blocks the listener.
