@@ -101,7 +101,7 @@ jobs:
           python -m compileall src
           ruff check src tests scripts
           mypy
-          pytest
+          python -m pytest
           pip-audit -r requirement.txt
           bandit -r src scripts -lll -c pyproject.toml
 
