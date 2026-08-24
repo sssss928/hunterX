@@ -11,6 +11,8 @@ from zendriver.core.connection import Listener, ProtocolException, Transaction
 import browser_session
 from zendriver_hardening import (
     _ORIGINAL_CALL_ATTRIBUTE,
+    _PendingTransactionMap,
+    install_zendriver_event_mapper_guard,
     install_zendriver_transaction_guard,
 )
 
@@ -90,6 +92,48 @@ def test_guard_installation_is_idempotent(monkeypatch):
     guarded_call = Transaction.__call__
     assert install_zendriver_transaction_guard(Transaction) is False
     assert Transaction.__call__ is guarded_call
+
+
+def test_event_mapper_retains_commands_but_never_accumulates_events():
+    class FakeEventTransaction:
+        pass
+
+    mapper = _PendingTransactionMap(FakeEventTransaction)
+    command = object()
+
+    mapper[1] = command
+    for event_id in range(2, 100_002):
+        mapper[event_id] = FakeEventTransaction()
+
+    assert mapper == {1: command}
+    assert mapper.pop(1) is command
+    assert mapper == {}
+
+
+def test_event_mapper_connection_patch_is_idempotent():
+    class FakeEventTransaction:
+        pass
+
+    class FakeConnection:
+        def __init__(self, seed=None):
+            self.mapper = dict(seed or {})
+
+    command = object()
+    assert install_zendriver_event_mapper_guard(
+        FakeConnection,
+        FakeEventTransaction,
+    ) is True
+    guarded_init = FakeConnection.__init__
+    assert install_zendriver_event_mapper_guard(
+        FakeConnection,
+        FakeEventTransaction,
+    ) is False
+    assert FakeConnection.__init__ is guarded_init
+
+    connection = FakeConnection({7: command})
+    connection.mapper[8] = FakeEventTransaction()
+
+    assert connection.mapper == {7: command}
 
 
 @pytest.mark.asyncio

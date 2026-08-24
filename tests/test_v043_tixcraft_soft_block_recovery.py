@@ -407,8 +407,10 @@ async def test_soft_block_backoff_deadline_uses_monotonic_clock(monkeypatch) -> 
     clock = {"now": 300.0}
     wait_calls: list[int] = []
     backoff_calls: list[float] = []
-    tixcraft._state.clear()
-    tixcraft._state.update(
+    tab = _RecoveryTab()
+    tab_state = tixcraft._state_for_tab(tab)
+    tab_state.clear()
+    tab_state.update(
         {
             "last_valid_area_url": AREA_URL,
             "recent_area_route_url": AREA_URL,
@@ -440,22 +442,23 @@ async def test_soft_block_backoff_deadline_uses_monotonic_clock(monkeypatch) -> 
         record_remaining_wait,
     )
 
-    assert await tixcraft._handle_tixcraft_soft_block(
-        SimpleNamespace(),
-        config,
-        AREA_URL,
-        {"kind": "stable_blank", "original_url": "", "client_ip": "redacted"},
-    )
-    assert tixcraft._state["ip_block_until"] == 307.0
-    assert backoff_calls == [7]
+    with tixcraft._bind_tixcraft_tab_state(tab):
+        assert await tixcraft._handle_tixcraft_soft_block(
+            tab,
+            config,
+            AREA_URL,
+            {"kind": "stable_blank", "original_url": "", "client_ip": "redacted"},
+        )
+        assert tixcraft._state["ip_block_until"] == 307.0
+        assert backoff_calls == [7]
 
-    clock["now"] = 302.0
-    assert await tixcraft.nodriver_ticketmaster_check_ip_block(
-        SimpleNamespace(),
-        config,
-        current_url=AREA_URL,
-    )
-    assert wait_calls == [5]
+        clock["now"] = 302.0
+        assert await tixcraft.nodriver_ticketmaster_check_ip_block(
+            tab,
+            config,
+            current_url=AREA_URL,
+        )
+        assert wait_calls == [5]
 
     async def blocked_again(*_args, **_kwargs):
         return {
@@ -470,7 +473,6 @@ async def test_soft_block_backoff_deadline_uses_monotonic_clock(monkeypatch) -> 
         return True
 
     clock["now"] = 307.0
-    tab = _RecoveryTab()
     monkeypatch.setattr(tixcraft, "_detect_tixcraft_soft_block", blocked_again)
     monkeypatch.setattr(tixcraft.runtime_health, "guarded_get", navigate_to_area)
     monkeypatch.setattr(
@@ -483,13 +485,14 @@ async def test_soft_block_backoff_deadline_uses_monotonic_clock(monkeypatch) -> 
         "_read_tixcraft_page_health",
         _healthy_area_page_health,
     )
-    assert await tixcraft.nodriver_ticketmaster_check_ip_block(
-        tab,
-        config,
-        current_url=AREA_URL,
-    )
-    assert backoff_calls == [7]
-    assert tixcraft._state["soft_block_recovery_scan_pending"] is True
+    with tixcraft._bind_tixcraft_tab_state(tab):
+        assert await tixcraft.nodriver_ticketmaster_check_ip_block(
+            tab,
+            config,
+            current_url=AREA_URL,
+        )
+        assert backoff_calls == [7]
+        assert tixcraft._state["soft_block_recovery_scan_pending"] is True
 
 
 @pytest.mark.asyncio
@@ -504,8 +507,10 @@ async def test_soft_block_wait_never_oversleeps_deadline(
 ) -> None:
     clock = 100.0
     sleeps: list[float] = []
-    tixcraft._state.clear()
-    tixcraft._state["ip_block_until"] = clock + remaining
+    tab = _RecoveryTab()
+    tab_state = tixcraft._state_for_tab(tab)
+    tab_state.clear()
+    tab_state["ip_block_until"] = clock + remaining
 
     monkeypatch.setattr(tixcraft.time, "monotonic", lambda: clock)
 
@@ -515,7 +520,7 @@ async def test_soft_block_wait_never_oversleeps_deadline(
     monkeypatch.setattr(tixcraft, "sleep_with_pause_check", record_sleep)
 
     assert await tixcraft.nodriver_ticketmaster_check_ip_block(
-        SimpleNamespace(),
+        tab,
         _runtime_config("leak_watch", delay=7),
         current_url=AREA_URL,
     )
@@ -543,8 +548,10 @@ async def test_inconclusive_recovery_probe_preserves_completed_backoff(
         ]
     )
     full_waits: list[float] = []
-    tixcraft._state.clear()
-    tixcraft._state.update(
+    tab = _RecoveryTab()
+    tab_state = tixcraft._state_for_tab(tab)
+    tab_state.clear()
+    tab_state.update(
         {
             "last_valid_area_url": AREA_URL,
             "recent_area_route_url": AREA_URL,
@@ -584,21 +591,21 @@ async def test_inconclusive_recovery_probe_preserves_completed_backoff(
 
     config = _runtime_config("leak_watch", delay=7)
     assert await tixcraft.nodriver_ticketmaster_check_ip_block(
-        _RecoveryTab(),
+        tab,
         config,
         current_url=AREA_URL,
     )
-    assert tixcraft._state["soft_block_phase"] == "recovering"
-    assert tixcraft._state["soft_block_backoff_until"] == 99.0
+    assert tab_state["soft_block_phase"] == "recovering"
+    assert tab_state["soft_block_backoff_until"] == 99.0
 
-    clock["now"] = tixcraft._state["soft_block_recovery_retry_at"]
+    clock["now"] = tab_state["soft_block_recovery_retry_at"]
     assert await tixcraft.nodriver_ticketmaster_check_ip_block(
-        _RecoveryTab(),
+        tab,
         config,
         current_url=AREA_URL,
     )
     assert full_waits == []
-    assert tixcraft._state["soft_block_backoff_until"] == 99.0
+    assert tab_state["soft_block_backoff_until"] == 99.0
 
 
 @pytest.mark.asyncio

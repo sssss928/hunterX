@@ -10,11 +10,13 @@ def test_release_workflow_has_required_triggers_permissions_and_artifact() -> No
     workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
     assert 'tags:' in workflow
-    assert '"v*"' in workflow
+    assert '"v*-rc3"' in workflow
     assert "workflow_dispatch:" in workflow
     assert "contents: read" in workflow
     assert "contents: write" in workflow
-    assert '"HunterX v$Version"' in workflow
+    assert '"HunterX v$Version RC3"' in workflow
+    assert "--prerelease" in workflow
+    assert 'Tag="v$Version-rc3"' in workflow
     assert "artifact-name" in workflow
     assert "checksum-name" in workflow
     assert "validate-project-version" in workflow
@@ -22,6 +24,9 @@ def test_release_workflow_has_required_triggers_permissions_and_artifact() -> No
     assert "publish-release" in workflow
     assert "fetch-depth: 0" in workflow
     assert "scripts/build_source_archive.py" in workflow
+    assert "verify_release_archive.py pair" in workflow
+    assert "--windows-archive" in workflow
+    assert "--source-archive" in workflow
     assert "scripts/write_release_checksums.py" in workflow
     assert "needs.validate.outputs.source_artifact_name" in workflow
     assert "needs.validate.outputs.checksum_name" in workflow
@@ -33,10 +38,15 @@ def test_release_workflow_has_required_triggers_permissions_and_artifact() -> No
     assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in workflow
     assert "needs.build-assets.outputs.release_commit" in workflow
     assert "--verify-manifest" in workflow
-    assert "gh release download v0.5.0" in workflow
-    assert "hunterX_windows_0.5.0.zip" in workflow
-    assert "400fe2732a1289acab4035ba341511a7695b942eb11ba8d7622842c3d24b9d1b" in workflow
-    assert '-BaseArchive "dist/base/hunterX_windows_0.5.0.zip"' in workflow
+    assert "rc2_release_tag:" in workflow
+    assert '$BaseReleaseTag = "v0.5.2-rc2"' in workflow
+    assert "gh release download $BaseReleaseTag" in workflow
+    assert "hunterX_windows_0.5.2_rc2.zip" in workflow
+    assert "47747a962cf5c4ae49654aec574ca64ac52c27032fc5b1ec1f70d83c3d09da48" in workflow
+    assert '-BaseArchive "dist/base/hunterX_windows_0.5.2_rc2.zip"' in workflow
+    assert '-Commit "${{ steps.commit.outputs.release_commit }}"' in workflow
+    assert "-Qualifier rc3" in workflow
+    assert "hunterX_windows_0.5.1.zip" not in workflow
     assert "hunterX_windows_0.4.9.zip" not in workflow
     assert "RELEASE_INPUT_VERSION: ${{ inputs.version }}" in workflow
     assert '--input-version "${{ inputs.version }}"' not in workflow
@@ -55,10 +65,10 @@ def test_release_workflow_has_required_triggers_permissions_and_artifact() -> No
     assert "verified-windows-release-" in build_section
     assert "Build source package from exact release commit" in publish_section
     assert "Write release checksum manifest" in publish_section
-    assert "Verify final release assets" in publish_section
+    assert "Verify RC3 release assets" in publish_section
     assert publish_section.index("Build source package from exact release commit") < publish_section.index(
         "Write release checksum manifest"
-    ) < publish_section.index("Verify final release assets")
+    ) < publish_section.index("Verify RC3 release assets")
 
     source_builder = (REPO_ROOT / "scripts/build_source_archive.py").read_text(encoding="utf-8")
     assert "verify_source_archive" in source_builder
@@ -77,6 +87,11 @@ def test_ci_workflow_covers_required_branch_families() -> None:
     assert 'steps.project.outputs.artifact_name' in workflow
     assert "--require-hashes -r requirements-lock-windows-py311.txt" in workflow
     assert "pytest --cov-fail-under=30" in workflow
+    assert "gh release download v0.5.2-rc2" in workflow
+    assert "hunterX_windows_0.5.2_rc2.zip" in workflow
+    assert "47747a962cf5c4ae49654aec574ca64ac52c27032fc5b1ec1f70d83c3d09da48" in workflow
+    assert "hunterX_windows_0.5.1.zip" not in workflow
+    assert "--qualifier rc3" in workflow
     assert workflow.count("continue-on-error: true") == 3
     assert workflow.count("retention-days: 3") == 3
     assert "0.1.0" not in workflow
@@ -93,13 +108,19 @@ def test_windows_build_script_requires_metadata_version_match() -> None:
     assert validation < first_build
     assert baseline_check < first_build
     assert "--base-archive $ResolvedBaseArchive" in script
+    assert "--commit $Commit" in script
+    assert "--qualifier $Qualifier" in script
     assert "verify_windows_shell_zip.js" in script
 
     baseline_builder = (REPO_ROOT / "scripts/build_windows_from_base.py").read_text(
         encoding="utf-8"
     )
-    assert "BASELINE_VERSION = \"0.5.0\"" in baseline_builder
-    assert "BASELINE_SHA256" in baseline_builder
+    assert "ROUND1_RC_ARCHIVE_NAME" in baseline_builder
+    assert "ROUND1_RC_SHA256" in baseline_builder
+    assert "require_candidate_qualifier" in baseline_builder
+    assert "resolve_clean_commit" in baseline_builder
+    assert "write_rc3_provenance" in baseline_builder
+    assert "verify_archive_package" in baseline_builder
     assert "stage_application_source" in baseline_builder
     assert "repack_entrypoints" in baseline_builder
     assert "verify_windows_archive" in baseline_builder

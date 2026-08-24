@@ -21,6 +21,12 @@ def test_resolve_version_from_tag() -> None:
     assert release_utils.resolve_version("push", "v0.1.0") == "0.1.0"
 
 
+def test_resolve_version_from_rc2_tag_is_exact() -> None:
+    assert release_utils.resolve_version("push", "v0.5.2-rc2", qualifier="rc2") == "0.5.2"
+    with pytest.raises(ValueError, match="must end"):
+        release_utils.resolve_version("push", "v0.5.2-final", qualifier="rc2")
+
+
 def test_manual_dispatch_rejects_leading_v() -> None:
     with pytest.raises(ValueError):
         release_utils.resolve_version("workflow_dispatch", "main", "v0.1.0")
@@ -31,12 +37,28 @@ def test_artifact_name_is_safe() -> None:
     assert release_utils.artifact_name("0.1.0", "source") == "hunterX_source_0.1.0.zip"
     assert " " not in release_utils.artifact_name("0.1.0")
     assert "-" not in release_utils.artifact_name("0.1.0")
+    assert (
+        release_utils.artifact_name("0.5.2", qualifier="rc2")
+        == "hunterX_windows_0.5.2_rc2.zip"
+    )
+    assert (
+        release_utils.artifact_name("0.5.2", "source", "rc2")
+        == "hunterX_source_0.5.2_rc2.zip"
+    )
 
 
 def test_checksum_name_is_versioned_and_safe() -> None:
     assert release_utils.checksum_name("0.1.0") == "SHA256SUMS_v0.1.0.txt"
     with pytest.raises(ValueError):
         release_utils.checksum_name("v0.1.0")
+    assert release_utils.checksum_name("0.5.2", "rc2") == "SHA256SUMS_v0.5.2_RC2.txt"
+
+
+def test_rc2_profile_rejects_final_or_missing_qualifier() -> None:
+    assert release_utils.require_rc2_qualifier("RC2") == "rc2"
+    for qualifier in (None, "rc", "final"):
+        with pytest.raises(ValueError, match="requires qualifier 'rc2'"):
+            release_utils.require_rc2_qualifier(qualifier)
 
 
 def test_source_archive_prefix_has_one_versioned_root() -> None:

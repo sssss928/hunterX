@@ -6,7 +6,11 @@ import pytest
 
 from page_classifier import PageClass
 from platform_adapters import ADAPTERS, adapter_for_url
-from platform_contract import CapabilityStatus, PlatformRuntimeState
+from platform_contract import (
+    CapabilityStatus,
+    PlatformRuntimeState,
+    clear_active_platform_state,
+)
 from platform_engine import PlatformEngine
 from reload_guard import guarded_reload
 
@@ -53,6 +57,17 @@ ROUTES = {
         "https://premier.hkticketing.com/payment/1",
     ),
 }
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dispatch_context():
+    """Do not leak a test engine's task-local binding into legacy direct tests."""
+
+    clear_active_platform_state()
+    try:
+        yield
+    finally:
+        clear_active_platform_state()
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS, ids=lambda item: item.key)

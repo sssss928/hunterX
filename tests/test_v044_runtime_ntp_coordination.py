@@ -616,14 +616,15 @@ def test_gate_prunes_expired_navigation_and_scheduler_guards() -> None:
         area_one = "https://tixcraft.com/ticket/area/event-one/game-one"
         area_two = "https://tixcraft.com/ticket/area/event-two/game-two"
         tab = Tab(area_one)
+        state = platform._state_for_tab(tab)
         scheduler = LeakWatchScheduler(
             dom_scan_pending=True,
             dom_scan_started_at=1.0,
             area_click_pending=True,
             last_area_click_at=1.0,
         )
-        platform._state.clear()
-        platform._state.update(
+        state.clear()
+        state.update(
             {
                 "current_event_id": "event-one",
                 "current_game_id": "game-one",
@@ -654,14 +655,14 @@ def test_gate_prunes_expired_navigation_and_scheduler_guards() -> None:
         )
         expired_result = {
             "events": sorted(expired),
-            "area": platform._state.get("pending_area_navigation"),
-            "recovery": platform._state["soft_block_recovery_scan_pending"],
+            "area": state.get("pending_area_navigation"),
+            "recovery": state["soft_block_recovery_scan_pending"],
             "dom": scheduler.dom_scan_pending,
             "click": scheduler.area_click_pending,
         }
 
         scheduler.mark_area_click_pending(area_one, now=30.0)
-        platform._state["pending_area_navigation"] = (
+        state["pending_area_navigation"] = (
             platform.TixCraftPendingNavigation(
                 kind="area",
                 source_url=area_one,
@@ -682,7 +683,7 @@ def test_gate_prunes_expired_navigation_and_scheduler_guards() -> None:
         )
         active_result = {
             "events": sorted(active_events),
-            "token": platform._state["pending_area_navigation"].token,
+            "token": state["pending_area_navigation"].token,
             "click": scheduler.area_click_pending,
         }
         deadline_events = runtime._maintain_tixcraft_refresh_runtime(
@@ -693,11 +694,11 @@ def test_gate_prunes_expired_navigation_and_scheduler_guards() -> None:
         )
         deadline_result = {
             "events": sorted(deadline_events),
-            "area": platform._state.get("pending_area_navigation"),
+            "area": state.get("pending_area_navigation"),
             "click": scheduler.area_click_pending,
         }
 
-        platform._state["pending_date_navigation"] = (
+        state["pending_date_navigation"] = (
             platform.TixCraftPendingNavigation(
                 kind="date",
                 source_url=area_one,
@@ -710,7 +711,7 @@ def test_gate_prunes_expired_navigation_and_scheduler_guards() -> None:
                 deadline=60.0,
             )
         )
-        platform._state["current_event_id"] = "event-two"
+        state["current_event_id"] = "event-two"
         switched = runtime._maintain_tixcraft_refresh_runtime(
             tab,
             area_two,
@@ -719,12 +720,12 @@ def test_gate_prunes_expired_navigation_and_scheduler_guards() -> None:
         )
         switched_result = {
             "events": sorted(switched),
-            "date": platform._state.get("pending_date_navigation"),
+            "date": state.get("pending_date_navigation"),
         }
 
-        platform._state["current_event_id"] = "event-one"
-        platform._state["current_game_id"] = "game-one"
-        platform._state["pending_date_navigation"] = (
+        state["current_event_id"] = "event-one"
+        state["current_game_id"] = "game-one"
+        state["pending_date_navigation"] = (
             platform.TixCraftPendingNavigation(
                 kind="date",
                 source_url=area_one,
@@ -745,7 +746,7 @@ def test_gate_prunes_expired_navigation_and_scheduler_guards() -> None:
         )
         tab_result = {
             "events": sorted(tab_switched),
-            "date": platform._state.get("pending_date_navigation"),
+            "date": state.get("pending_date_navigation"),
         }
 
         print(
@@ -905,11 +906,12 @@ def test_gate_soft_block_preflight_and_leak_scheduler_coordination() -> None:
         async def run():
             results = {}
             tab = Tab(area_url)
+            state_data = platform._state_for_tab(tab)
             base_mono_ns = time.monotonic_ns()
 
             # A safe-looking /area URL with a real EPS DOM must not be reloaded.
-            platform._state.clear()
-            platform._state.update({"leak_scheduler": LeakWatchScheduler()})
+            state_data.clear()
+            state_data.update({"leak_scheduler": LeakWatchScheduler()})
             eps_probes = []
             reloads = []
 
@@ -1000,8 +1002,8 @@ def test_gate_soft_block_preflight_and_leak_scheduler_coordination() -> None:
             for kind, snapshot in unsafe_snapshots.items():
                 health_snapshot.clear()
                 health_snapshot.update(snapshot)
-                platform._state.clear()
-                platform._state.update(
+                state_data.clear()
+                state_data.update(
                     {"leak_scheduler": LeakWatchScheduler()}
                 )
                 clock = FakeClock(
@@ -1021,9 +1023,9 @@ def test_gate_soft_block_preflight_and_leak_scheduler_coordination() -> None:
 
             # A successful scheduled reload advances the leak scheduler
             # cooldown and holds platform dispatch for that iteration.
-            platform._state.clear()
+            state_data.clear()
             scheduler = LeakWatchScheduler()
-            platform._state.update({"leak_scheduler": scheduler})
+            state_data.update({"leak_scheduler": scheduler})
             calls = []
 
             async def safe_probe(*_args, **_kwargs):
@@ -1060,12 +1062,16 @@ def test_gate_soft_block_preflight_and_leak_scheduler_coordination() -> None:
             first_gate_active = await runtime.check_refresh_datetime_gate(
                 tab, config(), state, area_url
             )
-            area_reloaded = await platform._reload_page_when_due(
-                tab,
-                config(),
-                "tixcraft_area_reload",
-                "[TEST]",
-            )
+            binding = platform._state.bind(state_data)
+            try:
+                area_reloaded = await platform._reload_page_when_due(
+                    tab,
+                    config(),
+                    "tixcraft_area_reload",
+                    "[TEST]",
+                )
+            finally:
+                platform._state.reset_binding(binding)
             calls_after_area = list(calls)
             clock.advance_ms(500)
             stale_gate_active = await runtime.check_refresh_datetime_gate(

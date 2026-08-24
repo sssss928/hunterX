@@ -239,21 +239,25 @@ async def test_main_dispatch_confirms_area_only_on_protected_transition(
         lambda *_args, **_kwargs: None,
     )
 
-    await tixcraft.nodriver_tixcraft_main(
-        tab,
-        ORDER_URL,
-        _config(),
-        None,
-        None,
-    )
+    tab_state = tixcraft._state_for_tab(tab)
+    tab_state.clear()
+    tab_state.update(tixcraft._default_state)
+    with tixcraft._bind_tixcraft_tab_state(tab):
+        await tixcraft.nodriver_tixcraft_main(
+            tab,
+            ORDER_URL,
+            _config(),
+            None,
+            None,
+        )
 
-    attempt = tixcraft._state["purchase_attempt"]
-    assert attempt is not None
-    assert attempt.seat_area == AREA_NAME
-    assert tixcraft._state["last_selected_area"] == AREA_NAME
-    assert tixcraft._state["selected_area_metadata"]["confirmed"] is True
-    assert scheduler.area_click_pending is False
-    assert "pending_area_navigation" not in tixcraft._state
+        attempt = tixcraft._state["purchase_attempt"]
+        assert attempt is not None
+        assert attempt.seat_area == AREA_NAME
+        assert tixcraft._state["last_selected_area"] == AREA_NAME
+        assert tixcraft._state["selected_area_metadata"]["confirmed"] is True
+        assert scheduler.area_click_pending is False
+        assert "pending_area_navigation" not in tixcraft._state
 
 
 @pytest.mark.asyncio

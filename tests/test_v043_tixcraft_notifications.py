@@ -1282,6 +1282,24 @@ async def test_four_attempts_emit_only_order_and_checkout_with_same_event_name(
 
     monkeypatch.setattr(tixcraft, "send_discord_notification", fake_discord)
     monkeypatch.setattr(tixcraft, "send_telegram_notification", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        tixcraft,
+        "_read_tixcraft_page_health",
+        lambda *_args, **_kwargs: asyncio.sleep(
+            0,
+            result={
+                "readyState": "complete",
+                "hasBody": True,
+                "bodyText": "area inventory",
+                "title": "event",
+                "knownAreaContent": True,
+                "hasKnownContent": True,
+                "probeFailed": False,
+                "blocked": False,
+                "whiteOverlay": False,
+            },
+        ),
+    )
     config = {
         "ticket_number": 1,
         "advanced": {
@@ -1339,6 +1357,15 @@ async def test_four_attempts_emit_only_order_and_checkout_with_same_event_name(
             )
         assert attempt.discord_stages == {"order_pending", "checkout_reached"}
         tixcraft._track_tixcraft_attempt_page(PageClass.AREA, AREA_URL)
+        # A route string alone must not erase a live submit owner.  A new
+        # attempt is legal only after the interactive AREA document is proved.
+        assert tixcraft._get_tixcraft_purchase_attempt() is attempt
+        assert not await tixcraft._reconcile_tixcraft_submit_ownership(
+            tab,
+            PageClass.AREA,
+            AREA_URL,
+            config,
+        )
         assert tixcraft._get_tixcraft_purchase_attempt() is None
 
     assert [stage for _, stage, _ in emitted] == [
@@ -1445,56 +1472,60 @@ async def test_main_dispatch_emits_order_and_checkout_for_three_attempts(
     )
     tixcraft._state["attempt_last_page_class"] = PageClass.AREA.value
 
+    tab_state = tixcraft._state_for_tab(tab)
+    tab_state.clear()
+    tab_state.update(tixcraft._default_state)
     order_url = "https://tixcraft.com/ticket/order"
     checkout_url = "https://tixcraft.com/ticket/checkout"
-    for _attempt_index in range(3):
-        tixcraft._set_pending_area_navigation(
-            tab,
-            AREA_URL,
-            AREA_NAME,
-            config,
-        )
-        assert tixcraft._get_tixcraft_purchase_attempt() is None
+    with tixcraft._bind_tixcraft_tab_state(tab):
+        for _attempt_index in range(3):
+            tixcraft._set_pending_area_navigation(
+                tab,
+                AREA_URL,
+                AREA_NAME,
+                config,
+            )
+            assert tixcraft._get_tixcraft_purchase_attempt() is None
 
-        if _attempt_index:
-            tab.target.url = order_url
+            if _attempt_index:
+                tab.target.url = order_url
+                for _repeat in range(2):
+                    assert not await tixcraft.nodriver_tixcraft_main(
+                        tab,
+                        order_url,
+                        config,
+                        None,
+                        None,
+                    )
+            else:
+                assert not tixcraft._has_confirmed_tixcraft_submit_context()
+
+            tab.target.url = checkout_url
             for _repeat in range(2):
                 assert not await tixcraft.nodriver_tixcraft_main(
                     tab,
-                    order_url,
+                    checkout_url,
                     config,
                     None,
                     None,
                 )
-        else:
-            assert not tixcraft._has_confirmed_tixcraft_submit_context()
 
-        tab.target.url = checkout_url
-        for _repeat in range(2):
+            attempt = tixcraft._get_tixcraft_purchase_attempt()
+            assert attempt is not None
+            assert attempt.discord_stages == {
+                "order_pending",
+                "checkout_reached",
+            }
+
+            tab.target.url = AREA_URL
             assert not await tixcraft.nodriver_tixcraft_main(
                 tab,
-                checkout_url,
+                AREA_URL,
                 config,
                 None,
                 None,
             )
-
-        attempt = tixcraft._get_tixcraft_purchase_attempt()
-        assert attempt is not None
-        assert attempt.discord_stages == {
-            "order_pending",
-            "checkout_reached",
-        }
-
-        tab.target.url = AREA_URL
-        assert not await tixcraft.nodriver_tixcraft_main(
-            tab,
-            AREA_URL,
-            config,
-            None,
-            None,
-        )
-        assert tixcraft._get_tixcraft_purchase_attempt() is None
+            assert tixcraft._get_tixcraft_purchase_attempt() is None
 
     assert [stage for _, stage in emitted] == [
         "order_pending",
@@ -1568,16 +1599,20 @@ async def test_main_dispatch_backfills_partial_state_before_checkout_elapsed_tim
         },
     }
 
-    assert not await tixcraft.nodriver_tixcraft_main(
-        tab,
-        checkout_url,
-        config,
-        None,
-        None,
-    )
-    assert tixcraft._state["elapsed_time"] == pytest.approx(1.25)
-    assert tixcraft._state["is_popup_checkout"] is True
-    assert tixcraft._state["fail_list"] == []
+    tab_state = tixcraft._state_for_tab(tab)
+    tab_state.clear()
+    tab_state.update(tixcraft._default_state)
+    with tixcraft._bind_tixcraft_tab_state(tab):
+        assert not await tixcraft.nodriver_tixcraft_main(
+            tab,
+            checkout_url,
+            config,
+            None,
+            None,
+        )
+        assert tixcraft._state["elapsed_time"] == pytest.approx(1.25)
+        assert tixcraft._state["is_popup_checkout"] is True
+        assert tixcraft._state["fail_list"] == []
 
 
 @pytest.mark.asyncio

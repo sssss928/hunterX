@@ -10,7 +10,7 @@ import pytest
 from build_source_archive import build_source_archive
 from build_windows_archive import build_windows_archive
 from verify_release_archive import verify_windows_archive
-from write_release_checksums import verify_checksums, write_checksums
+from write_release_checksums import verify_checksums, verify_rc2_checksums, write_checksums
 
 
 def test_write_release_checksums_records_each_asset(tmp_path: Path) -> None:
@@ -43,6 +43,26 @@ def test_verify_release_checksums_detects_tampering(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="verification failed"):
         verify_checksums(manifest, tmp_path)
+
+
+def test_verify_rc2_checksums_requires_exact_rc2_asset_set(tmp_path: Path) -> None:
+    windows_asset = tmp_path / "hunterX_windows_0.5.2_rc2.zip"
+    source_asset = tmp_path / "hunterX_source_0.5.2_rc2.zip"
+    manifest = tmp_path / "SHA256SUMS_v0.5.2_RC2.txt"
+    windows_asset.write_bytes(b"windows")
+    source_asset.write_bytes(b"source")
+    write_checksums([windows_asset, source_asset], manifest)
+
+    assert verify_rc2_checksums(manifest, tmp_path, "0.5.2") == [
+        windows_asset,
+        source_asset,
+    ]
+
+    final_asset = tmp_path / "hunterX_windows_0.5.2_final.zip"
+    final_asset.write_bytes(b"final")
+    write_checksums([windows_asset, source_asset, final_asset], manifest)
+    with pytest.raises(ValueError, match="RC2 checksum assets mismatch"):
+        verify_rc2_checksums(manifest, tmp_path, "0.5.2")
 
 
 def test_build_windows_archive_uses_explorer_compatible_member_names(
@@ -109,7 +129,12 @@ def test_build_source_archive_verifies_exact_git_commit(tmp_path: Path) -> None:
         check=True,
     )
     (repo / "README.md").write_text("release source\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    (repo / "src").mkdir()
+    (repo / "src" / "hunter_metadata.py").write_text(
+        'APP_VERSION = "0.4.7"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "test source archive"], cwd=repo, check=True, stdout=subprocess.PIPE)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
 
@@ -130,8 +155,13 @@ def test_build_source_archive_can_verify_local_working_tree(tmp_path: Path) -> N
     (repo / ".gitignore").write_text("settings.json\n", encoding="utf-8")
     (repo / "README.md").write_text("tracked source\n", encoding="utf-8")
     (repo / "removed.py").write_text("REMOVE_ME = True\n", encoding="utf-8")
+    (repo / "src").mkdir()
+    (repo / "src" / "hunter_metadata.py").write_text(
+        'APP_VERSION = "0.4.8"\n',
+        encoding="utf-8",
+    )
     subprocess.run(
-        ["git", "add", ".gitignore", "README.md", "removed.py"],
+        ["git", "add", ".gitignore", "README.md", "removed.py", "src/hunter_metadata.py"],
         cwd=repo,
         check=True,
     )
@@ -153,3 +183,98 @@ def test_build_source_archive_can_verify_local_working_tree(tmp_path: Path) -> N
         assert "hunterX-0.4.8/removed.py" not in names
         assert all("settings.json" not in name for name in names)
         assert all("/.git/" not in name for name in names)
+
+
+def test_build_source_archive_rejects_commit_metadata_version_mismatch(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "release-test@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Release Test"],
+        cwd=repo,
+        check=True,
+    )
+    (repo / "src" / "hunter_metadata.py").write_text(
+        'APP_VERSION = "0.4.6"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=repo, check=True)
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        text=True,
+    ).strip()
+
+    with pytest.raises(ValueError, match="commit declares 0.4.6"):
+        build_source_archive(
+            version="0.4.7",
+            output=tmp_path / "hunterX_source_0.4.7.zip",
+            repo_root=repo,
+            commit=commit,
+        )
+
+
+def test_build_source_archive_rc2_rejects_dirty_or_final_profile(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "release-test@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Release Test"],
+        cwd=repo,
+        check=True,
+    )
+    (repo / "src" / "hunter_metadata.py").write_text(
+        'APP_VERSION = "0.5.2"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=repo, check=True)
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        text=True,
+    ).strip()
+
+    with pytest.raises(ValueError, match="requires qualifier 'rc2'"):
+        build_source_archive(
+            version="0.5.2",
+            output=tmp_path / "hunterX_source_0.5.2_final.zip",
+            repo_root=repo,
+            commit=commit,
+            qualifier="final",
+        )
+
+    wrong_output = tmp_path / "hunterX_source_0.5.2.zip"
+    wrong_output.write_bytes(b"preserve-existing-output")
+    with pytest.raises(ValueError, match="output must be named"):
+        build_source_archive(
+            version="0.5.2",
+            output=wrong_output,
+            repo_root=repo,
+            commit=commit,
+            qualifier="rc2",
+        )
+    assert wrong_output.read_bytes() == b"preserve-existing-output"
+
+    (repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="release repository must be clean"):
+        build_source_archive(
+            version="0.5.2",
+            output=tmp_path / "hunterX_source_0.5.2_rc2.zip",
+            repo_root=repo,
+            commit=commit,
+            qualifier="rc2",
+        )

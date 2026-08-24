@@ -435,14 +435,18 @@ async def test_queue_it_main_dispatch_has_no_dom_reload_or_notification(
     monkeypatch.setattr(tixcraft, "_reload_page_when_due", forbidden)
     monkeypatch.setattr(tixcraft, "_emit_tixcraft_attempt_notification", forbidden)
 
-    assert not await tixcraft.nodriver_tixcraft_main(
-        tab,
-        queue_url,
-        _config(),
-        None,
-        None,
-    )
-    assert tixcraft._state["queue_it_enter_time"] is not None
+    tab_state = tixcraft._state_for_tab(tab)
+    tab_state.clear()
+    tab_state.update(tixcraft._default_state)
+    with tixcraft._bind_tixcraft_tab_state(tab):
+        assert not await tixcraft.nodriver_tixcraft_main(
+            tab,
+            queue_url,
+            _config(),
+            None,
+            None,
+        )
+        assert tixcraft._state["queue_it_enter_time"] is not None
 
 
 @pytest.mark.asyncio

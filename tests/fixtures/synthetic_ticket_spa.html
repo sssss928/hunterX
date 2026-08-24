@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>HunterX Synthetic Ticket SPA</title>
+</head>
+<body>
+  <main id="ticket-root" data-generation="1" data-page="activity">
+    <button id="primary-area" aria-label="Select synthetic area">Area A</button>
+  </main>
+  <script>
+    (() => {
+      if (window.__hunterxSyntheticInstalled) return;
+      window.__hunterxSyntheticInstalled = true;
+      const root = document.querySelector('#ticket-root');
+      window.syntheticTicket = {
+        push(route) { history.pushState({}, '', route); },
+        replace(route) { history.replaceState({}, '', route); },
+        back() { history.back(); },
+        rerender(kind = 'primary') {
+          const generation = Number(root.dataset.generation || '0') + 1;
+          root.dataset.generation = String(generation);
+          root.replaceChildren();
+          if (kind === 'primary') {
+            root.insertAdjacentHTML('beforeend', '<button id="primary-area" aria-label="Select synthetic area">Area A</button>');
+          } else if (kind === 'fallback') {
+            root.insertAdjacentHTML('beforeend', '<button data-testid="known-area" aria-label="Select synthetic area">Area A</button>');
+          } else {
+            root.insertAdjacentHTML('beforeend', '<div>Unknown synthetic DOM</div>');
+          }
+        }
+      };
+    })();
+  </script>
+</body>
+</html>

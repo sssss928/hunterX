@@ -65,8 +65,8 @@ class _FakeDateTab:
         return self.rows
 
 
-def test_app_version_bumped_to_v047() -> None:
-    assert APP_VERSION == "0.5.1"
+def test_app_version_is_v052() -> None:
+    assert APP_VERSION == "0.5.2"
 
 
 def test_remove_html_tags_preserves_word_boundaries() -> None:
