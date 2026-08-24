@@ -42,6 +42,7 @@ htmlcov/
 settings.json
 config.json
 /src/settings.json
+/src/heartbeat.txt
 /src/MAXBOT_LAST_URL.txt
 /src/MAXBOT_INT28_IDLE.txt
 /src/MAXBOT_QUESTION.txt
@@ -53,6 +54,7 @@ src/webdriver/*/data/status.json
 # =========================
 chrome_profile/
 user_data/
+/src/browser_profiles/
 
 # =========================
 # WebDriver executables
@@ -77,6 +79,8 @@ user_data/
 .temp/
 .history/
 logs.txt
+/src/logs/
+/src/instances/
 tmp/
 
 # =========================
