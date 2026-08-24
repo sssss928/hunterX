@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.5.2
+
+- Replace process-local completion latches with attempt-scoped lifecycle state
+  for every registered platform family, preserving duplicate-submit protection
+  while automatically rearming after a confirmed return to a safe route.
+- Add bounded, state-aware target reacquisition, CDP transport recovery and
+  safe browser restart policy; clean manual browser closure never reopens.
+- Restore TicketPlus login targets with canonical, tab-scoped navigation
+  intents and bounded retries, while preserving existing KKTIX ownership.
+- Add route-generation tracking for SPA navigation and same-URL rerenders,
+  high-confidence fail-closed DOM selector fallback, and no body-wide observer.
+- Add HunterX-owned task tracking, bounded redacted debug traces, low-frequency
+  resource diagnostics, multi-tab/multi-instance stress and actual-browser
+  synthetic soak tooling.
+- This delivery is an RC because the required two 8-hour actual-browser soaks
+  were not completed; see `LONG_RUN_STABILITY_REPORT_v0.5.2.md`.
+
 ## v0.5.1
 
 - Preserve a submitted TicketPlus attempt across a same-tab external Queue-it
