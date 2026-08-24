@@ -3,12 +3,16 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "v*-rc3"
   workflow_dispatch:
     inputs:
       version:
         description: "Strict SemVer release version without a leading v"
         required: true
+      rc2_release_tag:
+        description: "GitHub prerelease tag containing the byte-approved RC2 base"
+        required: true
+        default: "v0.5.2-rc2"
 
 permissions:
   contents: read
@@ -44,18 +48,25 @@ jobs:
           RELEASE_REF_NAME: ${{ github.ref_name }}
           RELEASE_INPUT_VERSION: ${{ inputs.version }}
         run: |
+          QUALIFIER="rc3"
           VERSION="$(python scripts/release_utils.py resolve-version \
             --event-name "$RELEASE_EVENT_NAME" \
             --ref-name "$RELEASE_REF_NAME" \
-            --input-version "$RELEASE_INPUT_VERSION")"
+            --input-version "$RELEASE_INPUT_VERSION" \
+            --qualifier "$QUALIFIER")"
           python scripts/release_utils.py validate-project-version \
             --version "$VERSION" \
             --metadata src/hunter_metadata.py
-          ARTIFACT_NAME="$(python scripts/release_utils.py artifact-name --version "$VERSION")"
+          ARTIFACT_NAME="$(python scripts/release_utils.py artifact-name \
+            --version "$VERSION" \
+            --qualifier "$QUALIFIER")"
           SOURCE_ARTIFACT_NAME="$(python scripts/release_utils.py artifact-name \
             --version "$VERSION" \
-            --platform source)"
-          CHECKSUM_NAME="$(python scripts/release_utils.py checksum-name --version "$VERSION")"
+            --platform source \
+            --qualifier "$QUALIFIER")"
+          CHECKSUM_NAME="$(python scripts/release_utils.py checksum-name \
+            --version "$VERSION" \
+            --qualifier "$QUALIFIER")"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
@@ -137,32 +148,37 @@ jobs:
           }
           "release_commit=$ReleaseCommit" >> $env:GITHUB_OUTPUT
 
-      - name: Download and verify v0.5.0 Windows baseline
+      - name: Download and verify v0.5.2 RC2 Windows base
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RC2_RELEASE_TAG: ${{ inputs.rc2_release_tag }}
         run: |
           $ErrorActionPreference = "Stop"
           $BaseDir = "dist/base"
-          $BaseArchive = Join-Path $BaseDir "hunterX_windows_0.5.0.zip"
-          $ExpectedSha256 = "400fe2732a1289acab4035ba341511a7695b942eb11ba8d7622842c3d24b9d1b"
+          $BaseArchive = Join-Path $BaseDir "hunterX_windows_0.5.2_rc2.zip"
+          $ExpectedSha256 = "47747a962cf5c4ae49654aec574ca64ac52c27032fc5b1ec1f70d83c3d09da48"
+          $BaseReleaseTag = $env:RC2_RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($BaseReleaseTag)) {
+            $BaseReleaseTag = "v0.5.2-rc2"
+          }
           New-Item -ItemType Directory -Path $BaseDir -Force | Out-Null
-          gh release download v0.5.0 `
+          gh release download $BaseReleaseTag `
             --repo "${{ github.repository }}" `
-            --pattern "hunterX_windows_0.5.0.zip" `
+            --pattern "hunterX_windows_0.5.2_rc2.zip" `
             --dir $BaseDir `
             --clobber
           if (-not (Test-Path -LiteralPath $BaseArchive -PathType Leaf)) {
-            throw "The v0.5.0 Windows baseline release asset was not downloaded."
+            throw "The v0.5.2 RC2 Windows base was not downloaded."
           }
           $ActualSha256 = (Get-FileHash -LiteralPath $BaseArchive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($ActualSha256 -cne $ExpectedSha256) {
-            throw "The v0.5.0 Windows baseline SHA-256 does not match the approved artifact."
+            throw "The v0.5.2 RC2 Windows base SHA-256 does not match."
           }
 
       - name: Build Windows package
         shell: pwsh
-        run: ./scripts/build_windows.ps1 -Version "${{ needs.validate.outputs.version }}" -BaseArchive "dist/base/hunterX_windows_0.5.0.zip"
+        run: ./scripts/build_windows.ps1 -Version "${{ needs.validate.outputs.version }}" -BaseArchive "dist/base/hunterX_windows_0.5.2_rc2.zip" -Commit "${{ steps.commit.outputs.release_commit }}" -Qualifier rc3
 
       - name: Upload verified Windows release asset
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -208,7 +224,8 @@ jobs:
             --version "${{ needs.validate.outputs.version }}" \
             --output "dist/release/${{ needs.validate.outputs.source_artifact_name }}" \
             --repo-root . \
-            --commit "${{ needs.build-assets.outputs.release_commit }}"
+            --commit "${{ needs.build-assets.outputs.release_commit }}" \
+            --qualifier rc3
 
       - name: Write release checksum manifest
         shell: bash
@@ -217,25 +234,36 @@ jobs:
           python scripts/write_release_checksums.py \
             --version "${{ needs.validate.outputs.version }}" \
             --output "dist/release/${{ needs.validate.outputs.checksum_name }}" \
+            --qualifier rc3 \
             "dist/release/${{ needs.validate.outputs.artifact_name }}" \
             "dist/release/${{ needs.validate.outputs.source_artifact_name }}"
 
-      - name: Verify final release assets
+      - name: Verify RC3 release assets
         shell: bash
         run: |
           set -euo pipefail
           python scripts/write_release_checksums.py \
             --version "${{ needs.validate.outputs.version }}" \
             --verify-manifest "dist/release/${{ needs.validate.outputs.checksum_name }}" \
-            --asset-dir dist/release
+            --asset-dir dist/release \
+            --qualifier rc3
           python scripts/verify_release_archive.py windows \
             --archive "dist/release/${{ needs.validate.outputs.artifact_name }}" \
-            --version "${{ needs.validate.outputs.version }}"
+            --version "${{ needs.validate.outputs.version }}" \
+            --qualifier rc3
           python scripts/verify_release_archive.py source \
             --archive "dist/release/${{ needs.validate.outputs.source_artifact_name }}" \
             --version "${{ needs.validate.outputs.version }}" \
             --repo-root . \
-            --commit "${{ needs.build-assets.outputs.release_commit }}"
+            --commit "${{ needs.build-assets.outputs.release_commit }}" \
+            --qualifier rc3
+          python scripts/verify_release_archive.py pair \
+            --windows-archive "dist/release/${{ needs.validate.outputs.artifact_name }}" \
+            --source-archive "dist/release/${{ needs.validate.outputs.source_artifact_name }}" \
+            --version "${{ needs.validate.outputs.version }}" \
+            --repo-root . \
+            --commit "${{ needs.build-assets.outputs.release_commit }}" \
+            --qualifier rc3
 
       - name: Publish GitHub Release
         shell: bash
@@ -246,7 +274,7 @@ jobs:
         run: |
           set -euo pipefail
           Version="${{ needs.validate.outputs.version }}"
-          Tag="v$Version"
+          Tag="v$Version-rc3"
           ReleaseCommit="${{ needs.build-assets.outputs.release_commit }}"
           ReleaseDir="dist/release"
           WindowsAsset="$ReleaseDir/${{ needs.validate.outputs.artifact_name }}"
@@ -261,6 +289,11 @@ jobs:
               echo "Refusing to replace assets for $Tag because it points to $ExistingTagCommit, not $ReleaseCommit." >&2
               exit 1
             fi
+            ExistingPrerelease="$(gh release view "$Tag" --json isPrerelease --jq .isPrerelease)"
+            if [[ "$ExistingPrerelease" != "true" ]]; then
+              echo "Refusing to update $Tag because it is not a prerelease." >&2
+              exit 1
+            fi
             gh release upload "$Tag" "$WindowsAsset" "$SourceAsset" "$ChecksumAsset" --clobber
           else
             gh release create "$Tag" \
@@ -268,6 +301,7 @@ jobs:
               "$SourceAsset" \
               "$ChecksumAsset" \
               --target "$ReleaseCommit" \
-              --title "HunterX v$Version" \
-              --notes-file "$NotesPath"
+              --title "HunterX v$Version RC3" \
+              --notes-file "$NotesPath" \
+              --prerelease
           fi
