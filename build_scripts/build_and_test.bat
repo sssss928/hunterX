@@ -27,10 +27,16 @@ if not defined VERSION (
     exit /b 1
 )
 
-if not defined BASE_ARCHIVE set "BASE_ARCHIVE=dist\base\hunterX_windows_0.5.0.zip"
+if not defined BASE_ARCHIVE set "BASE_ARCHIVE=dist\base\hunterX_windows_0.5.2_rc2.zip"
 if not exist "%BASE_ARCHIVE%" (
-    echo [ERROR] Verified v0.5.0 Windows runtime not found: %BASE_ARCHIVE%
-    echo [ERROR] Download hunterX_windows_0.5.0.zip from the official v0.5.0 release first.
+    echo [ERROR] Verified v0.5.2 RC2 Windows base not found: %BASE_ARCHIVE%
+    echo [ERROR] Supply hunterX_windows_0.5.2_rc2.zip with the approved SHA-256.
+    exit /b 1
+)
+
+for /f "usebackq delims=" %%C in (`git rev-parse HEAD`) do set "RELEASE_COMMIT=%%C"
+if not defined RELEASE_COMMIT (
+    echo [ERROR] Unable to resolve the clean RC3 release commit.
     exit /b 1
 )
 
@@ -66,17 +72,17 @@ python -m bandit -r src scripts -lll -c pyproject.toml
 if errorlevel 1 exit /b 1
 
 echo [7/8] Building through the canonical PowerShell workflow...
-powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\build_windows.ps1" -Version "%VERSION%" -BaseArchive "%BASE_ARCHIVE%"
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\build_windows.ps1" -Version "%VERSION%" -BaseArchive "%BASE_ARCHIVE%" -Commit "%RELEASE_COMMIT%" -Qualifier rc3
 if errorlevel 1 exit /b 1
 
-set "ZIP_NAME=hunterX_windows_%VERSION%.zip"
+set "ZIP_NAME=hunterX_windows_%VERSION%_rc3.zip"
 if not exist "dist\release\%ZIP_NAME%" (
     echo [ERROR] Expected artifact dist\release\%ZIP_NAME% was not created.
     exit /b 1
 )
 
 echo [8/8] Re-verifying the release ZIP...
-python scripts\verify_release_archive.py windows --archive "dist\release\%ZIP_NAME%" --version "%VERSION%"
+python scripts\verify_release_archive.py windows --archive "dist\release\%ZIP_NAME%" --version "%VERSION%" --qualifier rc3
 if errorlevel 1 exit /b 1
 
 set "REPORT_FILE=dist\release\test_report_%VERSION%.txt"

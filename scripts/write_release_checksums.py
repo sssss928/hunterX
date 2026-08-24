@@ -58,6 +58,81 @@ def verify_checksums(manifest: Path, asset_dir: Path) -> list[Path]:
     return verified
 
 
+def verify_rc2_checksums(
+    manifest: Path,
+    asset_dir: Path,
+    version: str,
+) -> list[Path]:
+    """Verify the exact two RC2 archives and reject FINAL or unrelated assets."""
+
+    expected_manifest = release_utils.checksum_name(version, release_utils.RC2_QUALIFIER)
+    if manifest.name != expected_manifest:
+        raise ValueError(f"RC2 checksum manifest must be named {expected_manifest!r}")
+    verified = verify_checksums(manifest, asset_dir)
+    expected_assets = {
+        release_utils.artifact_name(
+            version,
+            "windows",
+            release_utils.RC2_QUALIFIER,
+        ),
+        release_utils.artifact_name(
+            version,
+            "source",
+            release_utils.RC2_QUALIFIER,
+        ),
+    }
+    actual_assets = {path.name for path in verified}
+    if actual_assets != expected_assets:
+        raise ValueError(
+            f"RC2 checksum assets mismatch: expected={sorted(expected_assets)!r}, "
+            f"actual={sorted(actual_assets)!r}"
+        )
+    return verified
+
+
+def verify_rc3_checksums(
+    manifest: Path,
+    asset_dir: Path,
+    version: str,
+) -> list[Path]:
+    """Verify the exact two RC3 archives and reject unrelated assets."""
+
+    return verify_candidate_checksums(
+        manifest,
+        asset_dir,
+        version,
+        release_utils.RC3_QUALIFIER,
+    )
+
+
+def verify_candidate_checksums(
+    manifest: Path,
+    asset_dir: Path,
+    version: str,
+    qualifier: str,
+) -> list[Path]:
+    """Verify the exact source/Windows pair for one committed RC profile."""
+
+    normalized = release_utils.require_candidate_qualifier(qualifier)
+    expected_manifest = release_utils.checksum_name(version, normalized)
+    if manifest.name != expected_manifest:
+        raise ValueError(
+            f"{normalized.upper()} checksum manifest must be named {expected_manifest!r}"
+        )
+    verified = verify_checksums(manifest, asset_dir)
+    expected_assets = {
+        release_utils.artifact_name(version, "windows", normalized),
+        release_utils.artifact_name(version, "source", normalized),
+    }
+    actual_assets = {path.name for path in verified}
+    if actual_assets != expected_assets:
+        raise ValueError(
+            f"{normalized.upper()} checksum assets mismatch: "
+            f"expected={sorted(expected_assets)!r}, actual={sorted(actual_assets)!r}"
+        )
+    return verified
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("assets", type=Path, nargs="*")
@@ -65,6 +140,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--verify-manifest", type=Path)
     parser.add_argument("--asset-dir", type=Path, default=Path("dist/release"))
+    parser.add_argument(
+        "--qualifier",
+        choices=(release_utils.RC2_QUALIFIER, release_utils.RC3_QUALIFIER),
+    )
     return parser
 
 
@@ -72,11 +151,28 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
     try:
+        if args.qualifier is not None:
+            release_utils.require_candidate_qualifier(args.qualifier)
         if args.verify_manifest is not None:
-            verified = verify_checksums(args.verify_manifest, args.asset_dir)
+            verified = (
+                verify_candidate_checksums(
+                    args.verify_manifest,
+                    args.asset_dir,
+                    args.version,
+                    args.qualifier,
+                )
+                if args.qualifier is not None
+                else verify_checksums(args.verify_manifest, args.asset_dir)
+            )
             print(f"Verified {len(verified)} release assets.")
             return 0
-        output = args.output or Path("dist/release") / release_utils.checksum_name(args.version)
+        expected_output_name = release_utils.checksum_name(args.version, args.qualifier)
+        output = args.output or Path("dist/release") / expected_output_name
+        if args.qualifier is not None and output.name != expected_output_name:
+            raise ValueError(
+                f"{args.qualifier.upper()} checksum manifest must be named "
+                f"{expected_output_name!r}"
+            )
         manifest = write_checksums(args.assets, output)
     except ValueError as exc:
         parser.error(str(exc))

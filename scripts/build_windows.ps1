@@ -4,7 +4,15 @@ param(
     [string] $Version,
 
     [Parameter(Mandatory = $true)]
-    [string] $BaseArchive
+    [string] $BaseArchive,
+
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string] $Commit,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('rc2', 'rc3')]
+    [string] $Qualifier
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,10 +38,12 @@ $ResolvedBaseArchive = [System.IO.Path]::GetFullPath(
     (Join-Path $ProjectRoot $BaseArchive)
 )
 if (-not (Test-Path -LiteralPath $ResolvedBaseArchive -PathType Leaf)) {
-    throw "Verified v0.5.0 Windows baseline archive is missing: '$ResolvedBaseArchive'."
+    throw "Verified HunterX Windows base archive is missing: '$ResolvedBaseArchive'."
 }
 
-$ArtifactNameOutput = & python scripts/release_utils.py artifact-name --version $Version
+$ArtifactNameOutput = & python scripts/release_utils.py artifact-name `
+    --version $Version `
+    --qualifier $Qualifier
 if ($LASTEXITCODE -ne 0) {
     throw "Unable to resolve the release artifact name (python exit code $LASTEXITCODE)."
 }
@@ -46,7 +56,7 @@ $PackageDir = Join-Path $ProjectRoot "dist\hunterX"
 $ReleaseDir = Join-Path $ProjectRoot "dist\release"
 $ArtifactPath = Join-Path $ReleaseDir $ArtifactName
 
-Write-Host "Building HunterX $Version as an overlay on the verified HunterX v0.5.0 Windows runtime"
+Write-Host "Building HunterX $Version $Qualifier from clean commit $Commit"
 Write-Host "Baseline: $ResolvedBaseArchive"
 Write-Host "Artifact: $ArtifactPath"
 
@@ -55,9 +65,11 @@ python scripts/build_windows_from_base.py `
     --base-archive $ResolvedBaseArchive `
     --project-root $ProjectRoot `
     --package-dir $PackageDir `
+    --commit $Commit `
+    --qualifier $Qualifier `
     --output $ArtifactPath
 if ($LASTEXITCODE -ne 0) {
-    throw "Windows v0.5.0-runtime overlay build failed (python exit code $LASTEXITCODE)."
+    throw "Windows verified-runtime overlay build failed (python exit code $LASTEXITCODE)."
 }
 
 & cscript.exe //nologo scripts/verify_windows_shell_zip.js $ArtifactPath

@@ -11,6 +11,8 @@ import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
+import release_utils
+
 
 DENIED_PARTS = frozenset(
     {
@@ -55,6 +57,53 @@ WINDOWS_ALLOWED_PUBLIC_CERTIFICATES = frozenset(
         "_nodriver_internal/certifi/cacert.pem",
         "_settings_internal/certifi/cacert.pem",
     }
+)
+RC2_PROVENANCE_NAME = "RC2_BUILD_PROVENANCE.json"
+RC2_WINDOWS_BASE_NAME = "hunterX_windows_0.5.2_rc.zip"
+RC2_WINDOWS_BASE_SHA256 = (
+    "b593dc3899316a4700d425461ac9413610bad04f462839d2d93b2fcc179f26ed"
+)
+RC2_REQUIRED_DOCUMENTS = frozenset(
+    {
+        "ROUND2_FINAL_CROSS_AUDIT_v0.5.2.md",
+        "ROUND2_TEST_REPORT_v0.5.2.md",
+        "ROUND2_PRODUCTION_INTEGRATION_REPORT_v0.5.2.md",
+        "ROUND2_LONG_RUN_STABILITY_REPORT_v0.5.2.md",
+        "ROUND2_PERFORMANCE_COMPARISON.md",
+        "ROUTE_REARM_MATRIX_v0.5.2.md",
+        "REQUIREMENT_TEST_TRACEABILITY_v0.5.2.md",
+        "IMPLEMENTATION_DIFF_v0.5.2_RC2.md",
+        "ROUND2_OBSERVED_FAILURES_FIX_LOOPS.md",
+    }
+)
+RC3_PROVENANCE_NAME = "RC3_BUILD_PROVENANCE.json"
+RC3_WINDOWS_BASE_NAME = "hunterX_windows_0.5.2_rc2.zip"
+RC3_WINDOWS_BASE_SHA256 = (
+    "47747a962cf5c4ae49654aec574ca64ac52c27032fc5b1ec1f70d83c3d09da48"
+)
+RC3_REQUIRED_DOCUMENTS = frozenset(
+    {
+        "FINAL_LAYER_ROOT_CAUSE_v0.5.2.md",
+        "FINAL_LAYER_IMPLEMENTATION_DIFF_v0.5.2_RC2_to_RC3.md",
+        "FINAL_LAYER_TEST_REPORT_v0.5.2_RC3.md",
+        "FINAL_LAYER_REAL_WINDOWS_REPRO_REPORT.md",
+        "FINAL_LAYER_BROWSER_RECOVERY_AUDIT.md",
+        "FINAL_LAYER_USER_DICTIONARY_ACCEPTANCE.md",
+        "FINAL_LAYER_PERFORMANCE_REPORT.md",
+        "FINAL_LAYER_LONG_RUN_REPORT.md",
+        "FINAL_LAYER_ARTIFACT_VERIFICATION.md",
+        "FINAL_LAYER_FAILURE_FIX_LOG.md",
+        "FINAL_LAYER_REQUIREMENT_TRACEABILITY.md",
+    }
+)
+STAGED_RUNTIME_DIRECTORIES = frozenset({"assets", "platforms", "www"})
+RUNTIME_APP_SRC_PREFIXES = (
+    "_nodriver_internal/app_src/",
+    "_settings_internal/app_src/",
+)
+RUNTIME_LAYOUT_PREFIXES = (
+    "_nodriver_internal/",
+    "_settings_internal/",
 )
 
 
@@ -148,22 +197,144 @@ def _open_checked_zip(
     return archive, entries
 
 
-def verify_windows_archive(path: Path, version: str) -> dict[str, object]:
+def _expected_archive_name(kind: str, version: str, qualifier: str | None) -> str:
+    suffix = f"_{qualifier.casefold()}" if qualifier else ""
+    return f"hunterX_{kind}_{version}{suffix}.zip"
+
+
+def _read_json_member(
+    archive: zipfile.ZipFile,
+    entries: dict[str, zipfile.ZipInfo],
+    name: str,
+) -> dict[str, object]:
+    try:
+        raw_value = archive.read(entries[name])
+    except KeyError as exc:
+        raise ValueError(f"Windows archive missing required file: {name}") from exc
+    try:
+        value = json.loads(raw_value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid JSON in {name}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must contain a JSON object")
+    return value
+
+
+def _require_exact_manifest_value(
+    manifest: dict[str, object],
+    name: str,
+    expected: object,
+    *,
+    profile: str = "RC2",
+) -> None:
+    actual = manifest.get(name)
+    if type(actual) is not type(expected) or actual != expected:
+        raise ValueError(
+            f"{profile} provenance field {name!r} must be {expected!r}, got {actual!r}"
+        )
+
+
+def _verify_release_provenance(
+    archive: zipfile.ZipFile,
+    entries: dict[str, zipfile.ZipInfo],
+    version: str,
+    qualifier: str | None,
+    *,
+    resolved_commit: str | None = None,
+) -> dict[str, object] | None:
+    normalized_qualifier = qualifier.casefold() if qualifier else None
+    if normalized_qualifier in {"rc2", "rc3"}:
+        is_rc3 = normalized_qualifier == "rc3"
+        profile = normalized_qualifier.upper()
+        required_documents = RC3_REQUIRED_DOCUMENTS if is_rc3 else RC2_REQUIRED_DOCUMENTS
+        provenance_name = RC3_PROVENANCE_NAME if is_rc3 else RC2_PROVENANCE_NAME
+        base_name = RC3_WINDOWS_BASE_NAME if is_rc3 else RC2_WINDOWS_BASE_NAME
+        base_sha256 = RC3_WINDOWS_BASE_SHA256 if is_rc3 else RC2_WINDOWS_BASE_SHA256
+        missing_documents = sorted(required_documents - set(entries))
+        if missing_documents:
+            raise ValueError(
+                f"{profile} Windows archive missing required documents: {missing_documents}"
+            )
+        manifest = _read_json_member(archive, entries, provenance_name)
+        expected_values: dict[str, object] = {
+            "schema": 1,
+            "version": version,
+            "qualifier": normalized_qualifier,
+            "windows_base_name": base_name,
+            "windows_base_sha256": base_sha256,
+            "clean_committed_snapshot": True,
+            "eight_hour_soak_verified": False,
+            "final_eligible": False,
+        }
+        if is_rc3:
+            expected_values.update(
+                {
+                    "eight_hour_single_instance_soak_verified": False,
+                    "eight_hour_three_named_instances_soak_verified": False,
+                }
+            )
+        for name, expected in expected_values.items():
+            _require_exact_manifest_value(manifest, name, expected, profile=profile)
+        source_commit = manifest.get("source_commit")
+        if not isinstance(source_commit, str) or re.fullmatch(
+            r"[0-9a-f]{40}", source_commit
+        ) is None:
+            raise ValueError(
+                f"{profile} provenance field 'source_commit' must be a lowercase "
+                "40-hex commit"
+            )
+        if resolved_commit is not None and source_commit != resolved_commit:
+            raise ValueError(
+                f"{profile} provenance source_commit does not match resolved source commit: "
+                f"{source_commit!r} != {resolved_commit!r}"
+            )
+        return manifest
+
+    if normalized_qualifier == "final":
+        provenance_name = (
+            RC3_PROVENANCE_NAME
+            if RC3_PROVENANCE_NAME in entries
+            else RC2_PROVENANCE_NAME
+        )
+        if provenance_name not in entries:
+            raise ValueError(
+                "Final archive is forbidden without explicit soak and eligibility provenance"
+            )
+        manifest = _read_json_member(archive, entries, provenance_name)
+        if manifest.get("eight_hour_soak_verified") is not True:
+            raise ValueError(
+                "Final archive is forbidden unless eight_hour_soak_verified is true"
+            )
+        if manifest.get("final_eligible") is not True:
+            raise ValueError("Final archive is forbidden unless final_eligible is true")
+        return manifest
+    return None
+
+
+def verify_windows_archive(
+    path: Path,
+    version: str,
+    *,
+    qualifier: str | None = None,
+) -> dict[str, object]:
     archive, entries = _open_checked_zip(path)
     try:
         required = {
             "BUILD_INFO.txt",
             "CHANGELOG.md",
-            "CODEX_MASTER_PROMPT_v0.5.1.md",
-            "FINAL_CROSS_AUDIT_v0.5.1.md",
-            "IMPLEMENTATION_DIFF_v0.5.1_FINAL.md",
+            "CODEX_MASTER_PROMPT_v0.5.2.md",
+            "FINAL_AUDIT_v0.5.2.md",
+            "IMPLEMENTATION_DIFF_v0.5.2_RC.md",
             "LICENSE",
             "README.md",
             "README_Release.txt",
-            "RELEASE_NOTES_v0.5.1.md",
-            "RELEASE_NOTES_v0.5.1_FINAL.md",
-            "TEST_REPORT_v0.5.1.md",
-            "TEST_REPORT_v0.5.1_FINAL.md",
+            "LONG_RUN_STABILITY_REPORT_v0.5.2.md",
+            "PERFORMANCE_COMPARISON_v0.5.1_vs_v0.5.2.md",
+            "PLATFORM_COMPLETION_LATCH_AUDIT.md",
+            "REFRESH_OWNERSHIP_MATRIX_v0.5.2.md",
+            "RELEASE_NOTES_v0.5.2_RC.md",
+            "REQUIREMENT_TEST_TRACEABILITY_v0.5.2.md",
+            "TEST_REPORT_v0.5.2_RC.md",
             "WINDOWS_PACKAGE_zh-TW.txt",
             "nodriver_tixcraft.exe",
             "settings.exe",
@@ -211,7 +382,13 @@ def verify_windows_archive(path: Path, version: str) -> dict[str, object]:
                 raise ValueError(
                     f"Windows archive frontend version mismatch: {frontend_name}"
                 )
-        expected_name = f"hunterX_windows_{version}.zip"
+        provenance = _verify_release_provenance(
+            archive,
+            entries,
+            version,
+            qualifier,
+        )
+        expected_name = _expected_archive_name("windows", version, qualifier)
         if path.name != expected_name:
             raise ValueError(
                 f"Windows archive name {path.name!r} does not match {expected_name!r}"
@@ -222,6 +399,7 @@ def verify_windows_archive(path: Path, version: str) -> dict[str, object]:
             "missing": 0,
             "crc": "ok",
             "runtime_layout": "isolated",
+            "provenance": "verified" if provenance is not None else "not-required",
         }
     finally:
         archive.close()
@@ -363,9 +541,15 @@ def verify_source_archive(
     commit: str,
     *,
     working_tree: bool = False,
+    qualifier: str | None = None,
 ) -> dict[str, object]:
+    if qualifier is not None and qualifier.casefold() == "final":
+        raise ValueError(
+            "Final source archives are disabled while the 8-hour soak gate is unverified; "
+            "both Final-Layer gates must pass"
+        )
     expected_prefix = f"hunterX-{version}/"
-    expected_name = f"hunterX_source_{version}.zip"
+    expected_name = _expected_archive_name("source", version, qualifier)
     if path.name != expected_name:
         raise ValueError(
             f"Source archive name {path.name!r} does not match {expected_name!r}"
@@ -380,6 +564,23 @@ def verify_source_archive(
             if working_tree
             else _git_archive_files(repo_root, commit, expected_prefix)
         )
+        metadata_name = f"{expected_prefix}src/hunter_metadata.py"
+        metadata_bytes = expected.get(metadata_name)
+        if metadata_bytes is None:
+            raise ValueError(f"Source release is missing version metadata: {metadata_name}")
+        try:
+            metadata_source = metadata_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Source version metadata is not UTF-8: {metadata_name}") from exc
+        declared_version = release_utils.project_version_from_text(
+            metadata_source,
+            metadata_name,
+        )
+        if declared_version != version:
+            raise ValueError(
+                "Source release version mismatch: "
+                f"requested {version}, commit declares {declared_version}"
+            )
         actual_names = set(entries)
         expected_names = set(expected)
         missing = sorted(expected_names - actual_names)
@@ -410,6 +611,167 @@ def verify_source_archive(
         archive.close()
 
 
+def _source_staged_runtime_files(
+    archive: zipfile.ZipFile,
+    entries: dict[str, zipfile.ZipInfo],
+    version: str,
+) -> dict[str, bytes]:
+    source_prefix = f"hunterX-{version}/src/"
+    expected: dict[str, bytes] = {}
+    for name, info in entries.items():
+        if not name.startswith(source_prefix):
+            continue
+        relative = name.removeprefix(source_prefix)
+        parts = PurePosixPath(relative).parts
+        if not parts:
+            continue
+        if "__pycache__" in {part.casefold() for part in parts}:
+            continue
+        if PurePosixPath(relative).suffix.casefold() in {".pyc", ".pyo"}:
+            continue
+        is_top_level_python = len(parts) == 1 and relative.casefold().endswith(".py")
+        is_staged_directory = len(parts) > 1 and parts[0] in STAGED_RUNTIME_DIRECTORIES
+        if is_top_level_python or is_staged_directory:
+            expected[relative] = archive.read(info)
+    if not expected:
+        raise ValueError("Source archive has no staged runtime files")
+    return expected
+
+
+def _archive_subtree_files(
+    archive: zipfile.ZipFile,
+    entries: dict[str, zipfile.ZipInfo],
+    prefix: str,
+) -> dict[str, bytes]:
+    return {
+        name.removeprefix(prefix): archive.read(info)
+        for name, info in entries.items()
+        if name.startswith(prefix)
+    }
+
+
+def _assert_exact_file_parity(
+    expected: dict[str, bytes],
+    actual: dict[str, bytes],
+    label: str,
+) -> None:
+    expected_names = set(expected)
+    actual_names = set(actual)
+    missing = sorted(expected_names - actual_names)
+    extra = sorted(actual_names - expected_names)
+    mismatch = sorted(
+        name
+        for name in expected_names & actual_names
+        if expected[name] != actual[name]
+    )
+    if missing or extra or mismatch:
+        raise ValueError(
+            f"Release pair parity failure for {label}: "
+            f"missing={missing} extra={extra} mismatch={mismatch}"
+        )
+
+
+def verify_release_pair(
+    windows_path: Path,
+    source_path: Path,
+    version: str,
+    repo_root: Path,
+    commit: str,
+    qualifier: str = "rc2",
+) -> dict[str, object]:
+    """Verify both archives and prove byte parity for every staged runtime file."""
+
+    windows_result = verify_windows_archive(
+        windows_path,
+        version,
+        qualifier=qualifier,
+    )
+    source_result = verify_source_archive(
+        source_path,
+        version,
+        repo_root,
+        commit,
+        qualifier=qualifier,
+    )
+    resolved_commit = release_utils.resolve_clean_commit(repo_root, commit)
+
+    windows_archive, windows_entries = _open_checked_zip(windows_path)
+    source_archive, source_entries = _open_checked_zip(
+        source_path,
+        enforce_strict_denylist=False,
+    )
+    try:
+        provenance = _verify_release_provenance(
+            windows_archive,
+            windows_entries,
+            version,
+            qualifier,
+            resolved_commit=resolved_commit,
+        )
+        expected_runtime = _source_staged_runtime_files(
+            source_archive,
+            source_entries,
+            version,
+        )
+        parity_targets: list[tuple[str, dict[str, bytes], dict[str, bytes]]] = []
+        for prefix in RUNTIME_APP_SRC_PREFIXES:
+            parity_targets.append(
+                (
+                    prefix.rstrip("/"),
+                    expected_runtime,
+                    _archive_subtree_files(windows_archive, windows_entries, prefix),
+                )
+            )
+
+        for directory_name in ("assets", "www"):
+            source_directory = {
+                name.removeprefix(f"{directory_name}/"): content
+                for name, content in expected_runtime.items()
+                if name.startswith(f"{directory_name}/")
+            }
+            parity_targets.append(
+                (
+                    directory_name,
+                    source_directory,
+                    _archive_subtree_files(
+                        windows_archive,
+                        windows_entries,
+                        f"{directory_name}/",
+                    ),
+                )
+            )
+            for runtime_prefix in RUNTIME_LAYOUT_PREFIXES:
+                target_prefix = f"{runtime_prefix}{directory_name}/"
+                parity_targets.append(
+                    (
+                        target_prefix.rstrip("/"),
+                        source_directory,
+                        _archive_subtree_files(
+                            windows_archive,
+                            windows_entries,
+                            target_prefix,
+                        ),
+                    )
+                )
+
+        for label, expected, actual in parity_targets:
+            _assert_exact_file_parity(expected, actual, label)
+
+        return {
+            "windows": windows_result,
+            "source": source_result,
+            "source_commit": resolved_commit,
+            "qualifier": qualifier.casefold(),
+            "provenance": "verified" if provenance is not None else "not-required",
+            "runtime_files": len(expected_runtime),
+            "parity_targets": len(parity_targets),
+            "parity": "ok",
+        }
+    finally:
+        source_archive.close()
+        windows_archive.close()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="kind", required=True)
@@ -417,6 +779,7 @@ def _build_parser() -> argparse.ArgumentParser:
     windows = subparsers.add_parser("windows")
     windows.add_argument("--archive", type=Path, required=True)
     windows.add_argument("--version", required=True)
+    windows.add_argument("--qualifier", choices=("rc", "rc2", "rc3", "final"))
 
     source = subparsers.add_parser("source")
     source.add_argument("--archive", type=Path, required=True)
@@ -424,6 +787,19 @@ def _build_parser() -> argparse.ArgumentParser:
     source.add_argument("--repo-root", type=Path, default=Path.cwd())
     source.add_argument("--commit", default="HEAD")
     source.add_argument("--working-tree", action="store_true")
+    source.add_argument("--qualifier", choices=("rc", "rc2", "rc3", "final"))
+
+    pair = subparsers.add_parser("pair")
+    pair.add_argument("--windows-archive", type=Path, required=True)
+    pair.add_argument("--source-archive", type=Path, required=True)
+    pair.add_argument("--version", required=True)
+    pair.add_argument("--repo-root", type=Path, default=Path.cwd())
+    pair.add_argument("--commit", required=True)
+    pair.add_argument(
+        "--qualifier",
+        choices=("rc", "rc2", "rc3", "final"),
+        default="rc3",
+    )
     return parser
 
 
@@ -431,14 +807,28 @@ def main() -> int:
     args = _build_parser().parse_args()
     try:
         if args.kind == "windows":
-            result = verify_windows_archive(args.archive, args.version)
-        else:
+            result = verify_windows_archive(
+                args.archive,
+                args.version,
+                qualifier=args.qualifier,
+            )
+        elif args.kind == "source":
             result = verify_source_archive(
                 args.archive,
                 args.version,
                 args.repo_root,
                 args.commit,
                 working_tree=args.working_tree,
+                qualifier=args.qualifier,
+            )
+        else:
+            result = verify_release_pair(
+                args.windows_archive,
+                args.source_archive,
+                args.version,
+                args.repo_root,
+                args.commit,
+                qualifier=args.qualifier,
             )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         print(f"release archive verification failed: {exc}")
