@@ -598,3 +598,32 @@ def test_soak_and_outer_loop_share_iteration_without_manual_lifecycle() -> None:
     assert outer_loop.count("await run_runtime_iteration(") == 1
     assert "nodriver_current_url(" not in outer_loop
     assert "platform_engine.before_dispatch(" not in outer_loop
+
+
+def test_soak_run_id_provides_bounded_cross_process_profile_isolation() -> None:
+    from v052_browser_soak import _isolated_worker_command, _soak_instance_name
+
+    assert _soak_instance_name("1") == "v052-soak-1"
+    assert _soak_instance_name("1", "final-single") == (
+        "v052-soak-final-single-1"
+    )
+    assert _soak_instance_name("1", "final-three") == (
+        "v052-soak-final-three-1"
+    )
+    assert _soak_instance_name("1", "final-single") != (
+        _soak_instance_name("1", "final-three")
+    )
+    with pytest.raises(ValueError, match="soak run id"):
+        _soak_instance_name("1", "../shared-profile")
+
+    command = _isolated_worker_command(
+        SimpleNamespace(duration=15.0, run_id="final-three"),
+        worker_instance="2",
+        output=Path("worker-2.json"),
+        stop_file=Path("STOP"),
+    )
+    assert command.count("--instances") == 1
+    assert command[command.index("--instances") + 1] == "1"
+    assert command[command.index("--worker-instance") + 1] == "2"
+    assert command[command.index("--run-id") + 1] == "final-three"
+    assert command[command.index("--stop-file") + 1] == "STOP"

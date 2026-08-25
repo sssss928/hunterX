@@ -6,7 +6,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -22,6 +25,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import zendriver as uc
 
 import settings
+import util
 from browser_session import BrowserSessionManager
 from dom_drift import SelectorCandidate, resolve_selector
 from nodriver_common import (
@@ -76,6 +80,20 @@ class SyntheticRouteState:
     platform: str
     stage: str
     cycle: int
+
+
+_SOAK_RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+
+def _soak_instance_name(instance: str, run_id: str = "") -> str:
+    """Return a bounded profile identity for one independently owned soak."""
+
+    normalized = str(run_id or "").strip()
+    if not normalized:
+        return f"v052-soak-{instance}"
+    if _SOAK_RUN_ID_PATTERN.fullmatch(normalized) is None:
+        raise ValueError("soak run id must match [A-Za-z0-9_-]{1,32}")
+    return f"v052-soak-{normalized}-{instance}"
 
 
 def _max_optional(current: int | None, value: int | None) -> int | None:
@@ -181,9 +199,18 @@ def _synthetic_platform_url(platform_key: str, stage: str, cycle: int) -> str:
     return "https://ticketplus.com.tw/activity/synthetic/session"
 
 
-async def _run_instance(instance: str, base_url: str, duration: float) -> SoakResult:
+async def _run_instance(
+    instance: str,
+    base_url: str,
+    duration: float,
+    run_id: str = "",
+    stop_file: Path | None = None,
+) -> SoakResult:
     started = time.monotonic()
     result = SoakResult(instance=instance, duration_seconds=duration)
+    instance_name = _soak_instance_name(instance, run_id)
+    if not util.set_instance_id(instance_name):
+        raise ValueError(f"invalid soak instance identity: {instance_name}")
     config = settings.get_default_config()
     config["homepage"] = base_url
     config["advanced"]["browser_type"] = "edge"
@@ -193,7 +220,7 @@ async def _run_instance(instance: str, base_url: str, duration: float) -> SoakRe
         "leak_watch" if instance.endswith(("2", "3")) else "onsale"
     )
     args = SimpleNamespace(
-        instance=f"v052-soak-{instance}",
+        instance=instance_name,
         browser="edge",
         browser_private_mode=False,
         mcp_connect=None,
@@ -225,6 +252,8 @@ async def _run_instance(instance: str, base_url: str, duration: float) -> SoakRe
             ),
         )
         while time.monotonic() - started < duration:
+            if stop_file is not None and stop_file.exists():
+                raise RuntimeError("peer soak worker failed")
             result.cycles += 1
             cycle = result.cycles
             stage = "activity"
@@ -328,11 +357,22 @@ async def _run_instance(instance: str, base_url: str, duration: float) -> SoakRe
 
 async def _async_main(args: argparse.Namespace) -> list[SoakResult]:
     server, base_url = _start_server()
+    worker_instances = (
+        (args.worker_instance,)
+        if args.worker_instance
+        else tuple(str(index + 1) for index in range(args.instances))
+    )
     try:
         return await asyncio.gather(
             *(
-                _run_instance(str(index + 1), base_url, args.duration)
-                for index in range(args.instances)
+                _run_instance(
+                    instance,
+                    base_url,
+                    args.duration,
+                    args.run_id,
+                    args.stop_file,
+                )
+                for instance in worker_instances
             )
         )
     finally:
@@ -340,16 +380,146 @@ async def _async_main(args: argparse.Namespace) -> list[SoakResult]:
         server.server_close()
 
 
+def _isolated_worker_command(
+    args: argparse.Namespace,
+    *,
+    worker_instance: str,
+    output: Path,
+    stop_file: Path,
+) -> list[str]:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--duration",
+        str(args.duration),
+        "--instances",
+        "1",
+        "--worker-instance",
+        worker_instance,
+        "--output",
+        str(output),
+        "--stop-file",
+        str(stop_file),
+    ]
+    if args.run_id:
+        command.extend(("--run-id", args.run_id))
+    return command
+
+
+def _run_isolated_three_instances(args: argparse.Namespace) -> int:
+    """Run named-instance qualification in three independent OS processes."""
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "status": "PASS",
+        "requested_duration_seconds": args.duration,
+        "instances": 3,
+        "run_id": args.run_id,
+        "process_isolation": "three_os_processes",
+        "results": [],
+        "workers": [],
+    }
+    with tempfile.TemporaryDirectory(
+        prefix=".v052-soak-three-",
+        dir=args.output.parent,
+    ) as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        stop_file = temporary_root / "STOP"
+        processes: list[tuple[str, subprocess.Popen[bytes], Path]] = []
+        handles: list[Any] = []
+        try:
+            for worker_instance in ("1", "2", "3"):
+                worker_output = temporary_root / f"worker-{worker_instance}.json"
+                stdout_handle = (temporary_root / f"worker-{worker_instance}.stdout.log").open(
+                    "wb"
+                )
+                stderr_handle = (temporary_root / f"worker-{worker_instance}.stderr.log").open(
+                    "wb"
+                )
+                handles.extend((stdout_handle, stderr_handle))
+                process = subprocess.Popen(
+                    _isolated_worker_command(
+                        args,
+                        worker_instance=worker_instance,
+                        output=worker_output,
+                        stop_file=stop_file,
+                    ),
+                    cwd=REPO_ROOT,
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
+                )
+                processes.append((worker_instance, process, worker_output))
+
+            stop_requested_at: float | None = None
+            while any(process.poll() is None for _, process, _ in processes):
+                failed = any(
+                    process.poll() not in (None, 0)
+                    for _, process, _ in processes
+                )
+                if failed and not stop_file.exists():
+                    stop_file.touch()
+                    stop_requested_at = time.monotonic()
+                if (
+                    stop_requested_at is not None
+                    and time.monotonic() - stop_requested_at > 30.0
+                ):
+                    for _, process, _ in processes:
+                        if process.poll() is None:
+                            process.terminate()
+                    break
+                time.sleep(0.1)
+            for _, process, _ in processes:
+                try:
+                    process.wait(timeout=10.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10.0)
+        finally:
+            for handle in handles:
+                handle.close()
+
+        for worker_instance, process, worker_output in processes:
+            worker_payload: dict[str, Any] = {}
+            if worker_output.is_file():
+                worker_payload = json.loads(worker_output.read_text(encoding="utf-8"))
+            payload["workers"].append(
+                {
+                    "instance": worker_instance,
+                    "exit_code": process.returncode,
+                    "status": worker_payload.get("status", "MISSING"),
+                    "error": worker_payload.get("error", ""),
+                }
+            )
+            payload["results"].extend(worker_payload.get("results", ()))
+            if process.returncode != 0 or worker_payload.get("status") != "PASS":
+                payload["status"] = "FAIL"
+
+    args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(json.dumps(payload, indent=2))
+    return 0 if payload["status"] == "PASS" else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--duration", type=float, required=True)
     parser.add_argument("--instances", type=int, choices=(1, 3), required=True)
+    parser.add_argument("--run-id", default="")
+    parser.add_argument("--worker-instance", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--stop-file", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.worker_instance and args.instances != 1:
+        parser.error("an isolated worker must use --instances 1")
+    _soak_instance_name(args.worker_instance or "1", args.run_id)
+    if args.instances == 3 and not args.worker_instance:
+        return _run_isolated_three_instances(args)
     payload = {
         "status": "PASS",
         "requested_duration_seconds": args.duration,
         "instances": args.instances,
+        "run_id": args.run_id,
+        "worker_instance": args.worker_instance,
+        "process_isolation": "single_os_process",
         "results": [],
     }
     try:

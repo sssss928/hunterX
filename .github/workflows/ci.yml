@@ -44,8 +44,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirement.txt -r requirements-dev.txt
 
-      - name: Compile source
-        run: python -m compileall src
+      - name: Compile source, tests, and scripts
+        run: python -m compileall src tests scripts
 
       - name: Ruff
         run: ruff check src tests scripts
@@ -54,7 +54,7 @@ jobs:
         run: mypy
 
       - name: Pytest with coverage
-        run: pytest --cov-fail-under=30
+        run: python -m pytest --cov-fail-under=30
 
       - name: Dependency audit
         run: pip-audit -r requirement.txt
@@ -64,11 +64,10 @@ jobs:
 
       - name: Benchmarks
         run: |
-          pytest tests/benchmarks --benchmark-enable --benchmark-only --benchmark-json=benchmark.json
+          python -m pytest tests/benchmarks --benchmark-enable --benchmark-only --benchmark-json=benchmark.json
           python scripts/render_benchmark_chart.py --input benchmark.json --output benchmark-summary.md
 
       - name: Upload coverage
-        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
@@ -79,7 +78,6 @@ jobs:
           retention-days: 3
 
       - name: Upload benchmark report
-        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: benchmark-report
@@ -123,7 +121,7 @@ jobs:
 
           $Version = ($VersionOutput | Out-String).Trim()
 
-          $ArtifactNameOutput = & python scripts/release_utils.py artifact-name --version $Version --qualifier rc3
+          $ArtifactNameOutput = & python scripts/release_utils.py artifact-name --version $Version --qualifier final
           if ($LASTEXITCODE -ne 0) {
             throw "Unable to resolve the artifact name (python exit code $LASTEXITCODE)."
           }
@@ -135,7 +133,7 @@ jobs:
           "artifact_name=$ArtifactName" >> $env:GITHUB_OUTPUT
           "commit=$Commit" >> $env:GITHUB_OUTPUT
 
-      - name: Download and verify v0.5.2 RC2 Windows base
+      - name: Download and verify v0.5.2 RC3 Windows build base
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -143,19 +141,19 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           $BaseDir = "dist/base"
-          $BaseArchive = Join-Path $BaseDir "hunterX_windows_0.5.2_rc2.zip"
-          $ExpectedSha256 = "47747a962cf5c4ae49654aec574ca64ac52c27032fc5b1ec1f70d83c3d09da48"
+          $BaseArchive = Join-Path $BaseDir "hunterX_windows_0.5.2_rc3.zip"
+          $ExpectedSha256 = "f2ec4f918e50de5c78c2303a184ef54b0ce69d1ba2f87d34365d87be59d46cd9"
 
           New-Item -ItemType Directory -Path $BaseDir -Force | Out-Null
 
-          gh release download v0.5.2-rc2 `
+          gh release download build-base-v0.5.2-rc3 `
             --repo "${{ github.repository }}" `
-            --pattern "hunterX_windows_0.5.2_rc2.zip" `
+            --pattern "hunterX_windows_0.5.2_rc3.zip" `
             --dir $BaseDir `
             --clobber
 
           if (-not (Test-Path -LiteralPath $BaseArchive -PathType Leaf)) {
-            throw "The v0.5.2 RC2 Windows base was not downloaded."
+            throw "The v0.5.2 RC3 Windows build base was not downloaded."
           }
 
           $ActualSha256 = (
@@ -163,10 +161,10 @@ jobs:
           ).Hash.ToLowerInvariant()
 
           if ($ActualSha256 -cne $ExpectedSha256) {
-            throw "The v0.5.2 RC2 Windows base SHA-256 mismatch. Expected '$ExpectedSha256', got '$ActualSha256'."
+            throw "The v0.5.2 RC3 Windows base SHA-256 mismatch. Expected '$ExpectedSha256', got '$ActualSha256'."
           }
 
-          Write-Host "Verified HunterX v0.5.2 RC2 Windows base."
+          Write-Host "Verified HunterX v0.5.2 RC3 Windows build base."
           Write-Host "SHA-256: $ActualSha256"
 
       - name: Build Windows package
@@ -174,12 +172,11 @@ jobs:
         run: |
           ./scripts/build_windows.ps1 `
             -Version "${{ steps.project.outputs.version }}" `
-            -BaseArchive "dist/base/hunterX_windows_0.5.2_rc2.zip" `
+            -BaseArchive "dist/base/hunterX_windows_0.5.2_rc3.zip" `
             -Commit "${{ steps.project.outputs.commit }}" `
-            -Qualifier rc3
+            -Qualifier final
 
       - name: Upload build smoke artifact
-        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.project.outputs.artifact_name }}

@@ -276,7 +276,7 @@ def test_release_pair_rejects_false_final_claim(release_pair: ReleasePairFixture
     release_pair.windows_path = final_windows
     release_pair.source_path = final_source
 
-    with pytest.raises(ValueError, match="eight_hour_soak_verified"):
+    with pytest.raises(ValueError, match="FINAL Windows archive missing required documents"):
         _verify(release_pair, qualifier="final")
 
 

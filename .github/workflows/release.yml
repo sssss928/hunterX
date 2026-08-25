@@ -98,7 +98,7 @@ jobs:
 
       - name: Validate source
         run: |
-          python -m compileall src
+          python -m compileall src tests scripts
           ruff check src tests scripts
           mypy
           python -m pytest

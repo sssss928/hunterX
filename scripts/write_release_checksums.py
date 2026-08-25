@@ -105,15 +105,30 @@ def verify_rc3_checksums(
     )
 
 
+def verify_final_checksums(
+    manifest: Path,
+    asset_dir: Path,
+    version: str,
+) -> list[Path]:
+    """Verify the exact two FINAL archives and reject unrelated assets."""
+
+    return verify_candidate_checksums(
+        manifest,
+        asset_dir,
+        version,
+        release_utils.FINAL_QUALIFIER,
+    )
+
+
 def verify_candidate_checksums(
     manifest: Path,
     asset_dir: Path,
     version: str,
     qualifier: str,
 ) -> list[Path]:
-    """Verify the exact source/Windows pair for one committed RC profile."""
+    """Verify the exact source/Windows pair for one committed release profile."""
 
-    normalized = release_utils.require_candidate_qualifier(qualifier)
+    normalized = release_utils.require_build_qualifier(qualifier)
     expected_manifest = release_utils.checksum_name(version, normalized)
     if manifest.name != expected_manifest:
         raise ValueError(
@@ -142,7 +157,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--asset-dir", type=Path, default=Path("dist/release"))
     parser.add_argument(
         "--qualifier",
-        choices=(release_utils.RC2_QUALIFIER, release_utils.RC3_QUALIFIER),
+        choices=(
+            release_utils.RC2_QUALIFIER,
+            release_utils.RC3_QUALIFIER,
+            release_utils.FINAL_QUALIFIER,
+        ),
     )
     return parser
 
@@ -152,7 +171,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.qualifier is not None:
-            release_utils.require_candidate_qualifier(args.qualifier)
+            release_utils.require_build_qualifier(args.qualifier)
         if args.verify_manifest is not None:
             verified = (
                 verify_candidate_checksums(

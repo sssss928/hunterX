@@ -92,7 +92,10 @@ def test_rc3_overlay_requires_every_final_layer_report(tmp_path: Path) -> None:
     package.mkdir()
     with pytest.raises(FileNotFoundError, match="RC3 required release report"):
         overlay_release_files(project, package, qualifier="rc3")
-    assert len(RC3_REQUIRED_DOCUMENTS) == 11
+    assert len(RC3_REQUIRED_DOCUMENTS) == 25
+    assert "FINAL_GITHUB_ACTIONS_AUDIT_v0.5.2.md" in RC3_REQUIRED_DOCUMENTS
+    assert "FINAL_USER_DICTIONARY_ACCEPTANCE_v0.5.2.md" in RC3_REQUIRED_DOCUMENTS
+    assert "FINAL_FAILURE_FIX_LOG_v0.5.2.md" in RC3_REQUIRED_DOCUMENTS
 
 
 def test_rc3_checksum_manifest_requires_exact_two_assets(tmp_path: Path) -> None:

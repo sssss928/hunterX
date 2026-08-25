@@ -247,7 +247,7 @@ def test_windows_archive_rejects_final_name_without_final_gate_provenance(
     archive_path = tmp_path / f"hunterX_windows_{VERSION}_final.zip"
     _write_zip(archive_path, REQUIRED_WINDOWS_FILES)
 
-    with pytest.raises(ValueError, match="forbidden without explicit soak"):
+    with pytest.raises(ValueError, match="FINAL Windows archive missing required documents"):
         verify_windows_archive(archive_path, VERSION, qualifier="final")
 
 
@@ -410,12 +410,12 @@ def test_source_archive_accepts_explicit_rc2_qualified_name(tmp_path: Path) -> N
     assert result["missing"] == 0
 
 
-def test_source_archive_rejects_final_profile_before_reading_archive(
+def test_source_archive_final_profile_requires_a_real_archive(
     tmp_path: Path,
 ) -> None:
     archive_path = tmp_path / f"hunterX_source_{VERSION}_final.zip"
 
-    with pytest.raises(ValueError, match="8-hour soak gate is unverified"):
+    with pytest.raises(FileNotFoundError):
         verify_source_archive(
             archive_path,
             VERSION,

@@ -97,7 +97,7 @@ def test_rc2_baseline_accepts_only_verified_round1_layout(
     assert (destination / "nodriver_tixcraft.exe").read_bytes().startswith(b"MZ")
 
 
-def test_rc2_windows_builder_rejects_final_and_unqualified_output_early(
+def test_windows_builder_rejects_unqualified_output_early(
     tmp_path: Path,
 ) -> None:
     arguments = {
@@ -107,12 +107,6 @@ def test_rc2_windows_builder_rejects_final_and_unqualified_output_early(
         "project_root": tmp_path / "project",
         "commit": "a" * 40,
     }
-    with pytest.raises(ValueError, match="requires qualifier 'rc2'"):
-        build_from_verified_baseline(
-            **arguments,
-            output=tmp_path / "hunterX_windows_0.5.2_final.zip",
-            qualifier="final",
-        )
     with pytest.raises(ValueError, match="output must be named"):
         build_from_verified_baseline(
             **arguments,
@@ -203,13 +197,13 @@ def test_snapshot_release_source_rejects_non_git_source_tree(tmp_path: Path) -> 
         )
 
 
-def test_rc2_overlay_fails_closed_when_required_report_is_missing(tmp_path: Path) -> None:
+def test_release_overlay_fails_closed_when_required_report_is_missing(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     package_root = tmp_path / "package"
     project_root.mkdir()
     package_root.mkdir()
 
-    with pytest.raises(ValueError, match="requires qualifier 'rc2'"):
+    with pytest.raises(FileNotFoundError, match="FINAL required release report"):
         overlay_release_files(project_root, package_root, qualifier="final")
     with pytest.raises(FileNotFoundError, match="ROUND2_FINAL_CROSS_AUDIT"):
         overlay_release_files(project_root, package_root, qualifier="rc2")
