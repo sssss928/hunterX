@@ -148,6 +148,66 @@ def test_build_source_archive_verifies_exact_git_commit(tmp_path: Path) -> None:
     assert archive.is_file()
 
 
+def test_build_source_archive_ignores_host_line_ending_settings(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "autocrlf-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "release-test@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Release Test"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=repo,
+        check=True,
+    )
+    (repo / ".gitattributes").write_bytes(b"* text\n")
+    (repo / "README.md").write_bytes(b"release source\n")
+    (repo / "src").mkdir()
+    (repo / "src" / "hunter_metadata.py").write_bytes(
+        b'APP_VERSION = "0.4.7"\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "canonical LF source"],
+        cwd=repo,
+        check=True,
+    )
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        text=True,
+    ).strip()
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "true"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.eol", "crlf"],
+        cwd=repo,
+        check=True,
+    )
+
+    archive = build_source_archive(
+        version="0.4.7",
+        output=tmp_path / "hunterX_source_0.4.7.zip",
+        repo_root=repo,
+        commit=commit,
+    )
+
+    with zipfile.ZipFile(archive) as source_zip:
+        assert source_zip.read("hunterX-0.4.7/README.md") == b"release source\n"
+
+
 def test_build_source_archive_can_verify_local_working_tree(tmp_path: Path) -> None:
     repo = tmp_path / "working tree with spaces"
     repo.mkdir()

@@ -102,6 +102,10 @@ def build_source_archive(
             subprocess.run(
                 [
                     "git",
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "core.eol=lf",
                     "archive",
                     "--format=zip",
                     f"--prefix={prefix}",

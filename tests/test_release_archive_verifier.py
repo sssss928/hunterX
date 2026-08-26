@@ -155,6 +155,10 @@ def _create_git_source_archive(
     subprocess.run(
         [
             "git",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.eol=lf",
             "archive",
             "--format=zip",
             f"--prefix=hunterX-{VERSION}/",

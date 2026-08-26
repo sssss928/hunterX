@@ -646,6 +646,10 @@ def _git_archive_files(
         result = subprocess.run(
             [
                 "git",
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                "core.eol=lf",
                 "archive",
                 "--format=zip",
                 f"--prefix={prefix}",

@@ -102,6 +102,10 @@ def release_pair(tmp_path: Path) -> ReleasePairFixture:
     subprocess.run(
         [
             "git",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.eol=lf",
             "archive",
             "--format=zip",
             f"--prefix=hunterX-{VERSION}/",
