@@ -17,6 +17,9 @@ Timezone: Asia/Taipei (UTC+08:00)
 Target Windows runtime: CPython 3.11 x64 / isolated dual-executable PyInstaller layout
 Windows packaging method: clean exact-commit source snapshot overlay on the byte-verified v0.5.2 RC3 Windows runtime
 Native Windows build command: scripts\build_windows.ps1 -Version 0.5.2 -BaseArchive dist\base\hunterX_windows_0.5.2_rc3.zip -Commit <40-hex-HEAD> -Qualifier final
+Windows layout: executables and required runtime/resource directories at root;
+                technical evidence organized under docs\release-audit;
+                inherited RC/RC2/RC3 root-level report clutter removed
 
 Final-Layer evidence is listed in RC3_BUILD_PROVENANCE.json and the
 FINAL_LAYER_*.md reports. The two 8-hour actual-browser gates are explicitly

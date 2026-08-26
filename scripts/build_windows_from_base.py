@@ -136,6 +136,35 @@ FINAL_CORE_REQUIRED_DOCUMENTS = RC3_REQUIRED_DOCUMENTS + (
     "FINAL_RELEASE_AUDIT_v0.5.2.md",
     "RELEASE_NOTES_v0.5.2_FINAL.md",
 )
+FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS = (
+    "IMPLEMENTATION_DIFF_v0.5.2_FINAL.md",
+    "PLATFORM_COMPLETION_LATCH_AUDIT.md",
+    "REFRESH_OWNERSHIP_MATRIX_v0.5.2.md",
+    "ROUTE_REARM_MATRIX_v0.5.2.md",
+    "TEST_REPORT_v0.5.2_FINAL.md",
+)
+FINAL_ROOT_DOCUMENTS = (
+    "BUILD_INFO.txt",
+    "CHANGELOG.md",
+    "LEGAL_NOTICE.md",
+    "LICENSE",
+    "RELEASE_NOTES_v0.5.2_FINAL.md",
+    "WINDOWS_PACKAGE_zh-TW.txt",
+)
+FINAL_AUDIT_REQUIRED_DOCUMENTS = tuple(
+    name for name in FINAL_CORE_REQUIRED_DOCUMENTS if name not in FINAL_ROOT_DOCUMENTS
+)
+FINAL_AUDIT_DIRECTORY = Path("docs") / "release-audit"
+FINAL_ALLOWED_BASE_DIRECTORIES = frozenset(
+    {
+        "_nodriver_internal",
+        "_settings_internal",
+        "assets",
+        "guide",
+        "www",
+    }
+)
+FINAL_RUNTIME_EXECUTABLES = frozenset({"nodriver_tixcraft.exe", "settings.exe"})
 FINAL_STRICT_QUALIFICATION_DOCUMENTS = (
     FINAL_SINGLE_EVIDENCE_NAME,
     FINAL_THREE_EVIDENCE_NAME,
@@ -357,6 +386,28 @@ def stage_application_source(project_root: Path, destination: Path) -> None:
             raise ValueError(f"runtime source contains local state: {candidate}")
 
 
+def prune_final_package_root(package_root: Path) -> None:
+    """Remove inherited release clutter without touching runtime directories.
+
+    The verified RC3 base contains historical reports at archive root. FINAL
+    keeps only both executables there, then overlays a bounded end-user document
+    set and places technical evidence under ``docs/release-audit``. Unexpected
+    root directories fail closed because silently deleting an unknown runtime
+    directory could break the packaged application.
+    """
+
+    for child in package_root.iterdir():
+        if child.is_dir():
+            if child.name not in FINAL_ALLOWED_BASE_DIRECTORIES:
+                raise ValueError(
+                    f"FINAL baseline contains an unexpected root directory: {child.name}"
+                )
+            continue
+        if child.name in FINAL_RUNTIME_EXECUTABLES:
+            continue
+        child.unlink()
+
+
 def overlay_release_files(
     project_root: Path,
     package_root: Path,
@@ -364,18 +415,31 @@ def overlay_release_files(
     qualifier: str | None = None,
 ) -> None:
     source_root = project_root / "src"
-    for name in TOP_LEVEL_DOCUMENTS:
+    normalized_qualifier = (
+        release_utils.require_build_qualifier(qualifier)
+        if qualifier is not None
+        else None
+    )
+    is_final = normalized_qualifier == release_utils.FINAL_QUALIFIER
+    root_documents = FINAL_ROOT_DOCUMENTS if is_final else TOP_LEVEL_DOCUMENTS
+    for name in root_documents:
         source = project_root / name
-        if source.is_file():
-            shutil.copy2(source, package_root / name)
+        if not source.is_file():
+            if is_final:
+                raise FileNotFoundError(f"FINAL end-user document is missing: {source}")
+            continue
+        shutil.copy2(source, package_root / name)
 
-    if qualifier is not None:
-        normalized_qualifier = release_utils.require_build_qualifier(qualifier)
+    if normalized_qualifier is not None:
         required_documents = {
             release_utils.RC2_QUALIFIER: RC2_REQUIRED_DOCUMENTS,
             release_utils.RC3_QUALIFIER: RC3_REQUIRED_DOCUMENTS,
-            release_utils.FINAL_QUALIFIER: FINAL_CORE_REQUIRED_DOCUMENTS,
+            release_utils.FINAL_QUALIFIER: FINAL_AUDIT_REQUIRED_DOCUMENTS,
         }[normalized_qualifier]
+        evidence_root = package_root
+        if is_final:
+            evidence_root = package_root / FINAL_AUDIT_DIRECTORY
+            evidence_root.mkdir(parents=True, exist_ok=True)
         for name in required_documents:
             source = project_root / name
             if not source.is_file():
@@ -383,8 +447,15 @@ def overlay_release_files(
                     f"{normalized_qualifier.upper()} required release report is missing: "
                     f"{source}"
                 )
-            shutil.copy2(source, package_root / name)
-        if normalized_qualifier == release_utils.FINAL_QUALIFIER:
+            shutil.copy2(source, evidence_root / name)
+        if is_final:
+            for name in FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS:
+                source = project_root / name
+                if not source.is_file():
+                    raise FileNotFoundError(
+                        f"FINAL supplemental audit document is missing: {source}"
+                    )
+                shutil.copy2(source, evidence_root / name)
             strict_paths = [project_root / name for name in FINAL_STRICT_QUALIFICATION_DOCUMENTS]
             has_strict_evidence = all(path.is_file() for path in strict_paths)
             waiver_path = project_root / FINAL_WAIVER_NAME
@@ -396,7 +467,7 @@ def overlay_release_files(
                 )
             selected_paths = strict_paths if has_strict_evidence else [waiver_path]
             for source in selected_paths:
-                shutil.copy2(source, package_root / source.name)
+                shutil.copy2(source, evidence_root / source.name)
 
     release_readme = project_root / "build_scripts" / "README_Release.txt"
     if not release_readme.is_file():
@@ -509,7 +580,8 @@ def write_final_provenance(
         "windows_base_sha256": RC3_WINDOWS_BASE_SHA256,
         "clean_committed_snapshot": True,
     }
-    waiver_path = package_root / FINAL_WAIVER_NAME
+    evidence_root = package_root / FINAL_AUDIT_DIRECTORY
+    waiver_path = evidence_root / FINAL_WAIVER_NAME
     if waiver_path.is_file():
         waiver_content = waiver_path.read_bytes()
         validate_waiver_bytes(waiver_content)
@@ -535,9 +607,9 @@ def write_final_provenance(
             }
         )
     else:
-        single_content = (package_root / FINAL_SINGLE_EVIDENCE_NAME).read_bytes()
-        three_content = (package_root / FINAL_THREE_EVIDENCE_NAME).read_bytes()
-        context_content = (package_root / FINAL_QUALIFICATION_CONTEXT_NAME).read_bytes()
+        single_content = (evidence_root / FINAL_SINGLE_EVIDENCE_NAME).read_bytes()
+        three_content = (evidence_root / FINAL_THREE_EVIDENCE_NAME).read_bytes()
+        context_content = (evidence_root / FINAL_QUALIFICATION_CONTEXT_NAME).read_bytes()
         context = validate_context_bytes(
             context_content=context_content,
             single_content=single_content,
@@ -650,6 +722,8 @@ def build_from_verified_baseline(
             staged_package,
             qualifier=normalized_qualifier,
         )
+        if normalized_qualifier == release_utils.FINAL_QUALIFIER:
+            prune_final_package_root(staged_package)
         overlay_release_files(
             release_root,
             staged_package,

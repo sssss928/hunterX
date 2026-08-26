@@ -41,7 +41,40 @@
 
 - Cause: public GitHub prerelease `v0.5.2-rc2` is absent.
 - Integrity response: no hash weakening and no substitute base.
-- Status: local approved asset verified; remote repository state still requires publication and rerun.
+- Fix: normal branch/PR Windows CI now runs source-based Windows runtime and
+  release-contract tests and no longer downloads the unpublished RC3 asset.
+  The optional artifact rebuild workflow is manual-only and remains strictly
+  locked to the exact RC3 name/hash.
+- Status: local workflow tests pass; a new public GitHub run is still required
+  after the commit is pushed.
+
+## FL-07 — Windows package root contained historical engineering clutter
+
+- Pre-fix evidence: the previous delivered Windows ZIP had 70 top-level items,
+  mostly reports inherited through RC, RC2, and RC3.
+- Fix: FINAL packaging now uses a fail-closed root allowlist, retains both
+  executables and their `_internal` runtime trees at root, keeps user documents
+  at root, and organizes technical evidence under `docs/release-audit/`.
+- Negative control: an unknown top-level directory is rejected instead of
+  being silently deleted.
+- Post-fix evidence: focused archive/builder tests and 20 fresh critical runs
+  pass; the exact final item count is recorded after artifact construction.
+
+## FL-08 — local actual-browser fixture startup race
+
+- Pre-fix evidence: a three-process Edge run failed with
+  `TypeError: Cannot read properties of undefined (reading 'push')` before the
+  local fixture had installed `window.syntheticTicket`.
+- Root cause: `driver.get()` established a target before fixture JavaScript
+  initialization was observable.
+- Fix: the soak harness now waits for the exact `push`, `replace`, and
+  `rerender` API, bounded to five seconds, after initial load, replacement, and
+  reload. Missing readiness fails closed.
+- Post-fix evidence: focused production-iteration tests 28/28, 20 fresh
+  critical runs 180/180, full suites 1198/1198 twice, single Edge 63 cycles,
+  and three-process Edge 69/70/70 cycles. All post-fix browser runs had zero
+  errors, CDP errors, or duplicate-submit claims.
+- Product scope: no source under `src/` changed for this harness fix.
 
 ## Mandatory unresolved gate
 

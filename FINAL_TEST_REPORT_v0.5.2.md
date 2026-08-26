@@ -7,17 +7,17 @@ tests are not verified and are not included in any PASS total.
 
 | Gate | Result |
 |---|---|
-| Release/waiver focused suite | 75/75 passed |
-| Dictionary + terminal lifecycle + production iteration focused | 112/112 passed |
-| Four critical tests in 20 fresh processes | 80/80 passed |
-| Full suite, fresh process run 1 | 1193/1193 passed in 158.19 s |
-| Full suite, fresh process run 2 | 1193/1193 passed in 154.66 s |
+| Release/workflow/archive focused suite | 83/83 passed |
+| Dictionary + terminal lifecycle + production iteration focused | 86/86 passed |
+| Nine critical tests in 20 fresh processes | 180/180 passed |
+| Full suite, fresh process run 1 | 1198/1198 passed in 152.42 s |
+| Full suite, fresh process run 2 | 1198/1198 passed in 152.19 s |
 | Coverage | 39%, configured 30% gate satisfied |
 | Python compileall | PASS |
 | Ruff | PASS |
 | Configured strict mypy | PASS, 27 source files |
 | pip-audit | PASS, no known vulnerabilities |
-| Bandit high-severity gate | PASS, 0 high; 1 medium and 138 low reported |
+| Bandit high-severity gate | PASS, 0 high; 1 medium and 151 low reported across `src` and `scripts` |
 
 No skip or xfail was added or used to bypass a failure.
 
@@ -41,18 +41,24 @@ manual browser closure does not reopen pages.
 
 ## Local actual-browser production integration
 
-- Single Edge process: 61.422 seconds, 69 cycles, 0 errors, 0 CDP errors,
-  0 duplicate claims, max one tab, asyncio tasks 8→8.
-- Three isolated Edge processes: 62.484/63.265/63.281 seconds and 69/70/70
+- Single Edge process after the final packaging changes: 32.844 seconds, 63
+  cycles, 0 errors, 0 CDP errors, 0 duplicate claims, max one tab, asyncio
+  tasks 8→8.
+- Three isolated Edge processes: 62.515/63.343/63.500 seconds and 69/70/70
   cycles, all workers exit 0, 0 errors, 0 CDP errors, 0 duplicate claims,
   max one tab per process, asyncio tasks 8→8 per process.
 - These tests used the local synthetic ticket SPA and the same authoritative
   production iteration. They did not contact third-party ticket sites.
 
-The first smoke invocation was rejected before browser startup because the
-test `run-id` made the bounded instance identity longer than 32 characters.
-It was corrected to a valid short ID and both requested smoke modes then
-passed; this runner-input failure is not counted as a product PASS.
+The first three-process invocation exposed an actual-browser harness race:
+`driver.get()` could return before the local fixture installed its exact
+`window.syntheticTicket` API, so an immediate action raised
+`TypeError: undefined.push`. The harness now waits for that exact three-method
+API with a five-second bound after initial navigation, target replacement, and
+reload. A missing fixture fails closed by timeout. The focused tests, 20 fresh
+critical repeats, both full suites, and the single/three-process browser runs
+above were all rerun after the fix. This was a test-integration defect; no
+ticket-platform production source under `src/` was changed.
 
 ## Qualification limitation
 

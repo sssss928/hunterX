@@ -32,6 +32,17 @@ fresh-extract executable smoke, source-to-both-runtime byte parity, archive
 safety checks, and exact SHA-256 generation. A failure in any of those gates
 invalidates the artifact set.
 
+The Windows root layout is also enforced: stale reports inherited from the RC3
+base are deleted, unknown root directories are rejected, end-user files remain
+at root, and technical evidence is placed under `docs/release-audit/`. The two
+PyInstaller `_internal` directories remain adjacent to their executables.
+
+Normal GitHub branch/PR CI no longer downloads an unpublished RC3 release base.
+The Windows job executes real Windows runtime and release-contract tests from
+source; native package smoke remains part of the locally built artifact gate.
+The optional automated FINAL rebuild is manual-only, so an ordinary verified
+GitHub Release tag cannot trigger the former missing-base failure.
+
 ## Final conclusion
 
 The files named `*_final.zip` are an explicit user-directed FINAL delivery,

@@ -82,19 +82,17 @@ def test_ci_workflow_covers_required_branch_families() -> None:
     assert 'python-version: "3.11.9"' in workflow
     assert "ruff check src tests scripts" in workflow
     assert "pip-audit -r requirement.txt" in workflow
-    assert "project-version --metadata src/hunter_metadata.py" in workflow
-    assert 'steps.project.outputs.version' in workflow
-    assert 'steps.project.outputs.artifact_name' in workflow
     assert "--require-hashes -r requirements-lock-windows-py311.txt" in workflow
     assert "python -m compileall src tests scripts" in workflow
     assert "python -m pytest --cov-fail-under=30" in workflow
-    assert "gh release download build-base-v0.5.2-rc3" in workflow
-    assert "hunterX_windows_0.5.2_rc3.zip" in workflow
-    assert "f2ec4f918e50de5c78c2303a184ef54b0ce69d1ba2f87d34365d87be59d46cd9" in workflow
-    assert "hunterX_windows_0.5.1.zip" not in workflow
-    assert "-Qualifier final" in workflow
+    assert "Windows runtime and release-contract smoke" in workflow
+    assert "python src/nodriver_tixcraft.py --version" in workflow
+    assert "python src/settings.py --version" in workflow
+    assert "tests/test_v052_final_release_profile.py" in workflow
+    assert "gh release download" not in workflow
+    assert "build-base-v0.5.2-rc3" not in workflow
     assert "continue-on-error: true" not in workflow
-    assert workflow.count("retention-days: 3") == 3
+    assert workflow.count("retention-days: 3") == 2
     assert "0.1.0" not in workflow
 
 
@@ -111,7 +109,8 @@ def test_final_workflow_is_fail_closed_and_publishes_official_tag() -> None:
         encoding="utf-8"
     )
 
-    assert '"v0.5.2"' in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "push:" not in workflow
     assert "--qualifier final" in workflow
     assert "FINAL_8H_SINGLE_INSTANCE_SOAK.json" in workflow
     assert "FINAL_8H_THREE_NAMED_INSTANCES_SOAK.json" in workflow

@@ -1,9 +1,6 @@
 name: Release FINAL
 
 on:
-  push:
-    tags:
-      - "v0.5.2"
   workflow_dispatch:
     inputs:
       version:

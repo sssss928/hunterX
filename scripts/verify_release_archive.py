@@ -130,6 +130,41 @@ FINAL_CORE_REQUIRED_DOCUMENTS = RC3_REQUIRED_DOCUMENTS | frozenset(
         "RELEASE_NOTES_v0.5.2_FINAL.md",
     }
 )
+FINAL_ROOT_DOCUMENTS = frozenset(
+    {
+        "BUILD_INFO.txt",
+        "CHANGELOG.md",
+        "LEGAL_NOTICE.md",
+        "LICENSE",
+        "README_Release.txt",
+        "RELEASE_NOTES_v0.5.2_FINAL.md",
+        "WINDOWS_PACKAGE_zh-TW.txt",
+    }
+)
+FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS = frozenset(
+    {
+        "IMPLEMENTATION_DIFF_v0.5.2_FINAL.md",
+        "PLATFORM_COMPLETION_LATCH_AUDIT.md",
+        "REFRESH_OWNERSHIP_MATRIX_v0.5.2.md",
+        "ROUTE_REARM_MATRIX_v0.5.2.md",
+        "TEST_REPORT_v0.5.2_FINAL.md",
+    }
+)
+FINAL_AUDIT_PREFIX = "docs/release-audit/"
+FINAL_ALLOWED_TOP_LEVEL = frozenset(
+    {
+        *FINAL_ROOT_DOCUMENTS,
+        FINAL_PROVENANCE_NAME,
+        "_nodriver_internal",
+        "_settings_internal",
+        "assets",
+        "docs",
+        "guide",
+        "nodriver_tixcraft.exe",
+        "settings.exe",
+        "www",
+    }
+)
 FINAL_STRICT_QUALIFICATION_DOCUMENTS = frozenset(
     {
         FINAL_SINGLE_EVIDENCE_NAME,
@@ -149,6 +184,10 @@ RUNTIME_LAYOUT_PREFIXES = (
     "_nodriver_internal/",
     "_settings_internal/",
 )
+
+
+def _final_audit_member(name: str) -> str:
+    return f"{FINAL_AUDIT_PREFIX}{name}"
 
 
 def _normalized_file_entries(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
@@ -335,13 +374,27 @@ def _verify_release_provenance(
         return manifest
 
     if normalized_qualifier == "final":
-        missing_documents = sorted(FINAL_CORE_REQUIRED_DOCUMENTS - set(entries))
+        final_document_members = {
+            name
+            if name in FINAL_ROOT_DOCUMENTS
+            else _final_audit_member(name)
+            for name in FINAL_CORE_REQUIRED_DOCUMENTS
+        } | {
+            _final_audit_member(name)
+            for name in FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS
+        }
+        missing_documents = sorted(final_document_members - set(entries))
         if missing_documents:
             raise ValueError(
                 f"FINAL Windows archive missing required documents: {missing_documents}"
             )
-        has_strict_evidence = FINAL_STRICT_QUALIFICATION_DOCUMENTS.issubset(entries)
-        has_waiver = FINAL_WAIVER_NAME in entries
+        strict_members = {
+            _final_audit_member(name)
+            for name in FINAL_STRICT_QUALIFICATION_DOCUMENTS
+        }
+        waiver_member = _final_audit_member(FINAL_WAIVER_NAME)
+        has_strict_evidence = strict_members.issubset(entries)
+        has_waiver = waiver_member in entries
         if has_strict_evidence == has_waiver:
             raise ValueError(
                 "FINAL archive must contain exactly one qualification mode: "
@@ -357,9 +410,15 @@ def _verify_release_provenance(
             "clean_committed_snapshot": True,
         }
         if has_strict_evidence:
-            single_content = archive.read(entries[FINAL_SINGLE_EVIDENCE_NAME])
-            three_content = archive.read(entries[FINAL_THREE_EVIDENCE_NAME])
-            context_content = archive.read(entries[FINAL_QUALIFICATION_CONTEXT_NAME])
+            single_content = archive.read(
+                entries[_final_audit_member(FINAL_SINGLE_EVIDENCE_NAME)]
+            )
+            three_content = archive.read(
+                entries[_final_audit_member(FINAL_THREE_EVIDENCE_NAME)]
+            )
+            context_content = archive.read(
+                entries[_final_audit_member(FINAL_QUALIFICATION_CONTEXT_NAME)]
+            )
             context = validate_context_bytes(
                 context_content=context_content,
                 single_content=single_content,
@@ -380,7 +439,7 @@ def _verify_release_provenance(
                 }
             )
         else:
-            waiver_content = archive.read(entries[FINAL_WAIVER_NAME])
+            waiver_content = archive.read(entries[waiver_member])
             validate_waiver_bytes(waiver_content)
             final_expected_values.update(
                 {
@@ -419,7 +478,7 @@ def verify_windows_archive(
 ) -> dict[str, object]:
     archive, entries = _open_checked_zip(path)
     try:
-        required = {
+        legacy_required = {
             "BUILD_INFO.txt",
             "CHANGELOG.md",
             "CODEX_MASTER_PROMPT_v0.5.2.md",
@@ -452,9 +511,49 @@ def verify_windows_archive(
             "_settings_internal/app_src/settings.py",
             "_settings_internal/python311.dll",
         }
+        final_runtime_required = {
+            *FINAL_ROOT_DOCUMENTS,
+            "nodriver_tixcraft.exe",
+            "settings.exe",
+            "guide/README.md",
+            "www/css/settings.css",
+            "www/favicon.ico",
+            "www/settings.html",
+            "www/settings.js",
+            "_nodriver_internal/base_library.zip",
+            "_nodriver_internal/app_src/hunter_metadata.py",
+            "_nodriver_internal/app_src/nodriver_tixcraft.py",
+            "_nodriver_internal/app_src/platforms/ticketplus.py",
+            "_nodriver_internal/python311.dll",
+            "_settings_internal/base_library.zip",
+            "_settings_internal/app_src/hunter_metadata.py",
+            "_settings_internal/app_src/settings.py",
+            "_settings_internal/python311.dll",
+        }
+        is_final = qualifier is not None and qualifier.casefold() == "final"
+        required = final_runtime_required if is_final else legacy_required
         missing = sorted(required - set(entries))
         if missing:
             raise ValueError(f"Windows archive missing required files: {missing}")
+        if is_final:
+            top_level = {PurePosixPath(name).parts[0] for name in entries}
+            unexpected_top_level = sorted(top_level - FINAL_ALLOWED_TOP_LEVEL)
+            if unexpected_top_level:
+                raise ValueError(
+                    "FINAL Windows archive contains unexpected top-level items: "
+                    f"{unexpected_top_level}"
+                )
+            unexpected_docs = sorted(
+                name
+                for name in entries
+                if PurePosixPath(name).parts[0] == "docs"
+                and not name.startswith(FINAL_AUDIT_PREFIX)
+            )
+            if unexpected_docs:
+                raise ValueError(
+                    "FINAL Windows archive contains files outside the release-audit "
+                    f"document folder: {unexpected_docs}"
+                )
         if any(
             PurePosixPath(name).parts[0].casefold() == "_internal"
             for name in entries

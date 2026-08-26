@@ -102,6 +102,11 @@ SHA256SUMS_v0.5.2_FINAL.txt
 FINAL_TEST_REPORT_v0.5.2.md
 ```
 
+For the exact repository import, pull-request checks, tag, asset upload and
+post-download hash verification sequence, follow
+[`GITHUB_RELEASE_GUIDE_zh-TW.md`](GITHUB_RELEASE_GUIDE_zh-TW.md). The official
+manual release uploads only the Windows ZIP, source ZIP and checksum manifest.
+
 Extract the Windows ZIP on a Windows computer and run `settings.exe` to configure the application.
 
 ## Known Limits

@@ -627,3 +627,35 @@ def test_soak_run_id_provides_bounded_cross_process_profile_isolation() -> None:
     assert command[command.index("--worker-instance") + 1] == "2"
     assert command[command.index("--run-id") + 1] == "final-three"
     assert command[command.index("--stop-file") + 1] == "STOP"
+
+
+@pytest.mark.asyncio
+async def test_soak_waits_for_exact_fixture_api_before_first_action() -> None:
+    from v052_browser_soak import _wait_for_synthetic_page
+
+    class LoadingTab:
+        def __init__(self) -> None:
+            self.probes = 0
+
+        async def evaluate(self, expression: str) -> bool:
+            assert "window.syntheticTicket.push" in expression
+            assert "window.syntheticTicket.replace" in expression
+            assert "window.syntheticTicket.rerender" in expression
+            self.probes += 1
+            return self.probes >= 2
+
+    tab = LoadingTab()
+    await _wait_for_synthetic_page(tab, timeout=1.0)
+    assert tab.probes == 2
+
+
+@pytest.mark.asyncio
+async def test_soak_fixture_readiness_times_out_fail_closed() -> None:
+    from v052_browser_soak import _wait_for_synthetic_page
+
+    class MissingFixtureTab:
+        async def evaluate(self, _expression: str) -> bool:
+            return False
+
+    with pytest.raises(TimeoutError, match="fixture did not become ready"):
+        await _wait_for_synthetic_page(MissingFixtureTab(), timeout=0.0)

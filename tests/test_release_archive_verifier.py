@@ -247,7 +247,7 @@ def test_windows_archive_rejects_final_name_without_final_gate_provenance(
     archive_path = tmp_path / f"hunterX_windows_{VERSION}_final.zip"
     _write_zip(archive_path, REQUIRED_WINDOWS_FILES)
 
-    with pytest.raises(ValueError, match="FINAL Windows archive missing required documents"):
+    with pytest.raises(ValueError, match="Windows archive missing required files"):
         verify_windows_archive(archive_path, VERSION, qualifier="final")
 
 

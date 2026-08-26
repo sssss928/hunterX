@@ -22,6 +22,13 @@ and RC3.
 - Hardens the official build around a clean exact commit, byte-approved RC3
   Windows base, fresh-extract native smoke, source/runtime parity, provenance,
   and exact checksums.
+- Keeps the Windows root concise: required executables/runtimes and end-user
+  documents remain at the top level, while technical evidence is organized in
+  `docs/release-audit/`; stale reports inherited from earlier bases are removed.
+- Makes normal pull-request and branch CI independent of an unpublished RC3
+  release asset. The optional automated FINAL rebuild remains manual-only, so
+  creating the official `v0.5.2` tag for a verified manual release cannot
+  trigger the former missing-base red叉 failure.
 
 ## Important qualification statement
 

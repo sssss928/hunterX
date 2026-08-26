@@ -179,6 +179,26 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return server, f"http://127.0.0.1:{port}/synthetic_ticket_spa.html"
 
 
+async def _wait_for_synthetic_page(tab: Any, timeout: float = 5.0) -> None:
+    """Wait for the local fixture's exact API before issuing synthetic actions."""
+
+    deadline = time.monotonic() + max(float(timeout), 0.0)
+    readiness_probe = """
+        Boolean(
+          window.syntheticTicket &&
+          typeof window.syntheticTicket.push === 'function' &&
+          typeof window.syntheticTicket.replace === 'function' &&
+          typeof window.syntheticTicket.rerender === 'function'
+        )
+    """
+    while True:
+        if bool(await tab.evaluate(readiness_probe)):
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("synthetic ticket fixture did not become ready")
+        await asyncio.sleep(0.05)
+
+
 def _synthetic_platform_url(platform_key: str, stage: str, cycle: int) -> str:
     if platform_key == "tixcraft":
         if stage == "protected":
@@ -235,6 +255,7 @@ async def _run_instance(
         nodriver_overwrite_prefs(conf)
         driver = await uc.start(conf)
         tab = await driver.get(base_url)
+        await _wait_for_synthetic_page(tab)
         manager.attach(driver, tab)
         _sample_resources(result, manager, health, initial=True)
         route_state = SyntheticRouteState("ticketplus", "activity", 0)
@@ -308,6 +329,7 @@ async def _run_instance(
             if cycle % 300 == 0:
                 old_tab = tab
                 tab = await driver.get(base_url, new_tab=True)
+                await _wait_for_synthetic_page(tab)
                 manager.attach(driver, tab)
                 runtime_context.tab = tab
                 close = getattr(old_tab, "close", None)
@@ -318,6 +340,7 @@ async def _run_instance(
                 result.target_replacements += 1
             elif cycle % 150 == 0:
                 await tab.reload()
+                await _wait_for_synthetic_page(tab)
                 result.reload_injections += 1
 
             route_state.platform = platform_key

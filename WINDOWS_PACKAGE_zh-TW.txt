@@ -14,6 +14,17 @@ HunterX 0.5.2 FINAL Windows 成品包
    夾帶任何人的舊設定、帳號、Cookie 或工作階段資料。
 5. 在設定介面按下啟動後，settings.exe 會自動呼叫 nodriver_tixcraft.exe。
 
+資料夾結構：
+
+- settings.exe、nodriver_tixcraft.exe：兩個正式入口。
+- _settings_internal、_nodriver_internal：各自的必要執行環境，不可刪除、
+  改名、合併或移到其他資料夾。
+- assets、www：執行介面資源，不可刪除。
+- guide：使用說明。
+- docs/release-audit：技術驗證與發布稽核；一般使用不需開啟，但保留可追溯性。
+- 根目錄只保留使用者說明、授權、版本資訊與必要 provenance，歷史報告不再
+  散落於根目錄。
+
 若 Windows 顯示來源或 SmartScreen 提醒，請先核對 ZIP 的 SHA-256，再依你
 自己的安全政策決定是否執行；本程式不要求系統管理員權限，也不建議停用防毒
 或把整個下載資料夾加入排除清單。

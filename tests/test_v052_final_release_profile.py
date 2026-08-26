@@ -27,7 +27,10 @@ from final_qualification import (
     sha256_bytes,
 )
 from verify_release_archive import (
+    FINAL_AUDIT_PREFIX,
     FINAL_REQUIRED_DOCUMENTS,
+    FINAL_ROOT_DOCUMENTS,
+    FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS,
     verify_source_archive,
     verify_windows_archive,
 )
@@ -35,6 +38,12 @@ from write_release_checksums import verify_final_checksums, write_checksums
 
 
 VERSION = "0.5.2"
+
+
+def _windows_evidence_name(name: str) -> str:
+    if name in FINAL_ROOT_DOCUMENTS:
+        return name
+    return f"{FINAL_AUDIT_PREFIX}{name}"
 
 
 def _result(instance: str) -> dict[str, object]:
@@ -177,22 +186,13 @@ def _windows_files(
     files = {
         "BUILD_INFO.txt": b"build",
         "CHANGELOG.md": b"changes",
-        "CODEX_MASTER_PROMPT_v0.5.2.md": b"prompt",
-        "FINAL_AUDIT_v0.5.2.md": b"audit",
-        "IMPLEMENTATION_DIFF_v0.5.2_RC.md": b"diff",
+        "LEGAL_NOTICE.md": b"legal",
         "LICENSE": b"license",
-        "README.md": b"readme",
         "README_Release.txt": b"release",
-        "LONG_RUN_STABILITY_REPORT_v0.5.2.md": b"long",
-        "PERFORMANCE_COMPARISON_v0.5.1_vs_v0.5.2.md": b"performance",
-        "PLATFORM_COMPLETION_LATCH_AUDIT.md": b"latch",
-        "REFRESH_OWNERSHIP_MATRIX_v0.5.2.md": b"refresh",
-        "RELEASE_NOTES_v0.5.2_RC.md": b"rc notes",
-        "REQUIREMENT_TEST_TRACEABILITY_v0.5.2.md": b"trace",
-        "TEST_REPORT_v0.5.2_RC.md": b"test",
         "WINDOWS_PACKAGE_zh-TW.txt": b"windows",
         "nodriver_tixcraft.exe": b"MZbot",
         "settings.exe": b"MZsettings",
+        "guide/README.md": b"guide",
         "www/css/settings.css": b"css",
         "www/favicon.ico": b"ico",
         "www/settings.html": b"HunterX (0.5.2)",
@@ -208,10 +208,21 @@ def _windows_files(
         "_settings_internal/app_src/settings.py": b"pass",
         "_settings_internal/python311.dll": b"dll-b",
     }
-    files.update({name: b"final evidence" for name in FINAL_REQUIRED_DOCUMENTS})
-    files[SINGLE_EVIDENCE_NAME] = single
-    files[THREE_EVIDENCE_NAME] = three
-    files[CONTEXT_NAME] = context
+    files.update(
+        {
+            _windows_evidence_name(name): b"final evidence"
+            for name in FINAL_REQUIRED_DOCUMENTS
+        }
+    )
+    files.update(
+        {
+            _windows_evidence_name(name): b"supplemental evidence"
+            for name in FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS
+        }
+    )
+    files[_windows_evidence_name(SINGLE_EVIDENCE_NAME)] = single
+    files[_windows_evidence_name(THREE_EVIDENCE_NAME)] = three
+    files[_windows_evidence_name(CONTEXT_NAME)] = context
     files[FINAL_PROVENANCE_NAME] = json.dumps(
         {
             "schema": 1,
@@ -315,7 +326,7 @@ def test_final_windows_archive_provenance_is_machine_verified(tmp_path: Path) ->
         three=three,
         context=context,
     )
-    tampered_files[SINGLE_EVIDENCE_NAME] = single.replace(
+    tampered_files[_windows_evidence_name(SINGLE_EVIDENCE_NAME)] = single.replace(
         b'"errors": 0', b'"errors": 1', 1
     )
     with zipfile.ZipFile(tampered_archive, "w") as output:
@@ -325,6 +336,28 @@ def test_final_windows_archive_provenance_is_machine_verified(tmp_path: Path) ->
         verify_windows_archive(tampered_archive, VERSION, qualifier="final")
 
 
+def test_final_windows_archive_rejects_root_level_release_clutter(
+    tmp_path: Path,
+) -> None:
+    repo, runtime, release_commit, single, three, context = _release_repo(tmp_path)
+    files = _windows_files(
+        source_commit=release_commit,
+        runtime_commit=runtime,
+        runtime_src_tree=_git(repo, "rev-parse", f"{runtime}:src"),
+        single=single,
+        three=three,
+        context=context,
+    )
+    files["FINAL_AUDIT_v0.5.2.md"] = b"misplaced root report"
+    archive = tmp_path / "hunterX_windows_0.5.2_final.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        for name, content in files.items():
+            output.writestr(name, content)
+
+    with pytest.raises(ValueError, match="unexpected top-level items"):
+        verify_windows_archive(archive, VERSION, qualifier="final")
+
+
 def test_final_provenance_writer_and_checksum_set_are_exact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -332,9 +365,11 @@ def test_final_provenance_writer_and_checksum_set_are_exact(
     repo, runtime, release_commit, single, three, context = _release_repo(tmp_path)
     package = tmp_path / "package"
     package.mkdir()
-    (package / SINGLE_EVIDENCE_NAME).write_bytes(single)
-    (package / THREE_EVIDENCE_NAME).write_bytes(three)
-    (package / CONTEXT_NAME).write_bytes(context)
+    audit = package / Path(FINAL_AUDIT_PREFIX)
+    audit.mkdir(parents=True)
+    (audit / SINGLE_EVIDENCE_NAME).write_bytes(single)
+    (audit / THREE_EVIDENCE_NAME).write_bytes(three)
+    (audit / CONTEXT_NAME).write_bytes(context)
     base = tmp_path / RC3_WINDOWS_BASE_NAME
     base.write_bytes(b"verified rc3")
     monkeypatch.setattr(
@@ -390,7 +425,9 @@ def test_explicit_user_waiver_builds_without_claiming_eight_hour_pass(
 
     package = tmp_path / "package-waived"
     package.mkdir()
-    (package / WAIVER_NAME).write_bytes(waiver)
+    audit = package / Path(FINAL_AUDIT_PREFIX)
+    audit.mkdir(parents=True)
+    (audit / WAIVER_NAME).write_bytes(waiver)
     base = tmp_path / RC3_WINDOWS_BASE_NAME
     base.write_bytes(b"verified rc3")
     monkeypatch.setattr(
