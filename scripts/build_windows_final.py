@@ -233,9 +233,11 @@ def build_windows_final(
     package_dir.parent.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    temporary_parent = Path(
-        tempfile.mkdtemp(prefix=f".{package_dir.name}.source-native.", dir=package_dir.parent)
-    )
+    # PyInstaller and some dependency metadata still encounter legacy Windows
+    # path limits.  A repository-local staging path can exceed MAX_PATH before
+    # COLLECT reaches nested SBOM files (for example cryptography's CycloneDX
+    # metadata), so use the OS temporary root and promote only verified bytes.
+    temporary_parent = Path(tempfile.mkdtemp(prefix="hunterx-v052-final-"))
     try:
         release_root = snapshot_release_source(
             project_root,

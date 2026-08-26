@@ -85,6 +85,13 @@ def test_pyinstaller_failure_does_not_publish_partial_output(
     project_root.mkdir()
     output = tmp_path / "release" / "hunterX_windows_0.5.2_final.zip"
     package_dir = tmp_path / "package"
+    observed_temp_kwargs: dict[str, object] = {}
+
+    def fake_mkdtemp(**kwargs: object) -> str:
+        observed_temp_kwargs.update(kwargs)
+        temporary = tmp_path / "short-temp"
+        temporary.mkdir()
+        return str(temporary)
 
     monkeypatch.setattr(
         build_windows_final.release_utils,
@@ -96,6 +103,7 @@ def test_pyinstaller_failure_does_not_publish_partial_output(
         "_installed_pyinstaller_version",
         lambda: EXPECTED_PYINSTALLER,
     )
+    monkeypatch.setattr(build_windows_final.tempfile, "mkdtemp", fake_mkdtemp)
 
     def fake_snapshot(_root: Path, destination: Path, _commit: str) -> Path:
         (destination / "src").mkdir(parents=True)
@@ -122,6 +130,7 @@ def test_pyinstaller_failure_does_not_publish_partial_output(
 
     assert not output.exists()
     assert not package_dir.exists()
+    assert "dir" not in observed_temp_kwargs
 
 
 def test_source_native_provenance_records_exact_commit_and_no_rc_base(
