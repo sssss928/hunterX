@@ -10,6 +10,7 @@ import build_windows_final
 from build_windows_final import (
     EXPECTED_PYINSTALLER,
     REQUIREMENTS_LOCK_NAME,
+    _stage_verified_outputs_on_destination_volumes,
     _stage_built_runtimes,
     build_windows_final as build_final,
     write_source_native_provenance,
@@ -64,6 +65,93 @@ def test_stage_built_runtimes_rejects_missing_internal_directory(
 
     with pytest.raises(ValueError, match="isolated runtime"):
         _stage_built_runtimes(pyinstaller_dist, tmp_path / "package")
+
+
+def test_verified_outputs_are_staged_on_each_destination_volume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged_package = tmp_path / "short-build" / "hunterX"
+    staged_package.mkdir(parents=True)
+    (staged_package / "settings.exe").write_bytes(b"MZpackage")
+    (staged_package / "nested").mkdir()
+    (staged_package / "nested/runtime.dll").write_bytes(b"runtime")
+    staged_archive = tmp_path / "short-build" / "hunterX_windows_0.5.2_final.zip"
+    staged_archive.write_bytes(b"archive")
+
+    package_parent = tmp_path / "package-volume"
+    output_parent = tmp_path / "archive-volume"
+    package_parent.mkdir()
+    output_parent.mkdir()
+    package_dir = package_parent / "hunterX"
+    output = output_parent / staged_archive.name
+    observed_mkdtemp_dirs: list[Path] = []
+    observed_mkstemp_dirs: list[Path] = []
+    real_mkdtemp = build_windows_final.tempfile.mkdtemp
+    real_mkstemp = build_windows_final.tempfile.mkstemp
+
+    def recording_mkdtemp(*args: object, **kwargs: object) -> str:
+        observed_mkdtemp_dirs.append(Path(str(kwargs["dir"])))
+        return real_mkdtemp(*args, **kwargs)
+
+    def recording_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        observed_mkstemp_dirs.append(Path(str(kwargs["dir"])))
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(build_windows_final.tempfile, "mkdtemp", recording_mkdtemp)
+    monkeypatch.setattr(build_windows_final.tempfile, "mkstemp", recording_mkstemp)
+
+    promotion_root, local_package, local_archive = (
+        _stage_verified_outputs_on_destination_volumes(
+            staged_package,
+            staged_archive,
+            package_dir=package_dir,
+            output=output,
+        )
+    )
+    try:
+        assert observed_mkdtemp_dirs == [package_parent]
+        assert observed_mkstemp_dirs == [output_parent]
+        assert (local_package / "settings.exe").read_bytes() == b"MZpackage"
+        assert (local_package / "nested/runtime.dll").read_bytes() == b"runtime"
+        assert local_archive.read_bytes() == b"archive"
+    finally:
+        local_archive.unlink(missing_ok=True)
+        build_windows_final.shutil.rmtree(promotion_root, ignore_errors=True)
+
+
+def test_destination_local_staging_rejects_changed_package_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged_package = tmp_path / "short-build" / "hunterX"
+    staged_package.mkdir(parents=True)
+    (staged_package / "settings.exe").write_bytes(b"MZpackage")
+    staged_archive = tmp_path / "short-build" / "hunterX_windows_0.5.2_final.zip"
+    staged_archive.write_bytes(b"archive")
+    package_dir = tmp_path / "destination" / "hunterX"
+    output = tmp_path / "release" / staged_archive.name
+    package_dir.parent.mkdir()
+    output.parent.mkdir()
+    real_copytree = build_windows_final.shutil.copytree
+
+    def corrupting_copytree(source: Path, destination: Path) -> Path:
+        result = real_copytree(source, destination)
+        (destination / "settings.exe").write_bytes(b"corrupt")
+        return result
+
+    monkeypatch.setattr(build_windows_final.shutil, "copytree", corrupting_copytree)
+
+    with pytest.raises(ValueError, match="package copy failed verification"):
+        _stage_verified_outputs_on_destination_volumes(
+            staged_package,
+            staged_archive,
+            package_dir=package_dir,
+            output=output,
+        )
+
+    assert list(package_dir.parent.glob(".hunterX.promote-*")) == []
+    assert list(output.parent.iterdir()) == []
 
 
 def test_wrong_output_name_is_rejected_before_build(tmp_path: Path) -> None:

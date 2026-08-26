@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -202,6 +203,64 @@ def _stage_built_runtimes(pyinstaller_dist: Path, package_root: Path) -> None:
         shutil.copytree(internal, package_root / internal.name)
 
 
+def _directory_sha256_manifest(root: Path) -> dict[str, str]:
+    """Return a stable content manifest for a regular-file directory tree."""
+
+    manifest: dict[str, str] = {}
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        if path.is_symlink():
+            raise ValueError(f"staged Windows package must not contain symlinks: {path}")
+        if path.is_file():
+            relative = path.relative_to(root).as_posix()
+            manifest[relative] = sha256_file(path)
+    return manifest
+
+
+def _stage_verified_outputs_on_destination_volumes(
+    staged_package: Path,
+    staged_archive: Path,
+    *,
+    package_dir: Path,
+    output: Path,
+) -> tuple[Path, Path, Path]:
+    """Copy verified outputs beside their destinations and verify every byte.
+
+    The short build workspace intentionally lives under the operating-system
+    temporary directory, which can be on a different Windows volume than the
+    GitHub Actions workspace.  Windows cannot rename across volumes, so the
+    final authoritative rename must start from destination-local staging.
+    """
+
+    promotion_root = Path(
+        tempfile.mkdtemp(prefix=f".{package_dir.name}.promote-", dir=package_dir.parent)
+    )
+    local_package = promotion_root / package_dir.name
+    local_archive: Path | None = None
+    try:
+        shutil.copytree(staged_package, local_package)
+        if _directory_sha256_manifest(local_package) != _directory_sha256_manifest(
+            staged_package
+        ):
+            raise ValueError("destination-local Windows package copy failed verification")
+
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            dir=output.parent,
+        )
+        os.close(descriptor)
+        local_archive = Path(temporary_name)
+        shutil.copy2(staged_archive, local_archive)
+        if sha256_file(local_archive) != sha256_file(staged_archive):
+            raise ValueError("destination-local Windows archive copy failed verification")
+        return promotion_root, local_package, local_archive
+    except BaseException:
+        if local_archive is not None:
+            local_archive.unlink(missing_ok=True)
+        shutil.rmtree(promotion_root, ignore_errors=True)
+        raise
+
+
 def build_windows_final(
     *,
     version: str,
@@ -238,6 +297,8 @@ def build_windows_final(
     # COLLECT reaches nested SBOM files (for example cryptography's CycloneDX
     # metadata), so use the OS temporary root and promote only verified bytes.
     temporary_parent = Path(tempfile.mkdtemp(prefix="hunterx-v052-final-"))
+    promotion_root: Path | None = None
+    local_archive: Path | None = None
     try:
         release_root = snapshot_release_source(
             project_root,
@@ -289,12 +350,25 @@ def build_windows_final(
         verify_archive_package(staged_archive)
         release_utils.resolve_clean_commit(project_root, verified_commit)
 
+        promotion_root, local_package, local_archive = (
+            _stage_verified_outputs_on_destination_volumes(
+                staged_package,
+                staged_archive,
+                package_dir=package_dir,
+                output=output,
+            )
+        )
         if package_dir.exists():
             shutil.rmtree(package_dir)
-        promote_staged_package(staged_package, package_dir)
+        promote_staged_package(local_package, package_dir)
         output.unlink(missing_ok=True)
-        staged_archive.replace(output)
+        local_archive.replace(output)
+        local_archive = None
     finally:
+        if local_archive is not None:
+            local_archive.unlink(missing_ok=True)
+        if promotion_root is not None:
+            shutil.rmtree(promotion_root, ignore_errors=True)
         shutil.rmtree(temporary_parent, ignore_errors=True)
     return output
 
