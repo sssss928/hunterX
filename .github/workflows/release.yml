@@ -120,6 +120,8 @@ jobs:
           python -m pytest --cov-fail-under=30
           pip-audit -r requirement.txt
           bandit -r src scripts -lll -c pyproject.toml
+      - name: Run release benchmarks
+        run: python -m pytest tests/benchmarks --benchmark-enable --benchmark-only
 
   build-windows:
     name: Build source-native FINAL Windows asset

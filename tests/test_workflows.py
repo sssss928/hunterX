@@ -60,6 +60,10 @@ def test_release_workflow_preserves_full_quality_and_qualification_gates() -> No
     assert "ruff check src tests scripts" in workflow
     assert "mypy" in workflow
     assert "python -m pytest --cov-fail-under=30" in workflow
+    assert (
+        "python -m pytest tests/benchmarks --benchmark-enable --benchmark-only"
+        in workflow
+    )
     assert "pip-audit -r requirement.txt" in workflow
     assert "bandit -r src scripts -lll -c pyproject.toml" in workflow
     assert "FINAL_8H_SINGLE_INSTANCE_SOAK.json" in workflow
