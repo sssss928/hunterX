@@ -167,6 +167,20 @@ def _create_git_source_archive(
     return archive_path, repo, commit
 
 
+def test_source_verifier_handles_archive_larger_than_pipe_buffer(
+    tmp_path: Path,
+) -> None:
+    archive_path, repo, commit = _create_git_source_archive(
+        tmp_path,
+        {"docs/large-release-evidence.bin": b"release-evidence" * 200_000},
+    )
+
+    result = verify_source_archive(archive_path, VERSION, repo, commit)
+
+    assert result["crc"] == "ok"
+    assert result["mismatch"] == 0
+
+
 def test_windows_archive_accepts_isolated_complete_layout(tmp_path: Path) -> None:
     archive_path = tmp_path / f"hunterX_windows_{VERSION}.zip"
     _write_zip(archive_path, REQUIRED_WINDOWS_FILES)

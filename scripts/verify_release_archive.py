@@ -7,7 +7,7 @@ import argparse
 import json
 import re
 import subprocess
-import tarfile
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -636,36 +636,41 @@ def _git_archive_files(
     commit: str,
     prefix: str,
 ) -> dict[str, bytes]:
-    process = subprocess.Popen(
-        [
-            "git",
-            "archive",
-            "--format=tar",
-            f"--prefix={prefix}",
-            commit,
-        ],
-        cwd=repo_root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert process.stdout is not None
-    expected: dict[str, bytes] = {}
-    try:
-        with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
-            for member in archive:
-                if not member.isfile():
-                    continue
-                extracted = archive.extractfile(member)
-                if extracted is None:
-                    raise ValueError(f"Unable to read git archive member: {member.name}")
-                expected[PurePosixPath(member.name).as_posix()] = extracted.read()
-    finally:
-        process.stdout.close()
-    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
-    return_code = process.wait()
-    if return_code != 0:
-        raise ValueError(f"git archive failed ({return_code}): {stderr.strip()}")
-    return expected
+    # Do not stream a tar archive through stdout here.  On Windows, closing a
+    # streamed tar reader after the logical end can close Git's pipe before it
+    # writes all trailing blocks, yielding exit 141 for otherwise valid larger
+    # repositories.  A temporary ZIP is bounded, fully produced, CRC checked,
+    # and then read, so both Git and the verifier observe complete bytes.
+    with tempfile.TemporaryDirectory(prefix="hunterx-git-archive-verify-") as temp:
+        archive_path = Path(temp) / "expected.zip"
+        result = subprocess.run(
+            [
+                "git",
+                "archive",
+                "--format=zip",
+                f"--prefix={prefix}",
+                f"--output={archive_path}",
+                commit,
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            raise ValueError(
+                f"git archive failed ({result.returncode}): {result.stderr.strip()}"
+            )
+        with zipfile.ZipFile(archive_path) as archive:
+            corrupt_name = archive.testzip()
+            if corrupt_name is not None:
+                raise ValueError(f"git archive ZIP CRC failure: {corrupt_name}")
+            entries = _normalized_file_entries(archive)
+            return {
+                name: archive.read(info)
+                for name, info in entries.items()
+            }
 
 
 def working_tree_source_files(
