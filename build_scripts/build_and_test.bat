@@ -65,7 +65,15 @@ python -m bandit -r src scripts -lll -c pyproject.toml
 if errorlevel 1 exit /b 1
 
 echo [7/9] Building directly from the exact committed source...
-powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\build_windows_final.ps1" -Version "%VERSION%" -Commit "%RELEASE_COMMIT%"
+set "POWERSHELL_EXE="
+where pwsh.exe >nul 2>&1
+if not errorlevel 1 set "POWERSHELL_EXE=pwsh.exe"
+if not defined POWERSHELL_EXE set "POWERSHELL_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%POWERSHELL_EXE%" if /i not "%POWERSHELL_EXE%"=="pwsh.exe" (
+    echo [ERROR] No supported PowerShell executable was found.
+    exit /b 1
+)
+"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File ".\scripts\build_windows_final.ps1" -Version "%VERSION%" -Commit "%RELEASE_COMMIT%"
 if errorlevel 1 exit /b 1
 
 set "ZIP_NAME=hunterX_windows_%VERSION%_final.zip"

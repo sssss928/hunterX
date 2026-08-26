@@ -167,6 +167,8 @@ def test_windows_build_isolates_runtimes_and_packages_license() -> None:
     assert 'contents_directory=\'_settings_internal\'' in settings_spec
     assert "python -m pytest" in build_batch
     assert "python -m pip_audit" in build_batch
+    assert "where pwsh.exe" in build_batch
+    assert "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" in build_batch
     assert '-Commit "%RELEASE_COMMIT%"' in build_batch
     assert "BASE_ARCHIVE" not in build_batch
     assert 'dist\\nodriver_tixcraft\\_internal' not in build_script
