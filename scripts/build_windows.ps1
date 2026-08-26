@@ -11,7 +11,7 @@ param(
     [string] $Commit,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet('rc2', 'rc3', 'final')]
+    [ValidateSet('rc2', 'rc3')]
     [string] $Qualifier
 )
 

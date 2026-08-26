@@ -17,7 +17,6 @@ FULL_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 RELEASE_QUALIFIERS = frozenset({"rc", "rc2", "rc3", "final"})
 RC2_QUALIFIER = "rc2"
 RC3_QUALIFIER = "rc3"
-FINAL_QUALIFIER = "final"
 
 
 def is_valid_semver(version: str) -> bool:
@@ -83,18 +82,6 @@ def require_candidate_qualifier(qualifier: str | None) -> str:
     return normalized
 
 
-def require_build_qualifier(qualifier: str | None) -> str:
-    """Require an explicitly supported committed RC or FINAL profile."""
-
-    normalized = normalize_qualifier(qualifier)
-    if normalized not in {RC2_QUALIFIER, RC3_QUALIFIER, FINAL_QUALIFIER}:
-        raise ValueError(
-            "Release build pipeline requires qualifier 'rc2', 'rc3', or 'final'; "
-            f"refusing {qualifier!r}."
-        )
-    return normalized
-
-
 def resolve_version(
     event_name: str,
     ref_name: str,
@@ -113,7 +100,7 @@ def resolve_version(
     if not ref_name.startswith("v"):
         raise ValueError(f"Tag release must use v-prefixed refs such as v0.1.0, got {ref_name!r}.")
     tag_version = ref_name[1:]
-    if normalized_qualifier and normalized_qualifier != FINAL_QUALIFIER:
+    if normalized_qualifier:
         expected_suffix = f"-{normalized_qualifier}"
         if not tag_version.casefold().endswith(expected_suffix):
             raise ValueError(
@@ -121,10 +108,6 @@ def resolve_version(
                 f"got {ref_name!r}."
             )
         tag_version = tag_version[: -len(expected_suffix)]
-    elif normalized_qualifier == FINAL_QUALIFIER and "-" in tag_version:
-        raise ValueError(
-            f"FINAL release tag must be the official vX.Y.Z tag without a suffix, got {ref_name!r}."
-        )
     return validate_semver(tag_version)
 
 

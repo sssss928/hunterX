@@ -27,9 +27,9 @@ def build_source_archive(
     normalized_version = release_utils.validate_semver(version)
     normalized_qualifier = release_utils.normalize_qualifier(qualifier)
     if normalized_qualifier is not None:
-        release_utils.require_build_qualifier(normalized_qualifier)
+        release_utils.require_candidate_qualifier(normalized_qualifier)
     if working_tree and normalized_qualifier is not None:
-        raise ValueError("Release artifacts must not be built from a working tree")
+        raise ValueError("RC source artifacts must not be built from a working tree")
     prefix = release_utils.source_archive_prefix(normalized_version)
     expected_output_name = release_utils.artifact_name(
         normalized_version,
@@ -133,11 +133,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--commit", required=True)
     parser.add_argument(
         "--qualifier",
-        choices=(
-            release_utils.RC2_QUALIFIER,
-            release_utils.RC3_QUALIFIER,
-            release_utils.FINAL_QUALIFIER,
-        ),
+        choices=(release_utils.RC2_QUALIFIER, release_utils.RC3_QUALIFIER),
         required=True,
     )
     return parser

@@ -122,11 +122,9 @@ def test_release_helpers_and_packaged_readme_match_current_version() -> None:
     quick_start = Path("build_scripts/QUICK_START.md").read_text(encoding="utf-8")
     build_batch = Path("build_scripts/build_and_test.bat").read_text(encoding="utf-8")
 
-    assert "hunterX_windows_0.5.2_final.zip" in release_readme
-    assert "hunterX_windows_0.5.2_final.zip" in quick_start
-    assert "hunterX_windows_%VERSION%_final.zip" in build_batch
-    assert "hunterX_windows_0.5.2_rc3.zip" in build_batch
-    assert "-Qualifier final" in build_batch
+    assert "hunterX_windows_0.5.2_rc3.zip" in release_readme
+    assert "hunterX_windows_0.5.2_rc3.zip" in quick_start
+    assert "hunterX_windows_%VERSION%_rc3.zip" in build_batch
     assert "project-version --metadata src\\hunter_metadata.py" in build_batch
     assert "validate-project-version --version" in build_batch
     assert "scripts\\build_windows.ps1" in build_batch
@@ -162,9 +160,9 @@ def test_windows_build_isolates_runtimes_and_packages_license() -> None:
     assert 'contents_directory=\'_settings_internal\'' in settings_spec
     assert "python -m pytest" in build_batch
     assert "python -m pip_audit" in build_batch
-    assert 'BASE_ARCHIVE=dist\\base\\hunterX_windows_0.5.2_rc3.zip' in build_batch
+    assert 'BASE_ARCHIVE=dist\\base\\hunterX_windows_0.5.2_rc2.zip' in build_batch
     assert '-BaseArchive "%BASE_ARCHIVE%"' in build_batch
-    assert '-Commit "%RELEASE_COMMIT%" -Qualifier final' in build_batch
+    assert '-Commit "%RELEASE_COMMIT%" -Qualifier rc3' in build_batch
     assert 'dist\\nodriver_tixcraft\\_internal' not in build_script
     assert 'dist\\settings\\_internal' not in build_script
     assert "taskkill" not in build_batch.lower()

@@ -1,4 +1,4 @@
-HunterX 0.5.2 FINAL Windows 成品包
+HunterX 0.5.1 Windows 成品包
 ============================
 
 這是可直接執行的 64 位元 Windows 版本，不需要另外安裝 Python，也不需要
@@ -6,24 +6,13 @@ HunterX 0.5.2 FINAL Windows 成品包
 
 使用方式：
 
-1. 將 hunterX_windows_0.5.2_final.zip 完整解壓縮到一般資料夾。
+1. 將 hunterX_windows_0.5.1.zip 完整解壓縮到一般資料夾。
 2. 保留 settings.exe、nodriver_tixcraft.exe、_settings_internal、
    _nodriver_internal、assets 與 www 的相對位置，不要只複製單一 EXE。
 3. 雙擊 settings.exe 開啟設定介面。
 4. 第一次儲存設定後，程式會在根目錄建立 settings.json；發行 ZIP 刻意不
    夾帶任何人的舊設定、帳號、Cookie 或工作階段資料。
 5. 在設定介面按下啟動後，settings.exe 會自動呼叫 nodriver_tixcraft.exe。
-
-資料夾結構：
-
-- settings.exe、nodriver_tixcraft.exe：兩個正式入口。
-- _settings_internal、_nodriver_internal：各自的必要執行環境，不可刪除、
-  改名、合併或移到其他資料夾。
-- assets、www：執行介面資源，不可刪除。
-- guide：使用說明。
-- docs/release-audit：技術驗證與發布稽核；一般使用不需開啟，但保留可追溯性。
-- 根目錄只保留使用者說明、授權、版本資訊與必要 provenance，歷史報告不再
-  散落於根目錄。
 
 若 Windows 顯示來源或 SmartScreen 提醒，請先核對 ZIP 的 SHA-256，再依你
 自己的安全政策決定是否執行；本程式不要求系統管理員權限，也不建議停用防毒
@@ -32,7 +21,3 @@ HunterX 0.5.2 FINAL Windows 成品包
 驗證碼、Cloudflare、Queue-it、會員資格、購票限制與付款仍由售票平台控制。
 本版本不繞過平台保護，也無法保證庫存或購票結果。正式售票前請用相同的
 Windows、瀏覽器、帳號、網路與設定進行合法演練，並確認系統時間同步。
-
-發布資格說明：兩項 8 小時 actual-browser soak 由使用者明確豁免，並未執行
-完成或宣稱通過；其餘 regression、封裝 smoke、source/Windows parity 與
-SHA-256 驗證仍為必要門檻。詳見 FINAL_8H_SOAK_WAIVER.json。

@@ -34,12 +34,12 @@ build_scripts\build_and_test.bat
 - 測試摘要保存至 `dist/release/test_report_{VERSION}.txt`
 
 ✅ **發布 ZIP 生成**
-- 自動打包成 `dist/release/hunterX_windows_{VERSION}_final.zip`
+- 自動打包成 `dist/release/hunterX_windows_{VERSION}_rc3.zip`
 - 版本號讀自 `src/hunter_metadata.py`，且與建置參數不一致時拒絕建置
 
 ### 輸出檔案
 
-- `dist/release/hunterX_windows_0.5.2_final.zip` - FINAL 發布 ZIP
+- `dist/release/hunterX_windows_0.5.2_rc3.zip` - RC3 發布 ZIP
 - `dist/release/test_report_0.5.2.txt` - 本機品質檢查摘要
 
 ### 執行時間
@@ -123,7 +123,7 @@ dist/
 │   ├── www/
 │   └── CHANGELOG.md
 └── release/
-    ├── hunterX_windows_0.5.2_final.zip  ← FINAL 發布 ZIP
+    ├── hunterX_windows_0.5.2_rc3.zip  ← RC3 發布 ZIP
     └── test_report_0.5.2.txt          ← 本機品質檢查摘要
 ```
 

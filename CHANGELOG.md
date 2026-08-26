@@ -14,9 +14,8 @@
 - Add HunterX-owned task tracking, bounded redacted debug traces, low-frequency
   resource diagnostics, multi-tab/multi-instance stress and actual-browser
   synthetic soak tooling.
-- Publish the official v0.5.2 artifact set after the user explicitly waived
-  the two eight-hour actual-browser gates. The waiver is recorded and machine
-  verified; neither gate is represented as executed or passed.
+- This delivery is an RC because the required two 8-hour actual-browser soaks
+  were not completed; see `LONG_RUN_STABILITY_REPORT_v0.5.2.md`.
 
 ## v0.5.1
 

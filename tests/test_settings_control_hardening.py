@@ -1145,28 +1145,28 @@ def test_settings_server_shutdown_closes_listener(
     )
     monkeypatch.setattr(settings, "_create_ocr_engine", lambda: None)
     opened_urls: list[str] = []
-    browser_opened = threading.Event()
+browser_opened = threading.Event()
 
 
-    def _record_opened_url(url: str) -> bool:
-        opened_urls.append(url)
-        browser_opened.set()
-        return False
+def _record_opened_url(url: str) -> bool:
+    opened_urls.append(url)
+    browser_opened.set()
+    return False
 
 
-    monkeypatch.setattr(
-        settings.webbrowser,
-        "open_new",
-        _record_opened_url,
-    )
+monkeypatch.setattr(
+    settings.webbrowser,
+    "open_new",
+    _record_opened_url,
+)
 
-    thread = settings.start_web_server_background(startup_timeout=3.0)
-    assert isinstance(thread, threading.Thread)
-    assert settings.util.is_connectable(port, host="127.0.0.1")
+thread = settings.start_web_server_background(startup_timeout=3.0)
+assert isinstance(thread, threading.Thread)
+assert settings.util.is_connectable(port, host="127.0.0.1")
 
-    session = settings.requests.Session()
-    assert browser_opened.wait(timeout=3.0)
-    assert len(opened_urls) == 1
+session = settings.requests.Session()
+assert browser_opened.wait(timeout=3.0)
+assert len(opened_urls) == 1
     assert f"{settings.CONST_CONTROL_BOOTSTRAP_QUERY}=" in opened_urls[0]
     bootstrap = session.get(opened_urls[0], timeout=2.0)
     assert bootstrap.status_code == 200

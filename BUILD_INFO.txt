@@ -1,26 +1,24 @@
 Project: HunterX
 Repository: https://github.com/sssss928/hunterX
-Artifact version: v0.5.2 FINAL (explicit 8H waiver)
-Windows binary base: HunterX v0.5.2 RC3
-RC3 Windows ZIP SHA-256: F2EC4F918E50DE5C78C2303A184EF54B0CE69D1BA2F87D34365D87BE59D46CD9
+Artifact version: v0.5.2 RC3
+Final-Layer product base: HunterX v0.5.2 RC2
+RC2 source ZIP SHA-256: 3B4682DAB728C951475409BD2E46078456A074386487DF376A3EA98533138B36
+RC2 Windows ZIP SHA-256: 47747A962CF5C4AE49654AEC574CA64AC52C27032FC5B1EC1F70D83C3D09DA48
 Reference only: bouob/tickets_hunter v2026.08.17 commit 1b053c4a705c41238aa365ff7960d1afe1a7987c
 Reference comparison start: v2026.08.07 commit 5793ee6daba562c42c902a1b84625528e421f849
 Change scope: authoritative terminal-browser-failure lifecycle handling,
               TicketPlus custom-dictionary checkout boundary enforcement,
-              focused regression tests and FINAL release verification
+              focused regression tests and RC3 release verification
 Unchanged scope: existing date/area/ticket/quantity selection, allow_less_tickets,
                  CAPTCHA/manual fallback, challenge and checkout/payment boundaries,
                  notifications, profiles, multi-instance behavior, TixCraft,
                  Ticketmaster and KKTIX production implementations
-Build date: 2026-08-25
+Build date: 2026-08-24
 Timezone: Asia/Taipei (UTC+08:00)
 Target Windows runtime: CPython 3.11 x64 / isolated dual-executable PyInstaller layout
-Windows packaging method: clean exact-commit source snapshot overlay on the byte-verified v0.5.2 RC3 Windows runtime
-Native Windows build command: scripts\build_windows.ps1 -Version 0.5.2 -BaseArchive dist\base\hunterX_windows_0.5.2_rc3.zip -Commit <40-hex-HEAD> -Qualifier final
-Windows layout: executables and required runtime/resource directories at root;
-                technical evidence organized under docs\release-audit;
-                inherited RC/RC2/RC3 root-level report clutter removed
+Windows packaging method: clean exact-commit Final-Layer source snapshot overlay on the byte-verified v0.5.2 RC2 Windows runtime
+Native Windows build command: scripts\build_windows.ps1 -Version 0.5.2 -BaseArchive dist\base\hunterX_windows_0.5.2_rc2.zip -Commit <40-hex-HEAD> -Qualifier rc3
 
 Final-Layer evidence is listed in RC3_BUILD_PROVENANCE.json and the
-FINAL_LAYER_*.md reports. The two 8-hour actual-browser gates are explicitly
-USER WAIVED / NOT VERIFIED. FINAL_BUILD_PROVENANCE.json must preserve that fact.
+FINAL_LAYER_*.md reports. 8H SOAK NOT VERIFIED, so this build is RC3 and must never be
+represented, named, verified or published as FINAL.

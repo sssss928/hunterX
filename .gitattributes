@@ -1,6 +1,2 @@
 * whitespace=trailing-space,space-before-tab,cr-at-eol
 /reports export-ignore
-/FINAL_8H_SINGLE_INSTANCE_SOAK.json -text
-/FINAL_8H_THREE_NAMED_INSTANCES_SOAK.json -text
-/FINAL_QUALIFICATION_CONTEXT.json -text
-/FINAL_8H_SOAK_WAIVER.json -text

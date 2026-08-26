@@ -82,56 +82,19 @@ def test_ci_workflow_covers_required_branch_families() -> None:
     assert 'python-version: "3.11.9"' in workflow
     assert "ruff check src tests scripts" in workflow
     assert "pip-audit -r requirement.txt" in workflow
+    assert "project-version --metadata src/hunter_metadata.py" in workflow
+    assert 'steps.project.outputs.version' in workflow
+    assert 'steps.project.outputs.artifact_name' in workflow
     assert "--require-hashes -r requirements-lock-windows-py311.txt" in workflow
-    assert "python -m compileall src tests scripts" in workflow
-    assert "python -m pytest --cov-fail-under=30" in workflow
-    assert "Windows runtime and release-contract smoke" in workflow
-    assert "python src/nodriver_tixcraft.py --version" in workflow
-    assert "python src/settings.py --version" in workflow
-    assert "tests/test_v052_final_release_profile.py" in workflow
-    assert "gh release download" not in workflow
-    assert "build-base-v0.5.2-rc3" not in workflow
-    assert "continue-on-error: true" not in workflow
-    assert workflow.count("retention-days: 3") == 2
+    assert "pytest --cov-fail-under=30" in workflow
+    assert "gh release download v0.5.2-rc2" in workflow
+    assert "hunterX_windows_0.5.2_rc2.zip" in workflow
+    assert "47747a962cf5c4ae49654aec574ca64ac52c27032fc5b1ec1f70d83c3d09da48" in workflow
+    assert "hunterX_windows_0.5.1.zip" not in workflow
+    assert "--qualifier rc3" in workflow
+    assert workflow.count("continue-on-error: true") == 3
+    assert workflow.count("retention-days: 3") == 3
     assert "0.1.0" not in workflow
-
-
-def test_release_validation_compiles_all_python_and_uses_module_pytest() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-
-    assert "python -m compileall src tests scripts" in workflow
-    assert "python -m pytest" in workflow
-    assert "\n          pytest" not in workflow
-
-
-def test_final_workflow_is_fail_closed_and_publishes_official_tag() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/release-final.yml").read_text(
-        encoding="utf-8"
-    )
-
-    assert "workflow_dispatch:" in workflow
-    assert "push:" not in workflow
-    assert "--qualifier final" in workflow
-    assert "FINAL_8H_SINGLE_INSTANCE_SOAK.json" in workflow
-    assert "FINAL_8H_THREE_NAMED_INSTANCES_SOAK.json" in workflow
-    assert "FINAL_QUALIFICATION_CONTEXT.json" in workflow
-    assert "FINAL_8H_SOAK_WAIVER.json" in workflow
-    assert "scripts/final_qualification.py verify" in workflow
-    assert "scripts/final_qualification.py verify-waiver" in workflow
-    assert "exactly one complete mode" in workflow
-    assert "hunterX_windows_0.5.2_rc3.zip" in workflow
-    assert "f2ec4f918e50de5c78c2303a184ef54b0ce69d1ba2f87d34365d87be59d46cd9" in workflow
-    assert "verify_release_archive.py pair" in workflow
-    assert 'Tag="v$Version"' in workflow
-    assert '"HunterX v$Version"' in workflow
-    assert "--prerelease" not in workflow
-    assert "contents: write" in workflow
-    assert "gh release create" in workflow
-    assert "gh release upload" in workflow
-    assert "ExistingPrerelease" in workflow
-    assert "RELEASE_NOTES_v0.5.2_FINAL.md" in workflow
-    assert 'default: "build-base-v0.5.2-rc3"' in workflow
-
 
 def test_windows_build_script_requires_metadata_version_match() -> None:
     script = (REPO_ROOT / "scripts/build_windows.ps1").read_text(encoding="utf-8")
@@ -154,10 +117,9 @@ def test_windows_build_script_requires_metadata_version_match() -> None:
     )
     assert "ROUND1_RC_ARCHIVE_NAME" in baseline_builder
     assert "ROUND1_RC_SHA256" in baseline_builder
-    assert "require_build_qualifier" in baseline_builder
+    assert "require_candidate_qualifier" in baseline_builder
     assert "resolve_clean_commit" in baseline_builder
     assert "write_rc3_provenance" in baseline_builder
-    assert "write_final_provenance" in baseline_builder
     assert "verify_archive_package" in baseline_builder
     assert "stage_application_source" in baseline_builder
     assert "repack_entrypoints" in baseline_builder

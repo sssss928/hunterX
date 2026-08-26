@@ -16,15 +16,6 @@ from pathlib import Path, PurePosixPath
 
 import release_utils
 from build_windows_archive import build_windows_archive
-from final_qualification import (
-    CONTEXT_NAME as FINAL_QUALIFICATION_CONTEXT_NAME,
-    SINGLE_EVIDENCE_NAME as FINAL_SINGLE_EVIDENCE_NAME,
-    THREE_EVIDENCE_NAME as FINAL_THREE_EVIDENCE_NAME,
-    WAIVER_NAME as FINAL_WAIVER_NAME,
-    sha256_bytes,
-    validate_context_bytes,
-    validate_waiver_bytes,
-)
 from verify_release_archive import verify_windows_archive
 from v052_packaged_smoke import verify_archive_package
 
@@ -38,10 +29,6 @@ RC2_WINDOWS_BASE_NAME = "hunterX_windows_0.5.2_rc2.zip"
 RC2_WINDOWS_BASE_SHA256 = (
     "47747a962cf5c4ae49654aec574ca64ac52c27032fc5b1ec1f70d83c3d09da48"
 )
-RC3_WINDOWS_BASE_NAME = "hunterX_windows_0.5.2_rc3.zip"
-RC3_WINDOWS_BASE_SHA256 = (
-    "f2ec4f918e50de5c78c2303a184ef54b0ce69d1ba2f87d34365d87be59d46cd9"
-)
 SUPPORTED_BASE_ARCHIVES = {
     BASELINE_ARCHIVE_NAME: (BASELINE_SHA256, "verified v0.5.1 Windows runtime"),
     ROUND1_RC_ARCHIVE_NAME: (
@@ -51,10 +38,6 @@ SUPPORTED_BASE_ARCHIVES = {
     RC2_WINDOWS_BASE_NAME: (
         RC2_WINDOWS_BASE_SHA256,
         "verified Final-Layer v0.5.2 RC2 Windows runtime",
-    ),
-    RC3_WINDOWS_BASE_NAME: (
-        RC3_WINDOWS_BASE_SHA256,
-        "verified Final-Layer v0.5.2 RC3 Windows runtime",
     ),
 }
 RUNTIME_LAYOUTS = {
@@ -116,64 +99,8 @@ RC3_REQUIRED_DOCUMENTS = (
     "FINAL_LAYER_ARTIFACT_VERIFICATION.md",
     "FINAL_LAYER_FAILURE_FIX_LOG.md",
     "FINAL_LAYER_REQUIREMENT_TRACEABILITY.md",
-    "FINAL_PRE_RELEASE_AUDIT_v0.5.2.md",
-    "FINAL_ROOT_CAUSE_REPORT_v0.5.2.md",
-    "FINAL_IMPLEMENTATION_DIFF_v0.5.2.md",
-    "FINAL_TEST_REPORT_v0.5.2.md",
-    "FINAL_PERFORMANCE_REPORT_v0.5.2.md",
-    "FINAL_RC2_RC3_FINAL_PERFORMANCE_COMPARISON.md",
-    "FINAL_USER_DICTIONARY_ACCEPTANCE_v0.5.2.md",
-    "FINAL_BROWSER_RECOVERY_AUDIT_v0.5.2.md",
-    "FINAL_MULTI_INSTANCE_AUDIT_v0.5.2.md",
-    "FINAL_LONG_RUN_REPORT_v0.5.2.md",
-    "FINAL_GITHUB_ACTIONS_AUDIT_v0.5.2.md",
-    "FINAL_ARTIFACT_VERIFICATION_v0.5.2.md",
-    "FINAL_REQUIREMENT_TRACEABILITY_v0.5.2.md",
-    "FINAL_FAILURE_FIX_LOG_v0.5.2.md",
 )
 RC3_PROVENANCE_NAME = "RC3_BUILD_PROVENANCE.json"
-FINAL_CORE_REQUIRED_DOCUMENTS = RC3_REQUIRED_DOCUMENTS + (
-    "FINAL_RELEASE_AUDIT_v0.5.2.md",
-    "RELEASE_NOTES_v0.5.2_FINAL.md",
-)
-FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS = (
-    "IMPLEMENTATION_DIFF_v0.5.2_FINAL.md",
-    "PLATFORM_COMPLETION_LATCH_AUDIT.md",
-    "REFRESH_OWNERSHIP_MATRIX_v0.5.2.md",
-    "ROUTE_REARM_MATRIX_v0.5.2.md",
-    "TEST_REPORT_v0.5.2_FINAL.md",
-)
-FINAL_ROOT_DOCUMENTS = (
-    "BUILD_INFO.txt",
-    "CHANGELOG.md",
-    "LEGAL_NOTICE.md",
-    "LICENSE",
-    "RELEASE_NOTES_v0.5.2_FINAL.md",
-    "WINDOWS_PACKAGE_zh-TW.txt",
-)
-FINAL_AUDIT_REQUIRED_DOCUMENTS = tuple(
-    name for name in FINAL_CORE_REQUIRED_DOCUMENTS if name not in FINAL_ROOT_DOCUMENTS
-)
-FINAL_AUDIT_DIRECTORY = Path("docs") / "release-audit"
-FINAL_ALLOWED_BASE_DIRECTORIES = frozenset(
-    {
-        "_nodriver_internal",
-        "_settings_internal",
-        "assets",
-        "guide",
-        "www",
-    }
-)
-FINAL_RUNTIME_EXECUTABLES = frozenset({"nodriver_tixcraft.exe", "settings.exe"})
-FINAL_STRICT_QUALIFICATION_DOCUMENTS = (
-    FINAL_SINGLE_EVIDENCE_NAME,
-    FINAL_THREE_EVIDENCE_NAME,
-    FINAL_QUALIFICATION_CONTEXT_NAME,
-)
-FINAL_REQUIRED_DOCUMENTS = (
-    FINAL_CORE_REQUIRED_DOCUMENTS + FINAL_STRICT_QUALIFICATION_DOCUMENTS
-)
-FINAL_PROVENANCE_NAME = "FINAL_BUILD_PROVENANCE.json"
 
 
 def sha256_file(path: Path) -> str:
@@ -259,12 +186,12 @@ def extract_verified_baseline(
             f"{sorted(SUPPORTED_BASE_ARCHIVES)!r}, not {base_archive.name!r}"
         )
     if qualifier is not None:
-        normalized_qualifier = release_utils.require_build_qualifier(qualifier)
-        required_base = {
-            release_utils.RC2_QUALIFIER: ROUND1_RC_ARCHIVE_NAME,
-            release_utils.RC3_QUALIFIER: RC2_WINDOWS_BASE_NAME,
-            release_utils.FINAL_QUALIFIER: RC3_WINDOWS_BASE_NAME,
-        }[normalized_qualifier]
+        normalized_qualifier = release_utils.require_candidate_qualifier(qualifier)
+        required_base = (
+            ROUND1_RC_ARCHIVE_NAME
+            if normalized_qualifier == release_utils.RC2_QUALIFIER
+            else RC2_WINDOWS_BASE_NAME
+        )
         profile_label = normalized_qualifier.upper()
         if base_archive.name != required_base:
             if normalized_qualifier == release_utils.RC2_QUALIFIER:
@@ -386,28 +313,6 @@ def stage_application_source(project_root: Path, destination: Path) -> None:
             raise ValueError(f"runtime source contains local state: {candidate}")
 
 
-def prune_final_package_root(package_root: Path) -> None:
-    """Remove inherited release clutter without touching runtime directories.
-
-    The verified RC3 base contains historical reports at archive root. FINAL
-    keeps only both executables there, then overlays a bounded end-user document
-    set and places technical evidence under ``docs/release-audit``. Unexpected
-    root directories fail closed because silently deleting an unknown runtime
-    directory could break the packaged application.
-    """
-
-    for child in package_root.iterdir():
-        if child.is_dir():
-            if child.name not in FINAL_ALLOWED_BASE_DIRECTORIES:
-                raise ValueError(
-                    f"FINAL baseline contains an unexpected root directory: {child.name}"
-                )
-            continue
-        if child.name in FINAL_RUNTIME_EXECUTABLES:
-            continue
-        child.unlink()
-
-
 def overlay_release_files(
     project_root: Path,
     package_root: Path,
@@ -415,31 +320,18 @@ def overlay_release_files(
     qualifier: str | None = None,
 ) -> None:
     source_root = project_root / "src"
-    normalized_qualifier = (
-        release_utils.require_build_qualifier(qualifier)
-        if qualifier is not None
-        else None
-    )
-    is_final = normalized_qualifier == release_utils.FINAL_QUALIFIER
-    root_documents = FINAL_ROOT_DOCUMENTS if is_final else TOP_LEVEL_DOCUMENTS
-    for name in root_documents:
+    for name in TOP_LEVEL_DOCUMENTS:
         source = project_root / name
-        if not source.is_file():
-            if is_final:
-                raise FileNotFoundError(f"FINAL end-user document is missing: {source}")
-            continue
-        shutil.copy2(source, package_root / name)
+        if source.is_file():
+            shutil.copy2(source, package_root / name)
 
-    if normalized_qualifier is not None:
-        required_documents = {
-            release_utils.RC2_QUALIFIER: RC2_REQUIRED_DOCUMENTS,
-            release_utils.RC3_QUALIFIER: RC3_REQUIRED_DOCUMENTS,
-            release_utils.FINAL_QUALIFIER: FINAL_AUDIT_REQUIRED_DOCUMENTS,
-        }[normalized_qualifier]
-        evidence_root = package_root
-        if is_final:
-            evidence_root = package_root / FINAL_AUDIT_DIRECTORY
-            evidence_root.mkdir(parents=True, exist_ok=True)
+    if qualifier is not None:
+        normalized_qualifier = release_utils.require_candidate_qualifier(qualifier)
+        required_documents = (
+            RC2_REQUIRED_DOCUMENTS
+            if normalized_qualifier == release_utils.RC2_QUALIFIER
+            else RC3_REQUIRED_DOCUMENTS
+        )
         for name in required_documents:
             source = project_root / name
             if not source.is_file():
@@ -447,27 +339,7 @@ def overlay_release_files(
                     f"{normalized_qualifier.upper()} required release report is missing: "
                     f"{source}"
                 )
-            shutil.copy2(source, evidence_root / name)
-        if is_final:
-            for name in FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS:
-                source = project_root / name
-                if not source.is_file():
-                    raise FileNotFoundError(
-                        f"FINAL supplemental audit document is missing: {source}"
-                    )
-                shutil.copy2(source, evidence_root / name)
-            strict_paths = [project_root / name for name in FINAL_STRICT_QUALIFICATION_DOCUMENTS]
-            has_strict_evidence = all(path.is_file() for path in strict_paths)
-            waiver_path = project_root / FINAL_WAIVER_NAME
-            has_waiver = waiver_path.is_file()
-            if has_strict_evidence == has_waiver:
-                raise FileNotFoundError(
-                    "FINAL build requires exactly one qualification mode: complete "
-                    "eight-hour evidence or explicit user waiver"
-                )
-            selected_paths = strict_paths if has_strict_evidence else [waiver_path]
-            for source in selected_paths:
-                shutil.copy2(source, evidence_root / source.name)
+            shutil.copy2(source, package_root / name)
 
     release_readme = project_root / "build_scripts" / "README_Release.txt"
     if not release_readme.is_file():
@@ -555,90 +427,6 @@ def write_rc3_provenance(
     return destination
 
 
-def write_final_provenance(
-    package_root: Path,
-    *,
-    version: str,
-    source_commit: str,
-    base_archive: Path,
-    repo_root: Path,
-) -> Path:
-    """Write exact FINAL provenance for completed or explicitly waived soak gates."""
-
-    if base_archive.name != RC3_WINDOWS_BASE_NAME:
-        raise ValueError(f"FINAL provenance refuses non-RC3 base: {base_archive.name}")
-    actual_base_sha256 = sha256_file(base_archive)
-    if actual_base_sha256 != RC3_WINDOWS_BASE_SHA256:
-        raise ValueError("FINAL provenance refuses an unverified RC3 base")
-
-    payload: dict[str, object] = {
-        "schema": 1,
-        "version": release_utils.validate_semver(version),
-        "qualifier": release_utils.FINAL_QUALIFIER,
-        "source_commit": source_commit,
-        "windows_base_name": RC3_WINDOWS_BASE_NAME,
-        "windows_base_sha256": RC3_WINDOWS_BASE_SHA256,
-        "clean_committed_snapshot": True,
-    }
-    evidence_root = package_root / FINAL_AUDIT_DIRECTORY
-    waiver_path = evidence_root / FINAL_WAIVER_NAME
-    if waiver_path.is_file():
-        waiver_content = waiver_path.read_bytes()
-        validate_waiver_bytes(waiver_content)
-        runtime_src_tree = subprocess.run(
-            ["git", "rev-parse", f"{source_commit}:src"],
-            cwd=repo_root,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="ascii",
-        ).stdout.strip()
-        payload.update(
-            {
-                "qualification_mode": "USER_WAIVED_8H_GATES",
-                "runtime_source_commit": source_commit,
-                "runtime_src_tree": runtime_src_tree,
-                "waiver_sha256": sha256_bytes(waiver_content),
-                "eight_hour_single_instance_soak_verified": False,
-                "eight_hour_three_named_instances_soak_verified": False,
-                "eight_hour_soak_verified": False,
-                "final_eligible": False,
-                "user_approved_final_without_eight_hour_soak": True,
-            }
-        )
-    else:
-        single_content = (evidence_root / FINAL_SINGLE_EVIDENCE_NAME).read_bytes()
-        three_content = (evidence_root / FINAL_THREE_EVIDENCE_NAME).read_bytes()
-        context_content = (evidence_root / FINAL_QUALIFICATION_CONTEXT_NAME).read_bytes()
-        context = validate_context_bytes(
-            context_content=context_content,
-            single_content=single_content,
-            three_content=three_content,
-            repo_root=repo_root,
-            release_commit=source_commit,
-        )
-        payload.update(
-            {
-                "runtime_source_commit": context["runtime_source_commit"],
-                "runtime_src_tree": context["runtime_src_tree"],
-                "single_evidence_sha256": sha256_bytes(single_content),
-                "three_evidence_sha256": sha256_bytes(three_content),
-                "qualification_mode": "COMPLETED_8H_GATES",
-                "eight_hour_single_instance_soak_verified": True,
-                "eight_hour_three_named_instances_soak_verified": True,
-                "eight_hour_soak_verified": True,
-                "final_eligible": True,
-                "user_approved_final_without_eight_hour_soak": False,
-            }
-        )
-    destination = package_root / FINAL_PROVENANCE_NAME
-    destination.write_text(
-        json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
-        encoding="ascii",
-    )
-    return destination
-
-
 def repack_entrypoints(package_root: Path) -> None:
     # Import lazily so source-only checks do not need PyInstaller installed.
     from repack_pyinstaller_entrypoint import repack
@@ -685,7 +473,7 @@ def build_from_verified_baseline(
     qualifier: str,
 ) -> Path:
     normalized_version = release_utils.validate_semver(version)
-    normalized_qualifier = release_utils.require_build_qualifier(qualifier)
+    normalized_qualifier = release_utils.require_candidate_qualifier(qualifier)
     expected_output_name = release_utils.artifact_name(
         normalized_version,
         qualifier=normalized_qualifier,
@@ -722,36 +510,23 @@ def build_from_verified_baseline(
             staged_package,
             qualifier=normalized_qualifier,
         )
-        if normalized_qualifier == release_utils.FINAL_QUALIFIER:
-            prune_final_package_root(staged_package)
         overlay_release_files(
             release_root,
             staged_package,
             qualifier=normalized_qualifier,
         )
         repack_entrypoints(staged_package)
-        if normalized_qualifier == release_utils.RC2_QUALIFIER:
-            write_rc2_provenance(
-                staged_package,
-                version=normalized_version,
-                source_commit=verified_commit,
-                base_archive=resolved_base_archive,
-            )
-        elif normalized_qualifier == release_utils.RC3_QUALIFIER:
-            write_rc3_provenance(
-                staged_package,
-                version=normalized_version,
-                source_commit=verified_commit,
-                base_archive=resolved_base_archive,
-            )
-        else:
-            write_final_provenance(
-                staged_package,
-                version=normalized_version,
-                source_commit=verified_commit,
-                base_archive=resolved_base_archive,
-                repo_root=project_root.resolve(),
-            )
+        provenance_writer = (
+            write_rc2_provenance
+            if normalized_qualifier == release_utils.RC2_QUALIFIER
+            else write_rc3_provenance
+        )
+        provenance_writer(
+            staged_package,
+            version=normalized_version,
+            source_commit=verified_commit,
+            base_archive=resolved_base_archive,
+        )
 
         staged_archive = temporary_parent / expected_output_name
         build_windows_archive(staged_package, staged_archive)
@@ -783,11 +558,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--commit", required=True)
     parser.add_argument(
         "--qualifier",
-        choices=(
-            release_utils.RC2_QUALIFIER,
-            release_utils.RC3_QUALIFIER,
-            release_utils.FINAL_QUALIFIER,
-        ),
+        choices=(release_utils.RC2_QUALIFIER, release_utils.RC3_QUALIFIER),
         required=True,
     )
     return parser
