@@ -1,8 +1,8 @@
 Project: HunterX
 Repository: https://github.com/sssss928/hunterX
 Artifact version: v0.5.2 FINAL (explicit 8H waiver)
-Windows binary base: HunterX v0.5.2 RC3
-RC3 Windows ZIP SHA-256: F2EC4F918E50DE5C78C2303A184EF54B0CE69D1BA2F87D34365D87BE59D46CD9
+Windows binary base: none (source-native build)
+RC Windows dependency: none
 Reference only: bouob/tickets_hunter v2026.08.17 commit 1b053c4a705c41238aa365ff7960d1afe1a7987c
 Reference comparison start: v2026.08.07 commit 5793ee6daba562c42c902a1b84625528e421f849
 Change scope: authoritative terminal-browser-failure lifecycle handling,
@@ -15,12 +15,13 @@ Unchanged scope: existing date/area/ticket/quantity selection, allow_less_ticket
 Build date: 2026-08-25
 Timezone: Asia/Taipei (UTC+08:00)
 Target Windows runtime: CPython 3.11 x64 / isolated dual-executable PyInstaller layout
-Windows packaging method: clean exact-commit source snapshot overlay on the byte-verified v0.5.2 RC3 Windows runtime
-Native Windows build command: scripts\build_windows.ps1 -Version 0.5.2 -BaseArchive dist\base\hunterX_windows_0.5.2_rc3.zip -Commit <40-hex-HEAD> -Qualifier final
+Windows packaging method: two isolated PyInstaller runtimes built directly from one clean exact-commit source snapshot
+Native Windows build command: scripts\build_windows_final.ps1 -Version 0.5.2 -Commit <40-hex-clean-HEAD>
 Windows layout: executables and required runtime/resource directories at root;
                 technical evidence organized under docs\release-audit;
-                inherited RC/RC2/RC3 root-level report clutter removed
+                no inherited RC runtime or RC root-level report clutter
 
-Final-Layer evidence is listed in RC3_BUILD_PROVENANCE.json and the
-FINAL_LAYER_*.md reports. The two 8-hour actual-browser gates are explicitly
+Final-Layer evidence is retained in the FINAL_LAYER_*.md reports. Exact source,
+runtime tree, toolchain, lock-file hash and qualification status are recorded in
+FINAL_BUILD_PROVENANCE.json schema 2. The two 8-hour actual-browser gates are explicitly
 USER WAIVED / NOT VERIFIED. FINAL_BUILD_PROVENANCE.json must preserve that fact.

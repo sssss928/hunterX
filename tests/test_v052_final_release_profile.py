@@ -10,12 +10,16 @@ import pytest
 import release_utils
 from build_source_archive import build_source_archive
 from build_windows_from_base import (
-    FINAL_PROVENANCE_NAME,
     RC3_WINDOWS_BASE_NAME,
     RC3_WINDOWS_BASE_SHA256,
     REQUIRED_BASE_FILES,
     extract_verified_baseline,
-    write_final_provenance,
+)
+from build_windows_final import (
+    EXPECTED_PYINSTALLER,
+    EXPECTED_PYTHON,
+    REQUIREMENTS_LOCK_NAME,
+    write_source_native_provenance,
 )
 from final_qualification import (
     CONTEXT_NAME,
@@ -28,6 +32,7 @@ from final_qualification import (
 )
 from verify_release_archive import (
     FINAL_AUDIT_PREFIX,
+    FINAL_PROVENANCE_NAME,
     FINAL_REQUIRED_DOCUMENTS,
     FINAL_ROOT_DOCUMENTS,
     FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS,
@@ -38,6 +43,7 @@ from write_release_checksums import verify_final_checksums, write_checksums
 
 
 VERSION = "0.5.2"
+LOCK_CONTENT = b"locked Windows runtime dependencies\n"
 
 
 def _windows_evidence_name(name: str) -> str:
@@ -147,6 +153,7 @@ def _release_repo(tmp_path: Path) -> tuple[Path, str, str, bytes, bytes, bytes]:
     (repo / "src" / "hunter_metadata.py").write_text(
         f'APP_VERSION = "{VERSION}"\n', encoding="utf-8"
     )
+    (repo / REQUIREMENTS_LOCK_NAME).write_bytes(LOCK_CONTENT)
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "qualified runtime")
     runtime_commit = _git(repo, "rev-parse", "HEAD")
@@ -225,14 +232,20 @@ def _windows_files(
     files[_windows_evidence_name(CONTEXT_NAME)] = context
     files[FINAL_PROVENANCE_NAME] = json.dumps(
         {
-            "schema": 1,
+            "schema": 2,
             "version": VERSION,
             "qualifier": "final",
+            "build_mode": "source_native",
             "source_commit": source_commit,
-            "runtime_source_commit": runtime_commit,
+            "runtime_source_commit": source_commit,
             "runtime_src_tree": runtime_src_tree,
-            "windows_base_name": RC3_WINDOWS_BASE_NAME,
-            "windows_base_sha256": RC3_WINDOWS_BASE_SHA256,
+            "python_version": ".".join(str(part) for part in EXPECTED_PYTHON),
+            "pyinstaller_version": EXPECTED_PYINSTALLER,
+            "requirements_lock_sha256": sha256_bytes(LOCK_CONTENT),
+            "windows_base_name": None,
+            "windows_base_sha256": None,
+            "qualification_runtime_source_commit": runtime_commit,
+            "qualification_runtime_src_tree": runtime_src_tree,
             "single_evidence_sha256": sha256_bytes(single),
             "three_evidence_sha256": sha256_bytes(three),
             "qualification_mode": "COMPLETED_8H_GATES",
@@ -358,9 +371,57 @@ def test_final_windows_archive_rejects_root_level_release_clutter(
         verify_windows_archive(archive, VERSION, qualifier="final")
 
 
+def test_final_windows_archive_rejects_legacy_base_provenance(
+    tmp_path: Path,
+) -> None:
+    repo, runtime, release_commit, single, three, context = _release_repo(tmp_path)
+    files = _windows_files(
+        source_commit=release_commit,
+        runtime_commit=runtime,
+        runtime_src_tree=_git(repo, "rev-parse", f"{release_commit}:src"),
+        single=single,
+        three=three,
+        context=context,
+    )
+    provenance = json.loads(files[FINAL_PROVENANCE_NAME])
+    provenance["windows_base_name"] = RC3_WINDOWS_BASE_NAME
+    provenance["windows_base_sha256"] = RC3_WINDOWS_BASE_SHA256
+    files[FINAL_PROVENANCE_NAME] = json.dumps(provenance).encode()
+    archive = tmp_path / "hunterX_windows_0.5.2_final.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        for name, content in files.items():
+            output.writestr(name, content)
+
+    with pytest.raises(ValueError, match="windows_base_name"):
+        verify_windows_archive(archive, VERSION, qualifier="final")
+
+
+def test_final_windows_archive_rejects_runtime_commit_divergence(
+    tmp_path: Path,
+) -> None:
+    repo, runtime, release_commit, single, three, context = _release_repo(tmp_path)
+    files = _windows_files(
+        source_commit=release_commit,
+        runtime_commit=runtime,
+        runtime_src_tree=_git(repo, "rev-parse", f"{release_commit}:src"),
+        single=single,
+        three=three,
+        context=context,
+    )
+    provenance = json.loads(files[FINAL_PROVENANCE_NAME])
+    provenance["runtime_source_commit"] = "f" * 40
+    files[FINAL_PROVENANCE_NAME] = json.dumps(provenance).encode()
+    archive = tmp_path / "hunterX_windows_0.5.2_final.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        for name, content in files.items():
+            output.writestr(name, content)
+
+    with pytest.raises(ValueError, match="runtime_source_commit must equal"):
+        verify_windows_archive(archive, VERSION, qualifier="final")
+
+
 def test_final_provenance_writer_and_checksum_set_are_exact(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo, runtime, release_commit, single, three, context = _release_repo(tmp_path)
     package = tmp_path / "package"
@@ -370,21 +431,20 @@ def test_final_provenance_writer_and_checksum_set_are_exact(
     (audit / SINGLE_EVIDENCE_NAME).write_bytes(single)
     (audit / THREE_EVIDENCE_NAME).write_bytes(three)
     (audit / CONTEXT_NAME).write_bytes(context)
-    base = tmp_path / RC3_WINDOWS_BASE_NAME
-    base.write_bytes(b"verified rc3")
-    monkeypatch.setattr(
-        "build_windows_from_base.sha256_file", lambda _path: RC3_WINDOWS_BASE_SHA256
-    )
-
-    provenance = write_final_provenance(
+    provenance = write_source_native_provenance(
         package,
+        release_root=repo,
+        repo_root=repo,
         version=VERSION,
         source_commit=release_commit,
-        base_archive=base,
-        repo_root=repo,
+        pyinstaller_version=EXPECTED_PYINSTALLER,
     )
     payload = json.loads(provenance.read_text(encoding="ascii"))
-    assert payload["runtime_source_commit"] == runtime
+    assert payload["schema"] == 2
+    assert payload["build_mode"] == "source_native"
+    assert payload["runtime_source_commit"] == release_commit
+    assert payload["qualification_runtime_source_commit"] == runtime
+    assert payload["windows_base_name"] is None
     assert payload["eight_hour_soak_verified"] is True
     assert payload["final_eligible"] is True
 
@@ -400,7 +460,6 @@ def test_final_provenance_writer_and_checksum_set_are_exact(
 
 def test_explicit_user_waiver_builds_without_claiming_eight_hour_pass(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo, _runtime, _release_commit, _single, _three, _context = _release_repo(tmp_path)
     for name in (SINGLE_EVIDENCE_NAME, THREE_EVIDENCE_NAME, CONTEXT_NAME):
@@ -428,17 +487,13 @@ def test_explicit_user_waiver_builds_without_claiming_eight_hour_pass(
     audit = package / Path(FINAL_AUDIT_PREFIX)
     audit.mkdir(parents=True)
     (audit / WAIVER_NAME).write_bytes(waiver)
-    base = tmp_path / RC3_WINDOWS_BASE_NAME
-    base.write_bytes(b"verified rc3")
-    monkeypatch.setattr(
-        "build_windows_from_base.sha256_file", lambda _path: RC3_WINDOWS_BASE_SHA256
-    )
-    provenance_path = write_final_provenance(
+    provenance_path = write_source_native_provenance(
         package,
+        release_root=repo,
+        repo_root=repo,
         version=VERSION,
         source_commit=release_commit,
-        base_archive=base,
-        repo_root=repo,
+        pyinstaller_version=EXPECTED_PYINSTALLER,
     )
     provenance = json.loads(provenance_path.read_text(encoding="ascii"))
     assert provenance["qualification_mode"] == "USER_WAIVED_8H_GATES"

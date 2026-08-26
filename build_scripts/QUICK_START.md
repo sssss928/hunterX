@@ -29,17 +29,20 @@ build_scripts\build_and_test.bat
 
 ✅ **自動化測試**
 - 執行 compileall、Ruff、mypy、完整 pytest、pip-audit 與 Bandit
-- 呼叫唯一正式建置入口 `scripts/build_windows.ps1`
-- 對 ZIP 執行 CRC、路徑安全、denylist、必要檔案與雙 runtime 隔離驗證
+- 呼叫唯一正式建置入口 `scripts/build_windows_final.ps1`
+- 從同一個乾淨 Git commit 直接執行 PyInstaller，不下載 RC2／RC3 ZIP
+- 對 Windows/source ZIP 執行 CRC、路徑安全、denylist、必要檔案、雙 runtime 隔離與逐位元 parity 驗證
 - 測試摘要保存至 `dist/release/test_report_{VERSION}.txt`
 
 ✅ **發布 ZIP 生成**
-- 自動打包成 `dist/release/hunterX_windows_{VERSION}_final.zip`
+- 自動建立 Windows ZIP、source ZIP 與 SHA-256 manifest
 - 版本號讀自 `src/hunter_metadata.py`，且與建置參數不一致時拒絕建置
 
 ### 輸出檔案
 
 - `dist/release/hunterX_windows_0.5.2_final.zip` - FINAL 發布 ZIP
+- `dist/release/hunterX_source_0.5.2_final.zip` - 同 commit 的 source ZIP
+- `dist/release/SHA256SUMS_v0.5.2_FINAL.txt` - 兩個 ZIP 的 SHA-256
 - `dist/release/test_report_0.5.2.txt` - 本機品質檢查摘要
 
 ### 執行時間

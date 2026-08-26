@@ -4,80 +4,90 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RELEASE_WORKFLOW = REPO_ROOT / ".github/workflows/release.yml"
 
 
-def test_release_workflow_has_required_triggers_permissions_and_artifact() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+def test_only_one_active_release_workflow_exists() -> None:
+    release_workflows = sorted(
+        path.name for path in (REPO_ROOT / ".github/workflows").glob("release*.yml")
+    )
 
-    assert 'tags:' in workflow
-    assert '"v*-rc3"' in workflow
+    assert release_workflows == ["release.yml"]
+
+
+def test_release_workflow_is_source_native_and_dry_run_by_default() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    folded = workflow.casefold()
+
+    assert "name: Release v0.5.2" in workflow
     assert "workflow_dispatch:" in workflow
-    assert "contents: read" in workflow
-    assert "contents: write" in workflow
-    assert '"HunterX v$Version RC3"' in workflow
-    assert "--prerelease" in workflow
-    assert 'Tag="v$Version-rc3"' in workflow
-    assert "artifact-name" in workflow
-    assert "checksum-name" in workflow
-    assert "validate-project-version" in workflow
-    assert "--platform source" in workflow
-    assert "publish-release" in workflow
-    assert "fetch-depth: 0" in workflow
+    assert "publish:" in workflow
+    assert "type: boolean" in workflow
+    assert "default: false" in workflow
+    assert "push:" not in workflow
+    assert "environment: production-release" in workflow
+    assert "scripts/build_windows_final.ps1" in workflow
     assert "scripts/build_source_archive.py" in workflow
-    assert "verify_release_archive.py pair" in workflow
-    assert "--windows-archive" in workflow
-    assert "--source-archive" in workflow
+    assert "verify_release_archive.py windows" in workflow
+    assert "verify_release_archive.py source" in workflow
+    assert workflow.count("verify_release_archive.py pair") >= 2
     assert "scripts/write_release_checksums.py" in workflow
-    assert "needs.validate.outputs.source_artifact_name" in workflow
-    assert "needs.validate.outputs.checksum_name" in workflow
+    assert 'Tag="v$Version"' in workflow
+    assert '"HunterX v$Version"' in workflow
+    assert "--prerelease" not in workflow
     assert "gh release create" in workflow
-    assert "gh release upload" in workflow
-    assert "--clobber" in workflow
-    assert "build-assets:" in workflow
+    assert "gh release upload" not in workflow
+    assert "refusing to replace an existing immutable release or tag" in folded
+    assert "contents: write" in workflow
     assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in workflow
     assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in workflow
-    assert "needs.build-assets.outputs.release_commit" in workflow
-    assert "--verify-manifest" in workflow
-    assert "rc2_release_tag:" in workflow
-    assert '$BaseReleaseTag = "v0.5.2-rc2"' in workflow
-    assert "gh release download $BaseReleaseTag" in workflow
-    assert "hunterX_windows_0.5.2_rc2.zip" in workflow
-    assert "47747a962cf5c4ae49654aec574ca64ac52c27032fc5b1ec1f70d83c3d09da48" in workflow
-    assert '-BaseArchive "dist/base/hunterX_windows_0.5.2_rc2.zip"' in workflow
-    assert '-Commit "${{ steps.commit.outputs.release_commit }}"' in workflow
-    assert "-Qualifier rc3" in workflow
-    assert "hunterX_windows_0.5.1.zip" not in workflow
-    assert "hunterX_windows_0.4.9.zip" not in workflow
-    assert "RELEASE_INPUT_VERSION: ${{ inputs.version }}" in workflow
-    assert '--input-version "${{ inputs.version }}"' not in workflow
-    assert "0.1.0" not in workflow
 
-    build_start = workflow.index("  build-assets:")
-    publish_start = workflow.index("  publish-release:")
-    build_section = workflow[build_start:publish_start]
-    publish_section = workflow[publish_start:]
-
-    # The Windows runner owns only the Windows binary.  Building the source
-    # archive on the Ubuntu publish runner avoids cross-OS git-archive byte
-    # conversion mismatches while still pinning everything to release_commit.
-    assert "Build source package" not in build_section
-    assert "write_release_checksums.py" not in build_section
-    assert "verified-windows-release-" in build_section
-    assert "Build source package from exact release commit" in publish_section
-    assert "Write release checksum manifest" in publish_section
-    assert "Verify RC3 release assets" in publish_section
-    assert publish_section.index("Build source package from exact release commit") < publish_section.index(
-        "Write release checksum manifest"
-    ) < publish_section.index("Verify RC3 release assets")
-
-    source_builder = (REPO_ROOT / "scripts/build_source_archive.py").read_text(encoding="utf-8")
-    assert "verify_source_archive" in source_builder
+    for forbidden in (
+        "gh release download",
+        "basearchive",
+        "rc2_release_tag",
+        "rc3_release_tag",
+        "hunterx_windows_0.5.2_rc2.zip",
+        "hunterx_windows_0.5.2_rc3.zip",
+    ):
+        assert forbidden not in folded
 
 
-def test_ci_workflow_covers_required_branch_families() -> None:
+def test_release_workflow_preserves_full_quality_and_qualification_gates() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "python -m compileall src tests scripts" in workflow
+    assert "ruff check src tests scripts" in workflow
+    assert "mypy" in workflow
+    assert "python -m pytest --cov-fail-under=30" in workflow
+    assert "pip-audit -r requirement.txt" in workflow
+    assert "bandit -r src scripts -lll -c pyproject.toml" in workflow
+    assert "FINAL_8H_SINGLE_INSTANCE_SOAK.json" in workflow
+    assert "FINAL_8H_THREE_NAMED_INSTANCES_SOAK.json" in workflow
+    assert "FINAL_QUALIFICATION_CONTEXT.json" in workflow
+    assert "FINAL_8H_SOAK_WAIVER.json" in workflow
+    assert "scripts/final_qualification.py verify" in workflow
+    assert "scripts/final_qualification.py verify-waiver" in workflow
+    assert "exactly one complete mode" in workflow
+    assert '--require-hashes -r requirements-lock-windows-py311.txt' in workflow
+    assert 'python-version: "3.11.9"' in workflow
+    assert "continue-on-error: true" not in workflow
+
+
+def test_ci_workflow_covers_release_branches_and_builds_real_package() -> None:
     workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
-    for branch in ["main", "feature/**", "fix/**", "chore/**", "refactor/**", "docs/**"]:
+    for branch in (
+        "main",
+        "feature/**",
+        "fix/**",
+        "chore/**",
+        "refactor/**",
+        "docs/**",
+        "develop",
+        "release/**",
+        "hotfix/**",
+    ):
         assert branch in workflow
     assert 'python-version: "3.11.9"' in workflow
     assert "ruff check src tests scripts" in workflow
@@ -86,84 +96,9 @@ def test_ci_workflow_covers_required_branch_families() -> None:
     assert "python -m compileall src tests scripts" in workflow
     assert "python -m pytest --cov-fail-under=30" in workflow
     assert "Windows runtime and release-contract smoke" in workflow
+    assert "Build source-native Windows package smoke" in workflow
+    assert "scripts/build_windows_final.ps1" in workflow
     assert "python src/nodriver_tixcraft.py --version" in workflow
     assert "python src/settings.py --version" in workflow
-    assert "tests/test_v052_final_release_profile.py" in workflow
     assert "gh release download" not in workflow
-    assert "build-base-v0.5.2-rc3" not in workflow
     assert "continue-on-error: true" not in workflow
-    assert workflow.count("retention-days: 3") == 2
-    assert "0.1.0" not in workflow
-
-
-def test_release_validation_compiles_all_python_and_uses_module_pytest() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-
-    assert "python -m compileall src tests scripts" in workflow
-    assert "python -m pytest" in workflow
-    assert "\n          pytest" not in workflow
-
-
-def test_final_workflow_is_fail_closed_and_publishes_official_tag() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/release-final.yml").read_text(
-        encoding="utf-8"
-    )
-
-    assert "workflow_dispatch:" in workflow
-    assert "push:" not in workflow
-    assert "--qualifier final" in workflow
-    assert "FINAL_8H_SINGLE_INSTANCE_SOAK.json" in workflow
-    assert "FINAL_8H_THREE_NAMED_INSTANCES_SOAK.json" in workflow
-    assert "FINAL_QUALIFICATION_CONTEXT.json" in workflow
-    assert "FINAL_8H_SOAK_WAIVER.json" in workflow
-    assert "scripts/final_qualification.py verify" in workflow
-    assert "scripts/final_qualification.py verify-waiver" in workflow
-    assert "exactly one complete mode" in workflow
-    assert "hunterX_windows_0.5.2_rc3.zip" in workflow
-    assert "f2ec4f918e50de5c78c2303a184ef54b0ce69d1ba2f87d34365d87be59d46cd9" in workflow
-    assert "verify_release_archive.py pair" in workflow
-    assert 'Tag="v$Version"' in workflow
-    assert '"HunterX v$Version"' in workflow
-    assert "--prerelease" not in workflow
-    assert "contents: write" in workflow
-    assert "gh release create" in workflow
-    assert "gh release upload" in workflow
-    assert "ExistingPrerelease" in workflow
-    assert "RELEASE_NOTES_v0.5.2_FINAL.md" in workflow
-    assert 'default: "build-base-v0.5.2-rc3"' in workflow
-
-
-def test_windows_build_script_requires_metadata_version_match() -> None:
-    script = (REPO_ROOT / "scripts/build_windows.ps1").read_text(encoding="utf-8")
-
-    validation = script.index("validate-project-version")
-    baseline_check = script.index("Test-Path -LiteralPath $ResolvedBaseArchive")
-    first_build = script.index("python scripts/build_windows_from_base.py")
-
-    assert "--metadata src/hunter_metadata.py" in script
-    assert "[string] $BaseArchive" in script
-    assert validation < first_build
-    assert baseline_check < first_build
-    assert "--base-archive $ResolvedBaseArchive" in script
-    assert "--commit $Commit" in script
-    assert "--qualifier $Qualifier" in script
-    assert "verify_windows_shell_zip.js" in script
-
-    baseline_builder = (REPO_ROOT / "scripts/build_windows_from_base.py").read_text(
-        encoding="utf-8"
-    )
-    assert "ROUND1_RC_ARCHIVE_NAME" in baseline_builder
-    assert "ROUND1_RC_SHA256" in baseline_builder
-    assert "require_build_qualifier" in baseline_builder
-    assert "resolve_clean_commit" in baseline_builder
-    assert "write_rc3_provenance" in baseline_builder
-    assert "write_final_provenance" in baseline_builder
-    assert "verify_archive_package" in baseline_builder
-    assert "stage_application_source" in baseline_builder
-    assert "repack_entrypoints" in baseline_builder
-    assert "verify_windows_archive" in baseline_builder
-
-    build_and_test = (REPO_ROOT / "build_scripts/build_and_test.bat").read_text(
-        encoding="utf-8"
-    )
-    assert "--require-hashes -r requirements-lock-windows-py311.txt" in build_and_test

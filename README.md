@@ -75,16 +75,21 @@ pip-audit -r requirement.txt
 
 ## Windows Build
 
-The release package is built with PyInstaller and contains the Windows executables plus shared assets:
+The official release package is built directly from one clean Git commit with
+Python 3.11.9 and PyInstaller 6.21.0. It does not download or inherit an RC2/RC3
+Windows archive:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -Version 0.5.2 -BaseArchive dist/base/hunterX_windows_0.5.2_rc3.zip -Commit <40-hex-clean-HEAD> -Qualifier final
+$Commit = (git rev-parse HEAD).Trim()
+powershell -ExecutionPolicy Bypass -File scripts/build_windows_final.ps1 -Version 0.5.2 -Commit $Commit
 ```
 
 Expected output:
 
 ```text
 dist/release/hunterX_windows_0.5.2_final.zip
+dist/release/hunterX_source_0.5.2_final.zip
+dist/release/SHA256SUMS_v0.5.2_FINAL.txt
 ```
 
 ## GitHub Releases

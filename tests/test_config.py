@@ -125,52 +125,54 @@ def test_release_helpers_and_packaged_readme_match_current_version() -> None:
     assert "hunterX_windows_0.5.2_final.zip" in release_readme
     assert "hunterX_windows_0.5.2_final.zip" in quick_start
     assert "hunterX_windows_%VERSION%_final.zip" in build_batch
-    assert "hunterX_windows_0.5.2_rc3.zip" in build_batch
-    assert "-Qualifier final" in build_batch
+    assert "hunterX_source_%VERSION%_final.zip" in build_batch
+    assert "SHA256SUMS_v%VERSION%_FINAL.txt" in build_batch
+    assert "rc2" not in build_batch.casefold()
+    assert "rc3" not in build_batch.casefold()
+    assert "BASE_ARCHIVE" not in build_batch
     assert "project-version --metadata src\\hunter_metadata.py" in build_batch
     assert "validate-project-version --version" in build_batch
-    assert "scripts\\build_windows.ps1" in build_batch
+    assert "scripts\\build_windows_final.ps1" in build_batch
     assert "verify_release_archive.py windows" in build_batch
+    assert "verify_release_archive.py source" in build_batch
+    assert "verify_release_archive.py pair" in build_batch
     assert "git describe --tags" not in build_batch
 
 
 def test_windows_build_isolates_runtimes_and_packages_license() -> None:
-    build_script = Path("scripts/build_windows.ps1").read_text(encoding="utf-8")
-    baseline_builder = Path("scripts/build_windows_from_base.py").read_text(
+    build_script = Path("scripts/build_windows_final.ps1").read_text(encoding="utf-8")
+    source_builder = Path("scripts/build_windows_final.py").read_text(
         encoding="utf-8"
     )
     build_batch = Path("build_scripts/build_and_test.bat").read_text(encoding="utf-8")
     bot_spec = Path("build_scripts/nodriver_tixcraft.spec").read_text(encoding="utf-8")
     settings_spec = Path("build_scripts/settings.spec").read_text(encoding="utf-8")
 
-    assert build_script.count("$LASTEXITCODE -ne 0") >= 3
-    assert "Verified HunterX Windows base archive is missing" in build_script
-    assert "python scripts/build_windows_from_base.py" in build_script
-    assert "--base-archive $ResolvedBaseArchive" in build_script
+    assert build_script.count("$LASTEXITCODE -ne 0") >= 5
+    assert "python scripts/build_windows_final.py" in build_script
     assert "--commit $Commit" in build_script
-    assert "--qualifier $Qualifier" in build_script
-    assert '"LEGAL_NOTICE.md"' in baseline_builder
-    assert '"LICENSE"' in baseline_builder
-    assert "extract_verified_baseline" in baseline_builder
-    assert "hunterX_windows_0.5.2_rc.zip" in baseline_builder
-    assert "stage_application_source" in baseline_builder
-    assert "repack_entrypoints" in baseline_builder
-    assert "verify_windows_archive" in baseline_builder
-    assert '"_nodriver_internal"' in baseline_builder
-    assert '"_settings_internal"' in baseline_builder
+    assert "--base-archive" not in build_script
+    assert "EXPECTED_PYTHON = (3, 11, 9)" in source_builder
+    assert 'EXPECTED_PYINSTALLER = "6.21.0"' in source_builder
+    assert '"build_mode": "source_native"' in source_builder
+    assert '"windows_base_name": None' in source_builder
+    assert "snapshot_release_source" in source_builder
+    assert "overlay_release_files" in source_builder
+    assert "verify_windows_archive" in source_builder
+    assert "verify_archive_package" in source_builder
+    assert '"_nodriver_internal"' not in source_builder
+    assert '"_settings_internal"' not in source_builder
+    assert "RUNTIME_LAYOUTS" in source_builder
     assert 'contents_directory=\'_nodriver_internal\'' in bot_spec
     assert 'contents_directory=\'_settings_internal\'' in settings_spec
     assert "python -m pytest" in build_batch
     assert "python -m pip_audit" in build_batch
-    assert 'BASE_ARCHIVE=dist\\base\\hunterX_windows_0.5.2_rc3.zip' in build_batch
-    assert '-BaseArchive "%BASE_ARCHIVE%"' in build_batch
-    assert '-Commit "%RELEASE_COMMIT%" -Qualifier final' in build_batch
+    assert '-Commit "%RELEASE_COMMIT%"' in build_batch
+    assert "BASE_ARCHIVE" not in build_batch
     assert 'dist\\nodriver_tixcraft\\_internal' not in build_script
     assert 'dist\\settings\\_internal' not in build_script
     assert "taskkill" not in build_batch.lower()
     assert "tasklist" not in build_batch.lower()
-    assert '"_internal"' not in baseline_builder
-    assert "Merge-DirectoryFailClosed" not in baseline_builder
     assert "Merging _internal directories" not in build_batch
     assert "playsound_pathex" not in bot_spec
     assert "playsound_pathex" not in settings_spec

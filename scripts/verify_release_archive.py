@@ -120,10 +120,10 @@ RC3_REQUIRED_DOCUMENTS = frozenset(
     }
 )
 FINAL_PROVENANCE_NAME = "FINAL_BUILD_PROVENANCE.json"
-FINAL_WINDOWS_BASE_NAME = "hunterX_windows_0.5.2_rc3.zip"
-FINAL_WINDOWS_BASE_SHA256 = (
-    "f2ec4f918e50de5c78c2303a184ef54b0ce69d1ba2f87d34365d87be59d46cd9"
-)
+FINAL_BUILD_MODE = "source_native"
+FINAL_PYTHON_VERSION = "3.11.9"
+FINAL_PYINSTALLER_VERSION = "6.21.0"
+FINAL_REQUIREMENTS_LOCK_NAME = "requirements-lock-windows-py311.txt"
 FINAL_CORE_REQUIRED_DOCUMENTS = RC3_REQUIRED_DOCUMENTS | frozenset(
     {
         "FINAL_RELEASE_AUDIT_v0.5.2.md",
@@ -402,11 +402,14 @@ def _verify_release_provenance(
             )
         manifest = _read_json_member(archive, entries, FINAL_PROVENANCE_NAME)
         final_expected_values: dict[str, object] = {
-            "schema": 1,
+            "schema": 2,
             "version": version,
             "qualifier": release_utils.FINAL_QUALIFIER,
-            "windows_base_name": FINAL_WINDOWS_BASE_NAME,
-            "windows_base_sha256": FINAL_WINDOWS_BASE_SHA256,
+            "build_mode": FINAL_BUILD_MODE,
+            "python_version": FINAL_PYTHON_VERSION,
+            "pyinstaller_version": FINAL_PYINSTALLER_VERSION,
+            "windows_base_name": None,
+            "windows_base_sha256": None,
             "clean_committed_snapshot": True,
         }
         if has_strict_evidence:
@@ -427,8 +430,10 @@ def _verify_release_provenance(
             final_expected_values.update(
                 {
                     "qualification_mode": "COMPLETED_8H_GATES",
-                    "runtime_source_commit": context["runtime_source_commit"],
-                    "runtime_src_tree": context["runtime_src_tree"],
+                    "qualification_runtime_source_commit": context[
+                        "runtime_source_commit"
+                    ],
+                    "qualification_runtime_src_tree": context["runtime_src_tree"],
                     "single_evidence_sha256": sha256_bytes(single_content),
                     "three_evidence_sha256": sha256_bytes(three_content),
                     "eight_hour_single_instance_soak_verified": True,
@@ -465,6 +470,28 @@ def _verify_release_provenance(
             raise ValueError(
                 "FINAL provenance source_commit does not match resolved source commit: "
                 f"{source_commit!r} != {resolved_commit!r}"
+            )
+        runtime_source_commit = manifest.get("runtime_source_commit")
+        if runtime_source_commit != source_commit:
+            raise ValueError(
+                "FINAL provenance runtime_source_commit must equal source_commit: "
+                f"{runtime_source_commit!r} != {source_commit!r}"
+            )
+        runtime_src_tree = manifest.get("runtime_src_tree")
+        if not isinstance(runtime_src_tree, str) or re.fullmatch(
+            r"[0-9a-f]{40}", runtime_src_tree
+        ) is None:
+            raise ValueError(
+                "FINAL provenance field 'runtime_src_tree' must be a lowercase "
+                "40-hex Git tree"
+            )
+        requirements_lock_sha256 = manifest.get("requirements_lock_sha256")
+        if not isinstance(requirements_lock_sha256, str) or re.fullmatch(
+            r"[0-9a-f]{64}", requirements_lock_sha256
+        ) is None:
+            raise ValueError(
+                "FINAL provenance field 'requirements_lock_sha256' must be a "
+                "lowercase SHA-256"
             )
         return manifest
     return None
@@ -935,6 +962,36 @@ def verify_release_pair(
             qualifier,
             resolved_commit=resolved_commit,
         )
+        if qualifier.casefold() == release_utils.FINAL_QUALIFIER:
+            if provenance is None:
+                raise ValueError("FINAL release pair is missing provenance")
+            expected_src_tree = subprocess.run(
+                ["git", "rev-parse", f"{resolved_commit}:src"],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="ascii",
+            ).stdout.strip().casefold()
+            _require_exact_manifest_value(
+                provenance,
+                "runtime_src_tree",
+                expected_src_tree,
+                profile="FINAL",
+            )
+            lock_member = (
+                f"hunterX-{version}/{FINAL_REQUIREMENTS_LOCK_NAME}"
+            )
+            if lock_member not in source_entries:
+                raise ValueError(
+                    f"FINAL source archive is missing {FINAL_REQUIREMENTS_LOCK_NAME}"
+                )
+            _require_exact_manifest_value(
+                provenance,
+                "requirements_lock_sha256",
+                sha256_bytes(source_archive.read(source_entries[lock_member])),
+                profile="FINAL",
+            )
         expected_runtime = _source_staged_runtime_files(
             source_archive,
             source_entries,

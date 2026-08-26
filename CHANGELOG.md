@@ -17,6 +17,10 @@
 - Publish the official v0.5.2 artifact set after the user explicitly waived
   the two eight-hour actual-browser gates. The waiver is recorded and machine
   verified; neither gate is represented as executed or passed.
+- Build the official Windows and source artifacts directly from the same clean
+  Git commit, with schema-2 provenance and no RC2/RC3 release-asset dependency.
+- Consolidate the two active release workflows into one manual, dry-run-first
+  v0.5.2 workflow that refuses to overwrite an existing official tag or release.
 
 ## v0.5.1
 

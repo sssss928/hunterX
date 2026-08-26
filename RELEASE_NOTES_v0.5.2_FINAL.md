@@ -19,16 +19,16 @@ and RC3.
 - Preserves user custom-dictionary parsing across supported text-question
   platforms, including hot reload, multiline online content, delimiter
   preservation, and safe JSON encoding for KKTIX.
-- Hardens the official build around a clean exact commit, byte-approved RC3
-  Windows base, fresh-extract native smoke, source/runtime parity, provenance,
-  and exact checksums.
+- Builds both isolated PyInstaller runtimes directly from one clean exact
+  commit, with fresh-extract native smoke, source/runtime parity, schema-2
+  source-native provenance, and exact checksums. No RC2/RC3 release asset is
+  required.
 - Keeps the Windows root concise: required executables/runtimes and end-user
   documents remain at the top level, while technical evidence is organized in
   `docs/release-audit/`; stale reports inherited from earlier bases are removed.
-- Makes normal pull-request and branch CI independent of an unpublished RC3
-  release asset. The optional automated FINAL rebuild remains manual-only, so
-  creating the official `v0.5.2` tag for a verified manual release cannot
-  trigger the former missing-base red叉 failure.
+- Consolidates RC3 and FINAL automation into one manual, dry-run-first v0.5.2
+  workflow. Publishing requires an explicit boolean input and refuses to
+  overwrite an existing immutable `v0.5.2` tag or Release.
 
 ## Important qualification statement
 

@@ -22,6 +22,8 @@ HunterX 0.5.2 FINAL Windows 成品包
 - assets、www：執行介面資源，不可刪除。
 - guide：使用說明。
 - docs/release-audit：技術驗證與發布稽核；一般使用不需開啟，但保留可追溯性。
+- FINAL_BUILD_PROVENANCE.json：記錄建立本套件的 exact commit、Python、
+  PyInstaller 與 dependency lock 雜湊；正式版直接由 source 建置，不依賴 RC2／RC3。
 - 根目錄只保留使用者說明、授權、版本資訊與必要 provenance，歷史報告不再
   散落於根目錄。
 
