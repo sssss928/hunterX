@@ -15,7 +15,7 @@ except Exception:
 import util
 import runtime_health
 from platform_contract import PlatformStateProxy
-from platforms.common_async import get_auto_reload_interval
+from platforms.common_async import get_auto_reload_interval, reload_safe_page_when_due
 from reload_guard import guarded_reload
 from runtime_health import guarded_get
 from nodriver_common import (
@@ -84,6 +84,7 @@ def _funone_state_defaults():
         "qty_reload_disabled_logged": False,
         "qty_sold_out_refreshing": False,
         "qty_fail_reason": None,
+        "area_refresh_required": False,
     }
 
 
@@ -489,6 +490,10 @@ async def nodriver_funone_area_auto_select(tab, url, config_dict):
         bool: True if ticket type selected
     """
     debug = util.create_debug_logger(config_dict)
+    # ``False`` also means "this is already the quantity page" in the legacy
+    # API.  Track whether actual zone boxes were present so the caller can
+    # distinguish that valid transition from a failed area/inventory scan.
+    _state["area_refresh_required"] = False
 
     # Get area keyword from config
     area_keyword = config_dict.get("area_auto_select", {}).get("area_keyword", "")
@@ -575,6 +580,8 @@ async def nodriver_funone_area_auto_select(tab, url, config_dict):
                 _state["last_area_count"] = 0
             return False
 
+        _state["area_refresh_required"] = True
+
         # Only print ticket count when it changes
         if _state.get("last_area_count") != len(tickets):
             debug.log(f"[FUNONE] Found {len(tickets)} ticket types")
@@ -650,15 +657,10 @@ async def nodriver_funone_area_auto_select(tab, url, config_dict):
         (function() {{
             // First try FunOne-specific zone_box elements
             const zoneBoxes = document.querySelectorAll('.zone_box');
-            if (zoneBoxes.length > 0) {{
-                const availableBoxes = [];
-                for (const box of zoneBoxes) {{
-                    if (!box.classList.contains('disabled')) {{
-                        availableBoxes.push(box);
-                    }}
-                }}
-                if (availableBoxes.length > {original_index}) {{
-                    availableBoxes[{original_index}].click();
+            if (zoneBoxes.length > {original_index}) {{
+                const targetBox = zoneBoxes[{original_index}];
+                if (!targetBox.classList.contains('disabled')) {{
+                    targetBox.click();
                     return true;
                 }}
             }}
@@ -689,6 +691,7 @@ async def nodriver_funone_area_auto_select(tab, url, config_dict):
 
         if clicked:
             debug.log(f"[FUNONE] Ticket type {target_index} clicked")
+            _state["area_refresh_required"] = False
 
         return clicked
 
@@ -1957,6 +1960,7 @@ async def nodriver_funone_main(tab, url, config_dict):
             if step == 1:
                 # Step 1: Ticket type/quantity selection
                 # FunOne: purchase_choose_ticket_no_map is a combined ticket selection + quantity page
+                auto_reload_interval = get_auto_reload_interval(config_dict, default=2)
 
                 # Check if on purchase_choose_ticket_no_map page - apply sold-out detection
                 if '/purchase_choose_ticket_no_map/' in url:
@@ -1989,8 +1993,6 @@ async def nodriver_funone_main(tab, url, config_dict):
                     # Check sold-out status first
                     is_sold_out, remaining, ticket_info = await nodriver_funone_check_sold_out(tab, config_dict)
                     ticket_number = config_dict.get("ticket_number", 2)
-                    auto_reload_interval = get_auto_reload_interval(config_dict, default=2)
-
                     # Handle sold-out or insufficient tickets
                     if is_sold_out or (remaining > 0 and remaining < ticket_number):
                         # Increment retry counter (no limit - keep refreshing until tickets available)
@@ -2037,6 +2039,17 @@ async def nodriver_funone_main(tab, url, config_dict):
                 # If no area selected (no zone_box elements), this is a quantity selection page
                 # Proceed to set quantity, agreements, and submit
                 if not area_selected:
+                    if _state.get("area_refresh_required", False):
+                        await reload_safe_page_when_due(
+                            tab,
+                            config_dict,
+                            _state,
+                            "area_selection",
+                            "funone_area_inventory_retry",
+                            default=2,
+                        )
+                        return tab
+
                     # Set ticket number
                     qty_set = await nodriver_funone_assign_ticket_number(tab, config_dict)
 
@@ -2126,6 +2139,17 @@ async def nodriver_funone_main(tab, url, config_dict):
                 area_selected = await nodriver_funone_area_auto_select(tab, url, config_dict)
 
                 if not area_selected:
+                    if _state.get("area_refresh_required", False):
+                        await reload_safe_page_when_due(
+                            tab,
+                            config_dict,
+                            _state,
+                            "area_selection",
+                            "funone_area_inventory_retry",
+                            default=2,
+                        )
+                        return tab
+
                     # Maybe we're already past area selection, try quantity
                     await nodriver_funone_assign_ticket_number(tab, config_dict)
                     await tab.sleep(0.3)

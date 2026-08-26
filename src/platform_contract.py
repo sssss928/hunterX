@@ -292,6 +292,11 @@ class DeclarativePlatformAdapter:
         route = parsed.path or "/"
         if parsed.query:
             route = f"{route}?{parsed.query}"
+        # SPA ticketing sites (notably HKTicketing Type02) encode their real
+        # route in the fragment.  Keep the leading ``#`` so an ordinary path
+        # cannot accidentally satisfy a fragment-only policy marker.
+        if parsed.fragment:
+            route = f"{route}#{parsed.fragment}"
         return route.casefold()
 
     def matches_url(self, url: str) -> bool:
@@ -324,7 +329,13 @@ class DeclarativePlatformAdapter:
         if matches:
             # Most-specific route wins. Protection wins equal-specificity ties.
             return max(matches, key=lambda item: (item[0], item[1]))[2]
-        if self._route(url).rstrip("/") in {path.casefold().rstrip("/") for path in self.home_paths}:
+        # Home-path identity is based on the HTTP route only.  An unrelated
+        # fragment must not make a root document unknown, while fragment
+        # markers above may still explicitly classify supported SPA routes.
+        document_route = route.split("#", 1)[0]
+        if document_route.rstrip("/") in {
+            path.casefold().rstrip("/") for path in self.home_paths
+        }:
             return PageClass.HOME
         if self.detect_retryable_failure(url, text):
             return PageClass.REJECTED_ERROR

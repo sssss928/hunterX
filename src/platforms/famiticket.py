@@ -10,7 +10,7 @@ import util
 import runtime_health
 from platform_contract import PlatformStateProxy
 from runtime_health import guarded_get
-from platforms.common_async import get_auto_reload_interval
+from platforms.common_async import get_auto_reload_interval, reload_safe_page_when_due
 from nodriver_common import (
     CONST_FROM_TOP_TO_BOTTOM,
     CONST_MAXBOT_ANSWER_ONLINE_FILE,
@@ -740,10 +740,14 @@ async def nodriver_fami_home_auto_select(tab, config_dict, last_activity_url):
             is_area_selected = await nodriver_fami_date_to_area(tab, config_dict, last_activity_url)
 
             if not is_area_selected:
-                auto_reload_interval = get_auto_reload_interval(config_dict, default=5)
-                if auto_reload_interval > 0:
-                    debug.log(f"[FAMI HOME] No area selected, waiting {auto_reload_interval}s before retry...")
-                    await tab.sleep(auto_reload_interval)
+                await reload_safe_page_when_due(
+                    tab,
+                    config_dict,
+                    _state,
+                    "area_selection",
+                    "famiticket_area_inventory_retry",
+                    default=5,
+                )
 
             return is_area_selected
         return False

@@ -134,15 +134,19 @@ runpy.run_path(_HUNTERX_ENTRY, run_name="__main__")
 '''
 
 
+def _replacement_payload(entry_name: str) -> bytes:
+    source = _bootstrap_source(entry_name)
+    code = compile(source, f"{entry_name}.py", "exec", optimize=0)
+    return marshal.dumps(code)
+
+
 def _write_archive(
     output_archive: Path,
     entries: list[RawEntry],
     cookie: ArchiveCookie,
     entry_name: str,
 ) -> None:
-    source = _bootstrap_source(entry_name)
-    code = compile(source, f"{entry_name}.py", "exec", optimize=0)
-    replacement = marshal.dumps(code)
+    replacement = _replacement_payload(entry_name)
     replacement_count = 0
 
     writer = CArchiveWriter.__new__(CArchiveWriter)
@@ -227,8 +231,10 @@ def repack(executable: Path, output: Path, entry_name: str) -> Path:
     verify_reader = CArchiveReader(str(output))
     if verify_reader.options != CArchiveReader(str(executable)).options:
         raise ValueError("PyInstaller archive options changed during repack")
-    replacement_code = marshal.loads(verify_reader.extract(entry_name))
-    if "app_src" not in replacement_code.co_names and "app_src" not in replacement_code.co_consts:
+    # Compare the exact payload produced in this process.  This is stronger
+    # than deserializing archive-controlled bytes with ``marshal.loads`` and
+    # avoids executing or decoding data from the candidate executable.
+    if verify_reader.extract(entry_name) != _replacement_payload(entry_name):
         raise ValueError("replacement entrypoint verification failed")
     if output.read_bytes()[:2] != b"MZ":
         raise ValueError("output is not a Windows PE executable")

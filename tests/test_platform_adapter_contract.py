@@ -108,6 +108,72 @@ def test_adapter_rejects_hostname_spoofing(adapter):
     assert adapter_for_url(f"https://{adapter.hosts[0]}.attacker.invalid/event/1") is None
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    (
+        (
+            "https://hkt.hkticketing.com/hant/#/allEvents/detail/123",
+            PageClass.DATE,
+        ),
+        (
+            "https://hkt.hkticketing.com/hant/#/allEvents/detail/selectTicket?activityId=123",
+            PageClass.AREA,
+        ),
+        (
+            "https://hkt.hkticketing.com/hant/#/confirmOrder?eventIds=123",
+            PageClass.ORDER,
+        ),
+        (
+            "https://hkt.hkticketing.com/hant/#/generateSeat/order-123",
+            PageClass.PAYMENT,
+        ),
+    ),
+)
+def test_hkticketing_spa_fragment_routes_are_explicitly_classified(url, expected):
+    adapter = adapter_for_url(url)
+    assert adapter is not None
+    assert adapter.classify_page(url) is expected
+
+
+def test_fragment_parsing_does_not_make_unlisted_kktix_fragment_safe():
+    url = "https://example.kktix.cc/#/booking"
+    adapter = adapter_for_url(url)
+    assert adapter is not None
+    assert adapter.classify_page(url) is PageClass.HOME
+    assert not adapter.is_safe_watch_page(url)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    (
+        (
+            "https://tickets.funone.io/activity/activity_detail/1",
+            PageClass.DATE,
+        ),
+        (
+            "https://tickets.funone.io/purchase_choose_ticket_no_map/1",
+            PageClass.AREA,
+        ),
+        (
+            "https://tickets.funone.io/purchase_waiting_jump/1",
+            PageClass.QUEUE,
+        ),
+        (
+            "https://tickets.funone.io/purchase_fill_form/1",
+            PageClass.ORDER,
+        ),
+        (
+            "https://tickets.funone.io/purchase_checkout/1",
+            PageClass.PAYMENT,
+        ),
+    ),
+)
+def test_funone_real_runtime_routes_are_explicitly_classified(url, expected):
+    adapter = adapter_for_url(url)
+    assert adapter is not None
+    assert adapter.classify_page(url) is expected
+
+
 def test_runtime_state_backfill_and_reset_are_owned_and_bounded():
     state = PlatformRuntimeState()
     state.leak_scheduler.history.extend(str(index) for index in range(1000))

@@ -11,6 +11,7 @@ from platforms.common_async import (
     get_auto_reload_interval,
     is_interval_due,
     js_string_literal,
+    reload_safe_page_when_due,
     run_cpu_bound,
 )
 
@@ -103,3 +104,67 @@ def test_get_auto_reload_interval_normalizes_user_values() -> None:
     assert get_auto_reload_interval({"advanced": {"auto_reload_page_interval": "bad"}}, default=2.0) == 2.0
     assert get_auto_reload_interval({"advanced": {"auto_reload_page_interval": "nan"}}, default=2.0) == 2.0
     assert get_auto_reload_interval({"advanced": {"auto_reload_page_interval": "inf"}}, default=2.0) == 2.0
+
+
+class _ReloadTarget:
+    url = "https://www.famiticket.com.tw/Home/Activity/1"
+
+
+class _ReloadTab:
+    target = _ReloadTarget()
+
+
+@pytest.mark.asyncio
+async def test_safe_page_reload_arms_then_runs_at_configured_deadline(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, Any] | None]] = []
+
+    async def fake_guarded_reload(tab, reason="", config_dict=None, **_kwargs):
+        assert tab is reload_tab
+        calls.append((reason, config_dict))
+        return True
+
+    monkeypatch.setattr("reload_guard.guarded_reload", fake_guarded_reload)
+    reload_tab = _ReloadTab()
+    state: dict[str, Any] = {}
+    config = {"advanced": {"auto_reload_page_interval": 2}}
+
+    assert not await reload_safe_page_when_due(
+        reload_tab, config, state, "area", "inventory_retry", now=10.0
+    )
+    assert not await reload_safe_page_when_due(
+        reload_tab, config, state, "area", "inventory_retry", now=11.999
+    )
+    assert await reload_safe_page_when_due(
+        reload_tab, config, state, "area", "inventory_retry", now=12.0
+    )
+    assert calls == [("inventory_retry", config)]
+
+
+@pytest.mark.asyncio
+async def test_safe_page_reload_zero_disables_and_url_change_rearms(monkeypatch) -> None:
+    calls = 0
+
+    async def fake_guarded_reload(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return True
+
+    monkeypatch.setattr("reload_guard.guarded_reload", fake_guarded_reload)
+    reload_tab = _ReloadTab()
+    reload_tab.target = _ReloadTarget()
+    state: dict[str, Any] = {}
+
+    disabled = {"advanced": {"auto_reload_page_interval": 0}}
+    assert not await reload_safe_page_when_due(
+        reload_tab, disabled, state, "area", "inventory_retry", now=10.0
+    )
+
+    enabled = {"advanced": {"auto_reload_page_interval": 1}}
+    assert not await reload_safe_page_when_due(
+        reload_tab, enabled, state, "area", "inventory_retry", now=20.0
+    )
+    reload_tab.target.url = "https://www.famiticket.com.tw/Home/Activity/2"
+    assert not await reload_safe_page_when_due(
+        reload_tab, enabled, state, "area", "inventory_retry", now=21.0
+    )
+    assert calls == 0

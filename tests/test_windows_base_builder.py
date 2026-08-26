@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from repack_pyinstaller_entrypoint import _replacement_payload
 from build_windows_from_base import (
     BASELINE_ARCHIVE_NAME,
     RC2_PROVENANCE_NAME,
@@ -22,6 +23,14 @@ from build_windows_from_base import (
     stage_application_source,
     write_rc2_provenance,
 )
+
+
+def test_repacked_entrypoint_payload_is_deterministic_and_source_native() -> None:
+    first = _replacement_payload("nodriver_tixcraft")
+    second = _replacement_payload("nodriver_tixcraft")
+
+    assert first == second
+    assert b"app_src" in first
 
 
 def test_stage_application_source_copies_only_runtime_inputs(tmp_path: Path) -> None:

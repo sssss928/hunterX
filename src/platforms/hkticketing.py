@@ -16,7 +16,7 @@ from zendriver import cdp
 import util
 import runtime_health
 from platform_contract import PlatformStateProxy
-from platforms.common_async import get_auto_reload_interval
+from platforms.common_async import get_auto_reload_interval, reload_safe_page_when_due
 from reload_guard import guarded_reload
 from runtime_health import guarded_get
 from nodriver_common import (
@@ -2047,6 +2047,14 @@ async def nodriver_hkticketing_type02_performance(tab, config_dict):
         is_date_assigned = True  # Skip if disabled
 
     if not is_date_assigned:
+        await reload_safe_page_when_due(
+            tab,
+            config_dict,
+            _state,
+            "type02_selection",
+            "hkticketing_type02_inventory_retry",
+            default=5,
+        )
         return False
 
     # Step 2: Area selection
@@ -2061,6 +2069,14 @@ async def nodriver_hkticketing_type02_performance(tab, config_dict):
         is_area_assigned = True  # Skip if disabled
 
     if not is_area_assigned:
+        await reload_safe_page_when_due(
+            tab,
+            config_dict,
+            _state,
+            "type02_selection",
+            "hkticketing_type02_inventory_retry",
+            default=5,
+        )
         return False
 
     # Step 3: Ticket number selection (after area is selected, quantity selector appears)
@@ -2068,13 +2084,29 @@ async def nodriver_hkticketing_type02_performance(tab, config_dict):
     is_ticket_number_set = await nodriver_hkticketing_type02_ticket_number_select(tab, config_dict)
     debug.log(f"[HKTICKETING TYPE02] Ticket number set: {is_ticket_number_set}")
     if not is_ticket_number_set:
+        await reload_safe_page_when_due(
+            tab,
+            config_dict,
+            _state,
+            "type02_selection",
+            "hkticketing_type02_inventory_retry",
+            default=5,
+        )
         return False
 
     # Step 4: Click next button
     await asyncio.sleep(0.3)
-    await nodriver_hkticketing_type02_next_button_press(tab, config_dict)
-
-    return True
+    is_next_clicked = await nodriver_hkticketing_type02_next_button_press(tab, config_dict)
+    if not is_next_clicked:
+        await reload_safe_page_when_due(
+            tab,
+            config_dict,
+            _state,
+            "type02_selection",
+            "hkticketing_type02_inventory_retry",
+            default=5,
+        )
+    return is_next_clicked
 
 async def nodriver_hkticketing_type02_confirm_order(tab, config_dict):
     """
@@ -2379,7 +2411,19 @@ async def nodriver_hkticketing_performance(tab, config_dict, domain_name):
 
     if is_price_assign_by_bot:
         # Set ticket number
-        await nodriver_hkticketing_ticket_number_auto_select(tab, config_dict)
+        is_ticket_number_assigned = await nodriver_hkticketing_ticket_number_auto_select(
+            tab, config_dict
+        )
+        if not is_ticket_number_assigned:
+            await reload_safe_page_when_due(
+                tab,
+                config_dict,
+                _state,
+                "type01_selection",
+                "hkticketing_type01_inventory_retry",
+                default=5,
+            )
+            return is_price_assign_by_bot
         await asyncio.sleep(0.1)
 
         # Select delivery option (not for Galaxy Macau)
@@ -2388,7 +2432,29 @@ async def nodriver_hkticketing_performance(tab, config_dict, domain_name):
             await asyncio.sleep(0.1)
 
         # Click next button
-        await nodriver_hkticketing_next_button_press(tab, config_dict)
+        is_next_clicked = await nodriver_hkticketing_next_button_press(tab, config_dict)
+        if not is_next_clicked:
+            await reload_safe_page_when_due(
+                tab,
+                config_dict,
+                _state,
+                "type01_selection",
+                "hkticketing_type01_inventory_retry",
+                default=5,
+            )
+    else:
+        # The area selector already reports whether its inventory snapshot is
+        # stale, but the legacy caller discarded that signal.  A failed safe
+        # selection scan is enough to arm the bounded retry; ReloadGuard still
+        # blocks any post-submit or unclassified route.
+        await reload_safe_page_when_due(
+            tab,
+            config_dict,
+            _state,
+            "type01_selection",
+            "hkticketing_type01_inventory_retry",
+            default=5,
+        )
 
     return is_price_assign_by_bot
 

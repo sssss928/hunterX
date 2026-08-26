@@ -12,6 +12,7 @@ from zendriver import cdp
 import util
 import runtime_health
 from platform_contract import PlatformStateProxy
+from platforms.common_async import reload_safe_page_when_due
 from nodriver_common import (
     check_and_handle_pause,
     play_sound_while_ordering,
@@ -840,9 +841,15 @@ async def nodriver_fansigo_main(tab, url, config_dict):
     page_type = get_fansigo_page_type(url)
 
     # Log page type change
-    if page_type != _state.get("last_page_type"):
+    previous_page_type = _state.get("last_page_type")
+    if page_type != previous_page_type:
         debug.log(f"[FANSIGO] Page type: {page_type}")
         _state["last_page_type"] = page_type
+        # Returning from checkout/order result to the same show URL starts a
+        # new selection attempt.  Do not let the previous quantity marker skip
+        # the area/inventory scan.
+        if page_type == "show":
+            _state["qty_set_url"] = None
 
     # Handle login page - try account login or cookie + reload
     if page_type == "login":
@@ -906,7 +913,17 @@ async def nodriver_fansigo_main(tab, url, config_dict):
         # If quantity already set for this URL, skip to checkout only
         if _state.get("qty_set_url") == url:
             await asyncio.sleep(0.3)
-            await nodriver_fansigo_click_checkout(tab, config_dict)
+            checkout_clicked = await nodriver_fansigo_click_checkout(tab, config_dict)
+            if not checkout_clicked:
+                _state["qty_set_url"] = None
+                await reload_safe_page_when_due(
+                    tab,
+                    config_dict,
+                    _state,
+                    "show_selection",
+                    "fansigo_show_inventory_retry",
+                    default=5,
+                )
             return tab
 
         # Select section (returns index, or -1 if failed)
@@ -921,7 +938,35 @@ async def nodriver_fansigo_main(tab, url, config_dict):
                 _state["qty_set_url"] = url
                 # Click checkout
                 await asyncio.sleep(0.3)
-                await nodriver_fansigo_click_checkout(tab, config_dict)
+                checkout_clicked = await nodriver_fansigo_click_checkout(tab, config_dict)
+                if not checkout_clicked:
+                    _state["qty_set_url"] = None
+                    await reload_safe_page_when_due(
+                        tab,
+                        config_dict,
+                        _state,
+                        "show_selection",
+                        "fansigo_show_inventory_retry",
+                        default=5,
+                    )
+            else:
+                await reload_safe_page_when_due(
+                    tab,
+                    config_dict,
+                    _state,
+                    "show_selection",
+                    "fansigo_show_inventory_retry",
+                    default=5,
+                )
+        else:
+            await reload_safe_page_when_due(
+                tab,
+                config_dict,
+                _state,
+                "show_selection",
+                "fansigo_show_inventory_retry",
+                default=5,
+            )
 
         return tab
 

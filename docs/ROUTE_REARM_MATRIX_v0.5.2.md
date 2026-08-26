@@ -35,19 +35,44 @@ keeping actual ticket forms protected.
 | Registry family | Safe route examples | Protected route examples | Important classification detail |
 |---|---|---|---|
 | TixCraft / IndieVox / Ticketmaster | `/activity/detail/` → ACTIVITY; `/activity/game/` → DATE; `/ticket/area/` → AREA | `/ticket/ticket/`, `/ticket/check-captcha/`, `/ticket/verify/` → TICKET; `/ticket/order` → ORDER; checkout/payment | A TixCraft `PageClass.TICKET` never rearms |
-| KKTIX | `/events/...` → DATE; `/registrations/new` → AREA | `/orders/`, non-new `/registrations/`, checkout/payment | A fragment alone such as `#/booking` is not positive path evidence; an otherwise unclassified route remains UNKNOWN |
+| KKTIX | `/events/...` → DATE; `/registrations/new` → AREA | `/orders/`, non-new `/registrations/`, checkout/payment | A fragment alone such as `#/booking` is not positive safe-route evidence; on the root document it remains HOME and cannot rearm |
 | TicketPlus | `/activity/` → DATE; `/order/...` → AREA | `/ticket/` → TICKET; `/confirm/`, `/confirmseat/`, checkout/payment | TicketPlus calls its inventory page “order”, but the adapter deliberately classifies it AREA |
 | iBon | activity/activityinfo/event → DATE; performance and `/ticket/` → AREA | order/checkout/payment | iBon `/ticket/` is an inventory AREA, not `PageClass.TICKET` |
 | KHAM / ticket.com.tw / UDN | `/event/` → ACTIVITY; product/activity → DATE; performance/salestable → AREA | ticketseat/seat.aspx → TICKET; UTK0206/order/checkout/payment | Longest matching route rule wins |
 | FamiTicket | activity → DATE; `/home/activity` and `/ticket` → AREA | order/checkout/payment | FamiTicket `/ticket` is adapter-classified AREA |
-| FunOne | events → DATE; sales and `/ticket` → AREA | orders/checkout/payment | FunOne `/ticket` is adapter-classified AREA |
+| FunOne | events/activity detail → DATE; sales, `/ticket`, `purchase_choose_ticket` and `purchase_choose_area` → AREA | waiting jump → QUEUE; fill form → ORDER; purchase checkout/payment | FunOne's real `purchase_*` routes are explicit; the reserved-order and queue routes never reload |
 | FANSI GO | events/event → DATE; `/ticket` → AREA | orders/checkout/payment | FANSI GO `/ticket` is adapter-classified AREA |
 | Cityline | event → DATE; performance/UTS internet route → AREA | `/secure/selection` → TICKET; order/checkout/payment | Cityline secure selection is protected |
-| HKTicketing / Galaxy Macau / Ticketek | events/event → DATE; performance and `/secure/selection` → AREA | order/checkout/payment | The same-looking secure-selection path is AREA for this family, unlike Cityline |
+| HKTicketing / Galaxy Macau / Ticketek | events/event → DATE; performance and `/secure/selection` → AREA; Type02 `#/allEvents/detail/selectTicket` → AREA | order/checkout/payment; Type02 `#/confirmOrder` → ORDER and `#/generateSeat` → PAYMENT | SPA fragments are part of this adapter's explicit route policy; the same-looking secure-selection path is AREA for this family, unlike Cityline |
 
 Every registered platform also classifies explicit queue routes as `QUEUE`.
 Unmatched paths on a registered host are `UNKNOWN`; both are fail-closed for
 reload and rearm.
+
+## Safe-page inventory retry behavior
+
+All automatic refresh requests pass through `reload_safe_page_when_due` or an
+equivalent established platform helper and finally through `guarded_reload`.
+The first unsuccessful scan arms a monotonic deadline; it does not block the
+main dispatch loop. A later scan may reload only when the configured interval
+has elapsed. `auto_reload_page_interval = 0` remains an explicit opt-out.
+
+| Registry family | Retry owner after no ticket/area progress |
+|---|---|
+| TixCraft / IndieVox / Ticketmaster | Existing TixCraft due-reload and positive area-health path |
+| KKTIX | Existing KKTIX due-reload, no-ticket and rejected-modal recovery path |
+| TicketPlus | Existing TicketPlus due-reload with partial-refresh/full-reload fallback |
+| iBon | Existing guarded area/no-ticket reload and navigation recovery paths |
+| KHAM / ticket.com.tw / UDN | Existing KHAM due-reload for no-match/sold-out area scans |
+| FamiTicket | Shared non-blocking safe-page deadline after an unsuccessful area scan |
+| FunOne | WebSocket refresh remains preferred for quantity inventory; a proven zone-selection failure uses the shared safe-page deadline |
+| FANSI GO | Shared safe-page deadline after section, quantity or pre-checkout failure; returning from checkout clears the stale quantity marker |
+| Cityline | Shared safe-page deadline after date, area, quantity or pre-submit button failure on the performance route |
+| HKTicketing / Galaxy Macau / Ticketek | Shared safe-page deadline for Type01 and Type02 date/area/quantity/pre-submit failures |
+
+The helper does not have a recovery override. Therefore `TICKET`, `ORDER`,
+`CHECKOUT`, `PAYMENT`, `QUEUE` and known-host `UNKNOWN` routes remain blocked
+even if a platform module calls the helper incorrectly.
 
 ## Attempt and state reset invariants
 
@@ -75,6 +100,13 @@ reload and rearm.
   - exact submit ownership;
   - unknown outcome fail-closed;
   - attempt-N stale watcher cannot mutate rearmed attempt N+1.
+- `tests/test_cross_platform_safe_refresh.py`
+  - dynamic no-progress wiring for FamiTicket, Cityline, FANSI GO, FunOne and
+    both HKTicketing route families;
+  - FunOne area/quantity state disambiguation and exact DOM-index selection.
+- `tests/test_common_async.py` and `tests/test_platform_adapter_contract.py`
+  - non-blocking deadline, disabled interval and URL-change behavior;
+  - HKTicketing fragment and FunOne real-route positive/negative boundaries.
 
 These are deterministic source/fixture tests. They do not claim live
 third-party purchase, payment, queue, CAPTCHA, challenge or risk-control

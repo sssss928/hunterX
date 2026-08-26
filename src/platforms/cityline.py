@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 import util
 import runtime_health
 from platform_contract import PlatformStateProxy
-from platforms.common_async import get_auto_reload_interval
+from platforms.common_async import get_auto_reload_interval, reload_safe_page_when_due
 from reload_guard import guarded_reload
 from runtime_health import guarded_get
 from tab_ownership import TabTransition, register_owned_tab
@@ -726,27 +726,58 @@ async def nodriver_cityline_performance(tab, config_dict):
     if await check_and_handle_pause(config_dict):
         return False
 
-    is_date_assigned = False
-    is_price_assigned = False
-    is_button_clicked = False
-
     # Step 1: Date selection (if date buttons exist on this page)
     is_date_assigned = await nodriver_cityline_date_auto_select(tab, config_dict)
+    if not is_date_assigned:
+        await reload_safe_page_when_due(
+            tab,
+            config_dict,
+            _state,
+            "performance_selection",
+            "cityline_performance_inventory_retry",
+            default=5,
+        )
+        return False
 
-    if is_date_assigned:
-        # Step 2: Area selection
-        is_price_assigned = await nodriver_cityline_area_auto_select(tab, config_dict)
+    # Step 2: Area selection
+    is_price_assigned = await nodriver_cityline_area_auto_select(tab, config_dict)
+    if not is_price_assigned:
+        await reload_safe_page_when_due(
+            tab,
+            config_dict,
+            _state,
+            "performance_selection",
+            "cityline_performance_inventory_retry",
+            default=5,
+        )
+        return False
 
-        if is_price_assigned:
-            # Step 3: Ticket number selection
-            is_ticket_number_assigned = await nodriver_cityline_ticket_number_auto_select(tab, config_dict)
+    # Step 3: Ticket number selection
+    is_ticket_number_assigned = await nodriver_cityline_ticket_number_auto_select(tab, config_dict)
+    if not is_ticket_number_assigned:
+        await reload_safe_page_when_due(
+            tab,
+            config_dict,
+            _state,
+            "performance_selection",
+            "cityline_performance_inventory_retry",
+            default=5,
+        )
+        return False
 
-            if is_ticket_number_assigned:
-                # Step 4: Press next button
-                await asyncio.sleep(random.uniform(0.3, 0.7))
-                is_button_clicked = await nodriver_cityline_next_button_press(tab)
-
-    # Return True only if next button was successfully clicked
+    # Step 4: Press next button.  A missing/disabled pre-submit button is still
+    # on the adapter-proven performance page, so the same guarded retry applies.
+    await asyncio.sleep(random.uniform(0.3, 0.7))
+    is_button_clicked = await nodriver_cityline_next_button_press(tab)
+    if not is_button_clicked:
+        await reload_safe_page_when_due(
+            tab,
+            config_dict,
+            _state,
+            "performance_selection",
+            "cityline_performance_inventory_retry",
+            default=5,
+        )
     return is_button_clicked
 
 async def nodriver_cityline_check_shopping_basket(tab, config_dict):

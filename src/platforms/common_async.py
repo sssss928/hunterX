@@ -13,7 +13,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any, TypeVar, overload
 
 from run_modes import get_effective_reload_interval
@@ -143,3 +143,62 @@ def get_auto_reload_interval(config_dict: dict[str, Any] | None, default: float 
     remain blocked by ReloadGuard.
     """
     return float(get_effective_reload_interval(config_dict, default))
+
+
+async def reload_safe_page_when_due(
+    tab: Any,
+    config_dict: dict[str, Any] | None,
+    state: MutableMapping[str, Any],
+    state_key: str,
+    reason: str,
+    *,
+    default: float = 0.0,
+    now: float | None = None,
+) -> bool:
+    """Reload a repeatedly unsuccessful *safe* selection page when due.
+
+    The first failed scan arms a deadline instead of blocking the platform loop.
+    Later scans reload only after the configured interval.  ``guarded_reload``
+    remains the final authority, so queue, ticket, order, checkout, payment and
+    unknown routes on known ticketing hosts still fail closed.
+
+    ``state_key`` gives each platform flow an independent deadline.  A URL or
+    interval change automatically rearms it, which avoids carrying a stale
+    deadline across navigation or a live settings update.
+    """
+    interval = get_auto_reload_interval(config_dict, default=default)
+    prefix = f"_safe_page_reload:{state_key}"
+    identity_key = f"{prefix}:identity"
+    deadline_key = f"{prefix}:deadline"
+
+    if interval <= 0:
+        state.pop(identity_key, None)
+        state.pop(deadline_key, None)
+        return False
+
+    target = getattr(tab, "target", None)
+    url = str(getattr(target, "url", "") or "")
+    identity = (url, interval)
+    current = time.monotonic() if now is None else _finite_float(now, "now must be finite")
+
+    if state.get(identity_key) != identity:
+        state[identity_key] = identity
+        state[deadline_key] = current + interval
+        return False
+
+    try:
+        deadline = float(state.get(deadline_key, current + interval))
+    except (TypeError, ValueError):
+        deadline = current + interval
+    if not math.isfinite(deadline) or current < deadline:
+        if not math.isfinite(deadline):
+            state[deadline_key] = current + interval
+        return False
+
+    # Advance before awaiting so concurrent dispatch iterations cannot start a
+    # second reload.  The shared refresh coordinator supplies another
+    # single-flight/minimum-interval boundary at the browser-action layer.
+    state[deadline_key] = current + interval
+    from reload_guard import guarded_reload
+
+    return bool(await guarded_reload(tab, reason=reason, config_dict=config_dict))
