@@ -12,6 +12,15 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 import release_utils
+from final_qualification import (
+    CONTEXT_NAME as FINAL_QUALIFICATION_CONTEXT_NAME,
+    SINGLE_EVIDENCE_NAME as FINAL_SINGLE_EVIDENCE_NAME,
+    THREE_EVIDENCE_NAME as FINAL_THREE_EVIDENCE_NAME,
+    WAIVER_NAME as FINAL_WAIVER_NAME,
+    sha256_bytes,
+    validate_context_bytes,
+    validate_waiver_bytes,
+)
 
 
 DENIED_PARTS = frozenset(
@@ -94,7 +103,77 @@ RC3_REQUIRED_DOCUMENTS = frozenset(
         "FINAL_LAYER_ARTIFACT_VERIFICATION.md",
         "FINAL_LAYER_FAILURE_FIX_LOG.md",
         "FINAL_LAYER_REQUIREMENT_TRACEABILITY.md",
+        "FINAL_PRE_RELEASE_AUDIT_v0.5.2.md",
+        "FINAL_ROOT_CAUSE_REPORT_v0.5.2.md",
+        "FINAL_IMPLEMENTATION_DIFF_v0.5.2.md",
+        "FINAL_TEST_REPORT_v0.5.2.md",
+        "FINAL_PERFORMANCE_REPORT_v0.5.2.md",
+        "FINAL_RC2_RC3_FINAL_PERFORMANCE_COMPARISON.md",
+        "FINAL_USER_DICTIONARY_ACCEPTANCE_v0.5.2.md",
+        "FINAL_BROWSER_RECOVERY_AUDIT_v0.5.2.md",
+        "FINAL_MULTI_INSTANCE_AUDIT_v0.5.2.md",
+        "FINAL_LONG_RUN_REPORT_v0.5.2.md",
+        "FINAL_GITHUB_ACTIONS_AUDIT_v0.5.2.md",
+        "FINAL_ARTIFACT_VERIFICATION_v0.5.2.md",
+        "FINAL_REQUIREMENT_TRACEABILITY_v0.5.2.md",
+        "FINAL_FAILURE_FIX_LOG_v0.5.2.md",
     }
+)
+FINAL_PROVENANCE_NAME = "FINAL_BUILD_PROVENANCE.json"
+FINAL_WINDOWS_BASE_NAME = "hunterX_windows_0.5.2_rc3.zip"
+FINAL_WINDOWS_BASE_SHA256 = (
+    "f2ec4f918e50de5c78c2303a184ef54b0ce69d1ba2f87d34365d87be59d46cd9"
+)
+FINAL_CORE_REQUIRED_DOCUMENTS = RC3_REQUIRED_DOCUMENTS | frozenset(
+    {
+        "FINAL_RELEASE_AUDIT_v0.5.2.md",
+        "RELEASE_NOTES_v0.5.2_FINAL.md",
+    }
+)
+FINAL_ROOT_DOCUMENTS = frozenset(
+    {
+        "BUILD_INFO.txt",
+        "CHANGELOG.md",
+        "LEGAL_NOTICE.md",
+        "LICENSE",
+        "README_Release.txt",
+        "RELEASE_NOTES_v0.5.2_FINAL.md",
+        "WINDOWS_PACKAGE_zh-TW.txt",
+    }
+)
+FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS = frozenset(
+    {
+        "IMPLEMENTATION_DIFF_v0.5.2_FINAL.md",
+        "PLATFORM_COMPLETION_LATCH_AUDIT.md",
+        "REFRESH_OWNERSHIP_MATRIX_v0.5.2.md",
+        "ROUTE_REARM_MATRIX_v0.5.2.md",
+        "TEST_REPORT_v0.5.2_FINAL.md",
+    }
+)
+FINAL_AUDIT_PREFIX = "docs/release-audit/"
+FINAL_ALLOWED_TOP_LEVEL = frozenset(
+    {
+        *FINAL_ROOT_DOCUMENTS,
+        FINAL_PROVENANCE_NAME,
+        "_nodriver_internal",
+        "_settings_internal",
+        "assets",
+        "docs",
+        "guide",
+        "nodriver_tixcraft.exe",
+        "settings.exe",
+        "www",
+    }
+)
+FINAL_STRICT_QUALIFICATION_DOCUMENTS = frozenset(
+    {
+        FINAL_SINGLE_EVIDENCE_NAME,
+        FINAL_THREE_EVIDENCE_NAME,
+        FINAL_QUALIFICATION_CONTEXT_NAME,
+    }
+)
+FINAL_REQUIRED_DOCUMENTS = (
+    FINAL_CORE_REQUIRED_DOCUMENTS | FINAL_STRICT_QUALIFICATION_DOCUMENTS
 )
 STAGED_RUNTIME_DIRECTORIES = frozenset({"assets", "platforms", "www"})
 RUNTIME_APP_SRC_PREFIXES = (
@@ -105,6 +184,10 @@ RUNTIME_LAYOUT_PREFIXES = (
     "_nodriver_internal/",
     "_settings_internal/",
 )
+
+
+def _final_audit_member(name: str) -> str:
+    return f"{FINAL_AUDIT_PREFIX}{name}"
 
 
 def _normalized_file_entries(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
@@ -291,22 +374,98 @@ def _verify_release_provenance(
         return manifest
 
     if normalized_qualifier == "final":
-        provenance_name = (
-            RC3_PROVENANCE_NAME
-            if RC3_PROVENANCE_NAME in entries
-            else RC2_PROVENANCE_NAME
-        )
-        if provenance_name not in entries:
+        final_document_members = {
+            name
+            if name in FINAL_ROOT_DOCUMENTS
+            else _final_audit_member(name)
+            for name in FINAL_CORE_REQUIRED_DOCUMENTS
+        } | {
+            _final_audit_member(name)
+            for name in FINAL_SUPPLEMENTAL_AUDIT_DOCUMENTS
+        }
+        missing_documents = sorted(final_document_members - set(entries))
+        if missing_documents:
             raise ValueError(
-                "Final archive is forbidden without explicit soak and eligibility provenance"
+                f"FINAL Windows archive missing required documents: {missing_documents}"
             )
-        manifest = _read_json_member(archive, entries, provenance_name)
-        if manifest.get("eight_hour_soak_verified") is not True:
+        strict_members = {
+            _final_audit_member(name)
+            for name in FINAL_STRICT_QUALIFICATION_DOCUMENTS
+        }
+        waiver_member = _final_audit_member(FINAL_WAIVER_NAME)
+        has_strict_evidence = strict_members.issubset(entries)
+        has_waiver = waiver_member in entries
+        if has_strict_evidence == has_waiver:
             raise ValueError(
-                "Final archive is forbidden unless eight_hour_soak_verified is true"
+                "FINAL archive must contain exactly one qualification mode: "
+                "complete eight-hour evidence or explicit user waiver"
             )
-        if manifest.get("final_eligible") is not True:
-            raise ValueError("Final archive is forbidden unless final_eligible is true")
+        manifest = _read_json_member(archive, entries, FINAL_PROVENANCE_NAME)
+        final_expected_values: dict[str, object] = {
+            "schema": 1,
+            "version": version,
+            "qualifier": release_utils.FINAL_QUALIFIER,
+            "windows_base_name": FINAL_WINDOWS_BASE_NAME,
+            "windows_base_sha256": FINAL_WINDOWS_BASE_SHA256,
+            "clean_committed_snapshot": True,
+        }
+        if has_strict_evidence:
+            single_content = archive.read(
+                entries[_final_audit_member(FINAL_SINGLE_EVIDENCE_NAME)]
+            )
+            three_content = archive.read(
+                entries[_final_audit_member(FINAL_THREE_EVIDENCE_NAME)]
+            )
+            context_content = archive.read(
+                entries[_final_audit_member(FINAL_QUALIFICATION_CONTEXT_NAME)]
+            )
+            context = validate_context_bytes(
+                context_content=context_content,
+                single_content=single_content,
+                three_content=three_content,
+            )
+            final_expected_values.update(
+                {
+                    "qualification_mode": "COMPLETED_8H_GATES",
+                    "runtime_source_commit": context["runtime_source_commit"],
+                    "runtime_src_tree": context["runtime_src_tree"],
+                    "single_evidence_sha256": sha256_bytes(single_content),
+                    "three_evidence_sha256": sha256_bytes(three_content),
+                    "eight_hour_single_instance_soak_verified": True,
+                    "eight_hour_three_named_instances_soak_verified": True,
+                    "eight_hour_soak_verified": True,
+                    "final_eligible": True,
+                    "user_approved_final_without_eight_hour_soak": False,
+                }
+            )
+        else:
+            waiver_content = archive.read(entries[waiver_member])
+            validate_waiver_bytes(waiver_content)
+            final_expected_values.update(
+                {
+                    "qualification_mode": "USER_WAIVED_8H_GATES",
+                    "waiver_sha256": sha256_bytes(waiver_content),
+                    "eight_hour_single_instance_soak_verified": False,
+                    "eight_hour_three_named_instances_soak_verified": False,
+                    "eight_hour_soak_verified": False,
+                    "final_eligible": False,
+                    "user_approved_final_without_eight_hour_soak": True,
+                }
+            )
+        for name, expected in final_expected_values.items():
+            _require_exact_manifest_value(manifest, name, expected, profile="FINAL")
+        source_commit = manifest.get("source_commit")
+        if not isinstance(source_commit, str) or re.fullmatch(
+            r"[0-9a-f]{40}", source_commit
+        ) is None:
+            raise ValueError(
+                "FINAL provenance field 'source_commit' must be a lowercase 40-hex commit"
+            )
+        if resolved_commit is not None and source_commit != resolved_commit:
+            raise ValueError(
+                "FINAL provenance source_commit does not match resolved source commit: "
+                f"{source_commit!r} != {resolved_commit!r}"
+            )
         return manifest
     return None
 
@@ -319,7 +478,7 @@ def verify_windows_archive(
 ) -> dict[str, object]:
     archive, entries = _open_checked_zip(path)
     try:
-        required = {
+        legacy_required = {
             "BUILD_INFO.txt",
             "CHANGELOG.md",
             "CODEX_MASTER_PROMPT_v0.5.2.md",
@@ -352,9 +511,49 @@ def verify_windows_archive(
             "_settings_internal/app_src/settings.py",
             "_settings_internal/python311.dll",
         }
+        final_runtime_required = {
+            *FINAL_ROOT_DOCUMENTS,
+            "nodriver_tixcraft.exe",
+            "settings.exe",
+            "guide/README.md",
+            "www/css/settings.css",
+            "www/favicon.ico",
+            "www/settings.html",
+            "www/settings.js",
+            "_nodriver_internal/base_library.zip",
+            "_nodriver_internal/app_src/hunter_metadata.py",
+            "_nodriver_internal/app_src/nodriver_tixcraft.py",
+            "_nodriver_internal/app_src/platforms/ticketplus.py",
+            "_nodriver_internal/python311.dll",
+            "_settings_internal/base_library.zip",
+            "_settings_internal/app_src/hunter_metadata.py",
+            "_settings_internal/app_src/settings.py",
+            "_settings_internal/python311.dll",
+        }
+        is_final = qualifier is not None and qualifier.casefold() == "final"
+        required = final_runtime_required if is_final else legacy_required
         missing = sorted(required - set(entries))
         if missing:
             raise ValueError(f"Windows archive missing required files: {missing}")
+        if is_final:
+            top_level = {PurePosixPath(name).parts[0] for name in entries}
+            unexpected_top_level = sorted(top_level - FINAL_ALLOWED_TOP_LEVEL)
+            if unexpected_top_level:
+                raise ValueError(
+                    "FINAL Windows archive contains unexpected top-level items: "
+                    f"{unexpected_top_level}"
+                )
+            unexpected_docs = sorted(
+                name
+                for name in entries
+                if PurePosixPath(name).parts[0] == "docs"
+                and not name.startswith(FINAL_AUDIT_PREFIX)
+            )
+            if unexpected_docs:
+                raise ValueError(
+                    "FINAL Windows archive contains files outside the release-audit "
+                    f"document folder: {unexpected_docs}"
+                )
         if any(
             PurePosixPath(name).parts[0].casefold() == "_internal"
             for name in entries
@@ -543,11 +742,6 @@ def verify_source_archive(
     working_tree: bool = False,
     qualifier: str | None = None,
 ) -> dict[str, object]:
-    if qualifier is not None and qualifier.casefold() == "final":
-        raise ValueError(
-            "Final source archives are disabled while the 8-hour soak gate is unverified; "
-            "both Final-Layer gates must pass"
-        )
     expected_prefix = f"hunterX-{version}/"
     expected_name = _expected_archive_name("source", version, qualifier)
     if path.name != expected_name:
@@ -597,6 +791,39 @@ def verify_source_archive(
                 f"missing={len(missing)} extra={len(extra)} "
                 f"mismatch={len(mismatch)}"
             )
+        if qualifier is not None and qualifier.casefold() == release_utils.FINAL_QUALIFIER:
+            missing_final_documents = sorted(
+                name
+                for name in FINAL_CORE_REQUIRED_DOCUMENTS
+                if f"{expected_prefix}{name}" not in entries
+            )
+            if missing_final_documents:
+                raise ValueError(
+                    "FINAL source archive missing required documents: "
+                    f"{missing_final_documents}"
+                )
+            qualification_names = {
+                "single": f"{expected_prefix}{FINAL_SINGLE_EVIDENCE_NAME}",
+                "three": f"{expected_prefix}{FINAL_THREE_EVIDENCE_NAME}",
+                "context": f"{expected_prefix}{FINAL_QUALIFICATION_CONTEXT_NAME}",
+            }
+            has_strict_evidence = all(name in entries for name in qualification_names.values())
+            waiver_name = f"{expected_prefix}{FINAL_WAIVER_NAME}"
+            has_waiver = waiver_name in entries
+            if has_strict_evidence == has_waiver:
+                raise ValueError(
+                    "FINAL source archive must contain exactly one qualification mode"
+                )
+            if has_strict_evidence:
+                validate_context_bytes(
+                    context_content=archive.read(entries[qualification_names["context"]]),
+                    single_content=archive.read(entries[qualification_names["single"]]),
+                    three_content=archive.read(entries[qualification_names["three"]]),
+                    repo_root=repo_root,
+                    release_commit=commit,
+                )
+            else:
+                validate_waiver_bytes(archive.read(entries[waiver_name]))
         return {
             "archive": str(path.resolve()),
             "source": "working-tree" if working_tree else f"commit:{commit}",

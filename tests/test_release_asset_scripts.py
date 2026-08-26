@@ -222,7 +222,9 @@ def test_build_source_archive_rejects_commit_metadata_version_mismatch(
         )
 
 
-def test_build_source_archive_rc2_rejects_dirty_or_final_profile(tmp_path: Path) -> None:
+def test_build_source_archive_final_fails_closed_without_qualification(
+    tmp_path: Path,
+) -> None:
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -248,7 +250,7 @@ def test_build_source_archive_rc2_rejects_dirty_or_final_profile(tmp_path: Path)
         text=True,
     ).strip()
 
-    with pytest.raises(ValueError, match="requires qualifier 'rc2'"):
+    with pytest.raises(ValueError, match="FINAL source archive missing required documents"):
         build_source_archive(
             version="0.5.2",
             output=tmp_path / "hunterX_source_0.5.2_final.zip",

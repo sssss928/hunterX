@@ -44,8 +44,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirement.txt -r requirements-dev.txt
 
-      - name: Compile source
-        run: python -m compileall src
+      - name: Compile source, tests, and scripts
+        run: python -m compileall src tests scripts
 
       - name: Ruff
         run: ruff check src tests scripts
@@ -54,7 +54,7 @@ jobs:
         run: mypy
 
       - name: Pytest with coverage
-        run: pytest --cov-fail-under=30
+        run: python -m pytest --cov-fail-under=30
 
       - name: Dependency audit
         run: pip-audit -r requirement.txt
@@ -64,11 +64,10 @@ jobs:
 
       - name: Benchmarks
         run: |
-          pytest tests/benchmarks --benchmark-enable --benchmark-only --benchmark-json=benchmark.json
+          python -m pytest tests/benchmarks --benchmark-enable --benchmark-only --benchmark-json=benchmark.json
           python scripts/render_benchmark_chart.py --input benchmark.json --output benchmark-summary.md
 
       - name: Upload coverage
-        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
@@ -79,7 +78,6 @@ jobs:
           retention-days: 3
 
       - name: Upload benchmark report
-        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: benchmark-report
@@ -90,7 +88,7 @@ jobs:
           retention-days: 3
 
   windows-build-smoke:
-    name: Windows PyInstaller smoke
+    name: Windows runtime and release-contract smoke
     runs-on: windows-latest
 
     steps:
@@ -112,77 +110,38 @@ jobs:
           python -m pip install --require-hashes -r requirements-lock-windows-py311.txt
           python -m pip install -r requirements-dev.txt
 
-      - name: Read project version
-        id: project
+      - name: Verify Windows entrypoints and PowerShell syntax
         shell: pwsh
-        run: |
-          $VersionOutput = & python scripts/release_utils.py project-version --metadata src/hunter_metadata.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to read the project version (python exit code $LASTEXITCODE)."
-          }
-
-          $Version = ($VersionOutput | Out-String).Trim()
-
-          $ArtifactNameOutput = & python scripts/release_utils.py artifact-name --version $Version --qualifier rc3
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to resolve the artifact name (python exit code $LASTEXITCODE)."
-          }
-
-          $ArtifactName = ($ArtifactNameOutput | Out-String).Trim()
-          $Commit = (git rev-parse HEAD).Trim()
-
-          "version=$Version" >> $env:GITHUB_OUTPUT
-          "artifact_name=$ArtifactName" >> $env:GITHUB_OUTPUT
-          "commit=$Commit" >> $env:GITHUB_OUTPUT
-
-      - name: Download and verify v0.5.2 RC2 Windows base
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-
-          $BaseDir = "dist/base"
-          $BaseArchive = Join-Path $BaseDir "hunterX_windows_0.5.2_rc2.zip"
-          $ExpectedSha256 = "47747a962cf5c4ae49654aec574ca64ac52c27032fc5b1ec1f70d83c3d09da48"
-
-          New-Item -ItemType Directory -Path $BaseDir -Force | Out-Null
-
-          gh release download v0.5.2-rc2 `
-            --repo "${{ github.repository }}" `
-            --pattern "hunterX_windows_0.5.2_rc2.zip" `
-            --dir $BaseDir `
-            --clobber
-
-          if (-not (Test-Path -LiteralPath $BaseArchive -PathType Leaf)) {
-            throw "The v0.5.2 RC2 Windows base was not downloaded."
+          $ExpectedVersion = "HunterX (0.5.2)"
+          $BotVersion = (& python src/nodriver_tixcraft.py --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $BotVersion -cne $ExpectedVersion) {
+            throw "nodriver_tixcraft.py version smoke failed: '$BotVersion'."
+          }
+          $SettingsVersion = (& python src/settings.py --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $SettingsVersion -cne $ExpectedVersion) {
+            throw "settings.py version smoke failed: '$SettingsVersion'."
+          }
+          $Tokens = $null
+          $Errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/build_windows.ps1"),
+            [ref]$Tokens,
+            [ref]$Errors
+          )
+          if ($Errors.Count -ne 0) {
+            throw "build_windows.ps1 parse failed: $($Errors -join '; ')"
           }
 
-          $ActualSha256 = (
-            Get-FileHash -LiteralPath $BaseArchive -Algorithm SHA256
-          ).Hash.ToLowerInvariant()
-
-          if ($ActualSha256 -cne $ExpectedSha256) {
-            throw "The v0.5.2 RC2 Windows base SHA-256 mismatch. Expected '$ExpectedSha256', got '$ActualSha256'."
-          }
-
-          Write-Host "Verified HunterX v0.5.2 RC2 Windows base."
-          Write-Host "SHA-256: $ActualSha256"
-
-      - name: Build Windows package
-        shell: pwsh
+      - name: Run Windows-specific runtime and release regressions
         run: |
-          ./scripts/build_windows.ps1 `
-            -Version "${{ steps.project.outputs.version }}" `
-            -BaseArchive "dist/base/hunterX_windows_0.5.2_rc2.zip" `
-            -Commit "${{ steps.project.outputs.commit }}" `
-            -Qualifier rc3
-
-      - name: Upload build smoke artifact
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ steps.project.outputs.artifact_name }}
-          path: dist/release/${{ steps.project.outputs.artifact_name }}
-          if-no-files-found: error
-          retention-days: 3
+          python -m pytest --no-cov `
+            tests/test_config.py `
+            tests/test_metadata.py `
+            tests/test_release_archive_verifier.py `
+            tests/test_release_asset_scripts.py `
+            tests/test_v052_final_layer_terminal_boundary.py `
+            tests/test_v052_final_layer_user_dictionary.py `
+            tests/test_v052_final_release_profile.py `
+            tests/test_windows_base_builder.py

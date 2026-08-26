@@ -16,6 +16,7 @@ from build_windows_from_base import (
     build_from_verified_baseline,
     extract_verified_baseline,
     overlay_release_files,
+    prune_final_package_root,
     promote_staged_package,
     snapshot_release_source,
     stage_application_source,
@@ -97,7 +98,7 @@ def test_rc2_baseline_accepts_only_verified_round1_layout(
     assert (destination / "nodriver_tixcraft.exe").read_bytes().startswith(b"MZ")
 
 
-def test_rc2_windows_builder_rejects_final_and_unqualified_output_early(
+def test_windows_builder_rejects_unqualified_output_early(
     tmp_path: Path,
 ) -> None:
     arguments = {
@@ -107,12 +108,6 @@ def test_rc2_windows_builder_rejects_final_and_unqualified_output_early(
         "project_root": tmp_path / "project",
         "commit": "a" * 40,
     }
-    with pytest.raises(ValueError, match="requires qualifier 'rc2'"):
-        build_from_verified_baseline(
-            **arguments,
-            output=tmp_path / "hunterX_windows_0.5.2_final.zip",
-            qualifier="final",
-        )
     with pytest.raises(ValueError, match="output must be named"):
         build_from_verified_baseline(
             **arguments,
@@ -203,16 +198,52 @@ def test_snapshot_release_source_rejects_non_git_source_tree(tmp_path: Path) -> 
         )
 
 
-def test_rc2_overlay_fails_closed_when_required_report_is_missing(tmp_path: Path) -> None:
+def test_release_overlay_fails_closed_when_required_report_is_missing(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     package_root = tmp_path / "package"
     project_root.mkdir()
     package_root.mkdir()
 
-    with pytest.raises(ValueError, match="requires qualifier 'rc2'"):
+    with pytest.raises(FileNotFoundError, match="FINAL end-user document"):
         overlay_release_files(project_root, package_root, qualifier="final")
     with pytest.raises(FileNotFoundError, match="ROUND2_FINAL_CROSS_AUDIT"):
         overlay_release_files(project_root, package_root, qualifier="rc2")
+
+
+def test_final_root_pruning_preserves_runtime_and_removes_historical_clutter(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    for directory in (
+        "_nodriver_internal",
+        "_settings_internal",
+        "assets",
+        "guide",
+        "www",
+    ):
+        (package / directory).mkdir()
+    (package / "nodriver_tixcraft.exe").write_bytes(b"MZbot")
+    (package / "settings.exe").write_bytes(b"MZsettings")
+    (package / "FINAL_AUDIT_v0.5.2.md").write_text("historical", encoding="utf-8")
+    (package / "RC3_BUILD_PROVENANCE.json").write_text("{}", encoding="ascii")
+
+    prune_final_package_root(package)
+
+    assert (package / "nodriver_tixcraft.exe").is_file()
+    assert (package / "settings.exe").is_file()
+    assert (package / "_nodriver_internal").is_dir()
+    assert not (package / "FINAL_AUDIT_v0.5.2.md").exists()
+    assert not (package / "RC3_BUILD_PROVENANCE.json").exists()
+
+
+def test_final_root_pruning_rejects_unknown_directory(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "mystery-runtime").mkdir()
+
+    with pytest.raises(ValueError, match="unexpected root directory"):
+        prune_final_package_root(package)
 
 
 def test_rc2_provenance_records_exact_base_and_non_final_status(

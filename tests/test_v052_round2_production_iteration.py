@@ -598,3 +598,64 @@ def test_soak_and_outer_loop_share_iteration_without_manual_lifecycle() -> None:
     assert outer_loop.count("await run_runtime_iteration(") == 1
     assert "nodriver_current_url(" not in outer_loop
     assert "platform_engine.before_dispatch(" not in outer_loop
+
+
+def test_soak_run_id_provides_bounded_cross_process_profile_isolation() -> None:
+    from v052_browser_soak import _isolated_worker_command, _soak_instance_name
+
+    assert _soak_instance_name("1") == "v052-soak-1"
+    assert _soak_instance_name("1", "final-single") == (
+        "v052-soak-final-single-1"
+    )
+    assert _soak_instance_name("1", "final-three") == (
+        "v052-soak-final-three-1"
+    )
+    assert _soak_instance_name("1", "final-single") != (
+        _soak_instance_name("1", "final-three")
+    )
+    with pytest.raises(ValueError, match="soak run id"):
+        _soak_instance_name("1", "../shared-profile")
+
+    command = _isolated_worker_command(
+        SimpleNamespace(duration=15.0, run_id="final-three"),
+        worker_instance="2",
+        output=Path("worker-2.json"),
+        stop_file=Path("STOP"),
+    )
+    assert command.count("--instances") == 1
+    assert command[command.index("--instances") + 1] == "1"
+    assert command[command.index("--worker-instance") + 1] == "2"
+    assert command[command.index("--run-id") + 1] == "final-three"
+    assert command[command.index("--stop-file") + 1] == "STOP"
+
+
+@pytest.mark.asyncio
+async def test_soak_waits_for_exact_fixture_api_before_first_action() -> None:
+    from v052_browser_soak import _wait_for_synthetic_page
+
+    class LoadingTab:
+        def __init__(self) -> None:
+            self.probes = 0
+
+        async def evaluate(self, expression: str) -> bool:
+            assert "window.syntheticTicket.push" in expression
+            assert "window.syntheticTicket.replace" in expression
+            assert "window.syntheticTicket.rerender" in expression
+            self.probes += 1
+            return self.probes >= 2
+
+    tab = LoadingTab()
+    await _wait_for_synthetic_page(tab, timeout=1.0)
+    assert tab.probes == 2
+
+
+@pytest.mark.asyncio
+async def test_soak_fixture_readiness_times_out_fail_closed() -> None:
+    from v052_browser_soak import _wait_for_synthetic_page
+
+    class MissingFixtureTab:
+        async def evaluate(self, _expression: str) -> bool:
+            return False
+
+    with pytest.raises(TimeoutError, match="fixture did not become ready"):
+        await _wait_for_synthetic_page(MissingFixtureTab(), timeout=0.0)
