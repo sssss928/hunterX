@@ -15,6 +15,7 @@ on:
       - docs
       - docs/**
       - develop
+      - develop/**
       - release/**
       - hotfix/**
   pull_request:
